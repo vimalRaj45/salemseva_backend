@@ -124,55 +124,6 @@ async function authRoutes(fastify, options) {
     }
     return { success: true, message: 'Logged out successfully' };
   });
-
-  // 4. Technician List helper for Switcher & Onboarding
-  fastify.get('/technicians', async (req, reply) => {
-    try {
-      const res = await query(`
-        SELECT 
-          id, 
-          full_name as name, 
-          phone, 
-          primary_trade as trade, 
-          is_online, 
-          is_kyc_verified, 
-          rating_avg, 
-          rating_count, 
-          jobs_completed_count,
-          service_area,
-          current_lat,
-          current_lng
-        FROM technicians 
-        ORDER BY is_online DESC, rating_avg DESC
-      `);
-      return {
-        success: true,
-        technicians: res.rows
-      };
-    } catch (e) {
-      fastify.log.error(e);
-      return reply.status(500).send({ success: false, error: e.message });
-    }
-  });
-
-  // 5. Customer List helper
-  fastify.get('/customers', async (req, reply) => {
-    try {
-      const res = await query(`
-        SELECT id, full_name as name, phone, email, default_address, created_at 
-        FROM users 
-        ORDER BY created_at DESC 
-        LIMIT 50
-      `);
-      return {
-        success: true,
-        customers: res.rows
-      };
-    } catch (e) {
-      fastify.log.error(e);
-      return reply.status(500).send({ success: false, error: e.message });
-    }
-  });
 }
 
 module.exports = authRoutes;
