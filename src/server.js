@@ -20,6 +20,7 @@ fastify.register(require('./routes/webrtc.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/partner.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/wallet.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/admin.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/auth.routes'), { prefix: '/api/v1' });
 
 
 // Health & System Telemetry Check
