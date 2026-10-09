@@ -1,0 +1,23 @@
+{
+  "name": "salemseva-backend",
+  "version": "1.0.0",
+  "description": "SalemSeva Fastify Backend API with Neon PostgreSQL, Razorpay Route & Google Translate",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "seed": "node src/db/seed.js",
+    "truncate": "node src/db/truncate.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/sensible": "^5.5.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.26.2",
+    "pg": "^8.11.3",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
