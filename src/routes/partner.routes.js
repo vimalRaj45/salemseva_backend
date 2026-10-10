@@ -125,6 +125,24 @@ async function partnerRoutes(fastify, options) {
       const { isOnline, phone = '+919443288901', technicianId } = req.body;
       const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
 
+      // Enforce KYC Gate: Unverified technicians cannot go online
+      if (Boolean(isOnline)) {
+        let techCheck;
+        if (technicianId) {
+          techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE id = $1::uuid`, [technicianId]);
+        } else {
+          techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1`, [cleanPhone]);
+        }
+
+        if (techCheck.rows.length > 0 && !techCheck.rows[0].is_kyc_verified) {
+          return reply.status(403).send({
+            success: false,
+            code: 'KYC_PENDING',
+            error: 'KYC Verification Pending: You cannot go online until your Aadhaar and trade documents are verified by Salem Central Ops.'
+          });
+        }
+      }
+
       let result;
       if (technicianId) {
         result = await query(`
@@ -217,13 +235,11 @@ async function partnerRoutes(fastify, options) {
           full_name, phone, primary_trade, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), TRUE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END)
+        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
           upi_vpa = EXCLUDED.upi_vpa,
-          is_kyc_verified = TRUE,
-          is_online = TRUE,
           aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
           aadhaar_uploaded_at = COALESCE(EXCLUDED.aadhaar_uploaded_at, technicians.aadhaar_uploaded_at)
         RETURNING *;

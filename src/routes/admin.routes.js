@@ -15,6 +15,7 @@ async function adminRoutes(fastify, options) {
             t.id, t.full_name, t.phone, t.primary_trade, t.years_experience,
             t.rating_avg, t.rating_count, t.jobs_completed_count, t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
+            t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
             (
               SELECT count(*) 
               FROM bookings b 
@@ -118,22 +119,52 @@ async function adminRoutes(fastify, options) {
     }
   });
 
-  // 4. Verify / Approve Technician KYC
+  // 4. Verify / Approve or Reject Technician KYC
   fastify.post('/admin/technicians/:id/verify-kyc', async (req, reply) => {
     try {
       const { id } = req.params;
+      const { action = 'approve', reason = '' } = req.body || {};
+      const isApproved = action === 'approve';
+
       const res = await query(`
         UPDATE technicians 
-        SET is_kyc_verified = TRUE, is_online = TRUE 
-        WHERE id = $1 
+        SET is_kyc_verified = $1,
+            kyc_verified_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
+        WHERE id = $2 
         RETURNING *
-      `, [id]);
+      `, [isApproved, id]);
 
       if (res.rows.length === 0) {
         return reply.status(404).send({ success: false, error: 'Technician not found' });
       }
 
-      return { success: true, message: 'KYC verified and technician activated', technician: res.rows[0] };
+      const tech = res.rows[0];
+
+      // Audit Log
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ('TECH-KYC-' || $1, $2, 'admin_hq', 'admin', $3)
+        `, [
+          tech.phone || id,
+          isApproved ? 'TECH_KYC_APPROVED' : 'TECH_KYC_REJECTED',
+          JSON.stringify({
+            technicianId: id,
+            technicianName: tech.full_name,
+            action,
+            reason: reason || (isApproved ? 'Aadhaar document verified by Salem Central Ops' : 'Aadhaar document rejected / resubmission requested'),
+            timestamp: new Date().toISOString()
+          })
+        ]);
+      } catch (auditErr) {}
+
+      return { 
+        success: true, 
+        message: isApproved 
+          ? `KYC verified for ${tech.full_name}. Partner is now certified to accept doorstep jobs.`
+          : `KYC rejected for ${tech.full_name}. Partner duty access remains locked until re-verification.`, 
+        technician: tech 
+      };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
@@ -310,6 +341,40 @@ async function adminRoutes(fastify, options) {
         success: true,
         message: 'Technician dispatched successfully',
         booking: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 11. Deep Booking Traceability
+  fastify.get('/admin/bookings/:id/trace', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const [bookingRes, auditsRes, paymentRes] = await Promise.all([
+        query(`
+          SELECT b.*, 
+                 t.full_name as technician_name, t.phone as technician_phone, t.primary_trade, 
+                 t.rating_avg as technician_rating, t.aadhaar_card_url as tech_aadhaar_url, 
+                 t.is_kyc_verified as tech_kyc_verified, t.upi_vpa as tech_upi
+          FROM bookings b
+          LEFT JOIN technicians t ON b.technician_id = t.id
+          WHERE b.id = $1
+        `, [id]),
+        query(`SELECT * FROM audit_logs WHERE booking_id = $1 ORDER BY created_at ASC`, [id]),
+        query(`SELECT * FROM payments WHERE booking_id = $1`, [id])
+      ]);
+
+      if (bookingRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      return {
+        success: true,
+        booking: bookingRes.rows[0],
+        auditLogs: auditsRes.rows,
+        payment: paymentRes.rows[0] || null
       };
     } catch (err) {
       fastify.log.error(err);
