@@ -217,7 +217,7 @@ async function partnerRoutes(fastify, options) {
           full_name, phone, primary_trade, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), TRUE, ARRAY[$7], $8, CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END)
+        ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), TRUE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
