@@ -87,8 +87,8 @@ async function feedbackRoutes(fastify, options) {
     }
   });
 
-  // 2. Get All Platform Feedbacks (For Admin Dashboard)
-  fastify.get('/feedback/list', async (req, reply) => {
+  // 2. Get All Platform Feedbacks (For Admin Dashboard & Audit)
+  const getFeedbackHandler = async (req, reply) => {
     try {
       const { role, status } = req.query;
       let sql = `SELECT * FROM platform_feedback WHERE 1=1`;
@@ -109,13 +109,17 @@ async function feedbackRoutes(fastify, options) {
       return {
         success: true,
         count: result.rows.length,
-        feedbacks: result.rows
+        feedbacks: result.rows,
+        feedback: result.rows
       };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.get('/feedback/list', getFeedbackHandler);
+  fastify.get('/feedback', getFeedbackHandler);
 
   // 3. Update Feedback Status (Resolve / Acknowledge by Admin)
   fastify.post('/feedback/:id/status', async (req, reply) => {

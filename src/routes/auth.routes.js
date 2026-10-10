@@ -128,7 +128,7 @@ async function authRoutes(fastify, options) {
       }
 
       // Session registration
-      const sessionPhone = userRecord.phone.replace(/[\s\-\(\)\+]/g, '');
+      const sessionPhone = (userRecord.phone || cleanPhone).replace(/[\s\-\(\)\+]/g, '').slice(-10);
       const sessionToken = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
 
       activeUserSessions[sessionPhone] = {

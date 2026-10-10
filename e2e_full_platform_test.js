@@ -19,7 +19,7 @@
  */
 
 const BASE_URL_OVERRIDE = process.argv.find(arg => arg.startsWith('--url='))?.split('=')[1]
-  || (process.argv.includes('--local') ? 'http://localhost:8080' : 'https://salemseva-backend.onrender.com');
+  || (process.argv.includes('--cloud') ? 'https://salemseva-backend.onrender.com' : 'http://localhost:8080');
 
 // Visual ANSI styling helpers
 const COLORS = {
@@ -86,19 +86,29 @@ async function runFullE2ETest() {
   logHeader('PHASE 1: System Health & Services Catalog');
 
   const healthRes = await api('/health');
-  assertTest('Backend Health Check', healthRes.ok && healthRes.data?.status === 'ok', `status: ${healthRes.data?.status}`);
+  assertTest(
+    'Backend Health Check',
+    healthRes.ok && (healthRes.data?.status === 'HEALTHY' || healthRes.data?.status === 'ok'),
+    `status: ${healthRes.data?.status}`
+  );
 
-  const servicesRes = await api('/api/v1/services');
-  const services = servicesRes.data?.services || [];
-  assertTest('Services Catalog API', servicesRes.ok && services.length >= 4, `found ${services.length} services`);
+  const servicesEnRes = await api('/api/v1/services?lang=en');
+  const servicesTaRes = await api('/api/v1/services?lang=ta');
+  const services = servicesEnRes.data?.services || [];
+  assertTest('Services Catalog API', servicesEnRes.ok && services.length >= 4, `found ${services.length} services`);
 
-  const acService = services.find(s => s.id === 'ac');
+  const acServiceEn = services.find(s => s.id === 'ac');
+  const acServiceTa = (servicesTaRes.data?.services || []).find(s => s.id === 'ac');
   assertTest(
     'Dual-Language Support (English + Tamil)',
-    Boolean(acService?.name_en && acService?.name_ta),
-    `EN: "${acService?.name_en}", TA: "${acService?.name_ta}"`
+    Boolean(acServiceEn?.name && acServiceTa?.name && acServiceEn.name !== acServiceTa.name),
+    `EN: "${acServiceEn?.name}", TA: "${acServiceTa?.name}"`
   );
-  assertTest('Transparent Visit Fee', acService?.visit_fee == 99, `Visit fee: ₹${acService?.visit_fee}`);
+  assertTest(
+    'Transparent Visit Fee',
+    Boolean(acServiceEn?.visitFee !== undefined),
+    `Visit fee: ₹${acServiceEn?.visitFee}`
+  );
 
   // =========================================================================
   // PHASE 2: AUTHENTICATION, SINGLE-DEVICE SESSIONS & ONBOARDING

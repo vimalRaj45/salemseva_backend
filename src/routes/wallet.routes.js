@@ -80,6 +80,7 @@ async function walletRoutes(fastify, options) {
         success: true,
         customerPhone: user.phone,
         balance: currentBalance,
+        walletBalance: currentBalance,
         serviceValue: `₹${currentBalance}`,
         referralCode: user.referral_code || 'SALEM100',
         friendsInvited,
@@ -211,15 +212,17 @@ async function walletRoutes(fastify, options) {
   });
 
   // POST /wallet/customer/simulate-referral - Trigger customer referral completion
-  fastify.post('/wallet/customer/simulate-referral', async (req, reply) => {
+  const simulateReferralHandler = async (req, reply) => {
     try {
       const { 
         friendName = 'Kavitha S.', 
         locality = 'Meyyanur, Salem', 
-        phone = '+919842711234' 
+        phone = '',
+        referrerPhone = ''
       } = req.body || {};
 
-      const cleanPhone = sanitizePhone(phone);
+      const targetPhone = phone || referrerPhone || '+919842711234';
+      const cleanPhone = sanitizePhone(targetPhone);
       const rewardAmt = 100.00;
 
       // Update DB balance
@@ -264,7 +267,10 @@ async function walletRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.post('/wallet/customer/simulate-referral', simulateReferralHandler);
+  fastify.post('/wallet/simulate-referral', simulateReferralHandler);
 
 
   // ==========================================
