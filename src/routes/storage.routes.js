@@ -73,16 +73,31 @@ async function storageRoutes(fastify, options) {
         fileName
       });
 
-      // Update Booking in DB
+      // Retrieve existing labor cost
+      const qiRes = await query(`
+        SELECT price, qty FROM quote_items 
+        WHERE booking_id = $1 AND item_type != 'Spare Part'
+      `, [bookingId]);
+      
+      let laborCost = qiRes.rows.reduce((sum, r) => sum + (parseFloat(r.price) || 0) * (r.qty || 1), 0);
+      if (laborCost <= 0) laborCost = 250.00;
+
       const parsedAmount = parseFloat(billAmount) || null;
+      const validBillAmt = parsedAmount !== null ? parsedAmount : 0;
+      const platformFee = Math.round((validBillAmt + laborCost) * 0.05 * 100) / 100;
+      const dynamicTotal = validBillAmt + laborCost + platformFee;
+
+      // Update Booking in DB with parts bill, subtotal and recalculated total
       const updateRes = await query(`
         UPDATE bookings 
         SET parts_bill_url = $1,
             parts_bill_uploaded_at = NOW(),
-            parts_bill_amount = COALESCE($2, parts_bill_amount)
-        WHERE id = $3
+            parts_bill_amount = COALESCE($2, parts_bill_amount),
+            quote_subtotal = $3,
+            final_amount = $4
+        WHERE id = $5
         RETURNING *;
-      `, [uploadRes.url, parsedAmount, bookingId]);
+      `, [uploadRes.url, parsedAmount, validBillAmt + laborCost, dynamicTotal, bookingId]);
 
       // Record Audit Log
       try {
@@ -95,7 +110,10 @@ async function storageRoutes(fastify, options) {
             billUrl: uploadRes.url,
             storageType: uploadRes.storageType,
             size: uploadRes.size,
-            billAmount: parsedAmount
+            billAmount: parsedAmount,
+            laborCost,
+            platformFee,
+            finalAmount: dynamicTotal
           })
         ]);
       } catch (auditErr) {}
@@ -106,6 +124,10 @@ async function storageRoutes(fastify, options) {
         bookingId,
         billUrl: uploadRes.url,
         uploadedAt: new Date().toISOString(),
+        billAmount: parsedAmount,
+        laborCost,
+        platformFee,
+        finalAmount: dynamicTotal,
         booking: updateRes.rows[0] || null
       };
     } catch (err) {
@@ -119,7 +141,7 @@ async function storageRoutes(fastify, options) {
     try {
       const bookingId = req.params.id;
       const res = await query(`
-        SELECT id, parts_bill_url, parts_bill_uploaded_at, parts_bill_amount, parts_mode, quote_subtotal
+        SELECT id, parts_bill_url, parts_bill_uploaded_at, parts_bill_amount, parts_mode, quote_subtotal, final_amount
         FROM bookings
         WHERE id = $1
       `, [bookingId]);
@@ -129,6 +151,19 @@ async function storageRoutes(fastify, options) {
       }
 
       const row = res.rows[0];
+      const billAmt = parseFloat(row.parts_bill_amount) || 0;
+      
+      const qiRes = await query(`
+        SELECT price, qty FROM quote_items 
+        WHERE booking_id = $1 AND item_type != 'Spare Part'
+      `, [bookingId]);
+      let laborCost = qiRes.rows.reduce((sum, r) => sum + (parseFloat(r.price) || 0) * (r.qty || 1), 0);
+      if (laborCost <= 0) laborCost = 250.00;
+
+      const subtotal = row.parts_mode === 'user_buys' ? laborCost : (billAmt + laborCost);
+      const platformFee = Math.round(subtotal * 0.05 * 100) / 100;
+      const totalAmount = subtotal + platformFee;
+
       return {
         success: true,
         bookingId: row.id,
@@ -136,8 +171,12 @@ async function storageRoutes(fastify, options) {
         billUrl: row.parts_bill_url,
         uploadedAt: row.parts_bill_uploaded_at,
         billAmount: row.parts_bill_amount,
+        laborCost,
+        platformFee,
+        totalAmount,
         partsMode: row.parts_mode,
-        quoteSubtotal: row.quote_subtotal
+        quoteSubtotal: row.quote_subtotal,
+        finalAmount: row.final_amount
       };
     } catch (err) {
       fastify.log.error(err);
