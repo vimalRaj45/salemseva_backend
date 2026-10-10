@@ -21,6 +21,8 @@ fastify.register(require('./routes/partner.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/wallet.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/admin.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/auth.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/feedback.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/storage.routes'), { prefix: '/api/v1' });
 
 
 // Health & System Telemetry Check

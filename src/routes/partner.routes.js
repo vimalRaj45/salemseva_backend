@@ -107,6 +107,9 @@ async function partnerRoutes(fastify, options) {
           status: activeJob.status,
           visitFee: parseFloat(activeJob.visit_fee || 99),
           isUrgent: Boolean(activeJob.is_urgent_dispatch),
+          partsMode: activeJob.parts_mode || 'tech_buys',
+          partsBillUrl: activeJob.parts_bill_url || null,
+          partsBillUploadedAt: activeJob.parts_bill_uploaded_at || null,
           createdAt: activeJob.created_at
         } : null
       };
@@ -202,7 +205,8 @@ async function partnerRoutes(fastify, options) {
         upiId = 'partner.pay@okaxis',
         yearsExperience = 5,
         serviceArea = 'Fairlands, Salem',
-        referralCode
+        referralCode,
+        aadhaarCardUrl
       } = req.body;
 
       const cleanPhone = (phone.startsWith('+91') ? phone : `+91${phone}`).replace(/[\s\-]/g, '');
@@ -212,14 +216,16 @@ async function partnerRoutes(fastify, options) {
         INSERT INTO technicians (
           full_name, phone, primary_trade, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
-          assigned_localities
-        ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), TRUE, ARRAY[$7])
+          assigned_localities, aadhaar_card_url, aadhaar_uploaded_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), TRUE, ARRAY[$7], $8, CASE WHEN $8 IS NOT NULL THEN NOW() ELSE NULL END)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
           upi_vpa = EXCLUDED.upi_vpa,
           is_kyc_verified = TRUE,
-          is_online = TRUE
+          is_online = TRUE,
+          aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
+          aadhaar_uploaded_at = COALESCE(EXCLUDED.aadhaar_uploaded_at, technicians.aadhaar_uploaded_at)
         RETURNING *;
       `;
 
@@ -230,7 +236,8 @@ async function partnerRoutes(fastify, options) {
         cleanAadhaar,
         upiId,
         parseInt(yearsExperience, 10) || 5,
-        serviceArea || 'Fairlands'
+        serviceArea || 'Fairlands',
+        aadhaarCardUrl || null
       ]);
 
       const hasReferral = Boolean(referralCode && referralCode.trim().length > 0);
@@ -507,6 +514,8 @@ async function partnerRoutes(fastify, options) {
         experienceYears: t.years_experience || 5,
         status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
         isKycVerified: Boolean(t.is_kyc_verified),
+        aadhaarCardUrl: t.aadhaar_card_url || null,
+        aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
         isOnline: Boolean(t.is_online),
         ratingAvg: parseFloat(t.rating_avg || 4.9),
         ratingCount: t.rating_count || 100,
