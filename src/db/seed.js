@@ -3,7 +3,7 @@ const path = require('path');
 const { pool } = require('./db');
 
 async function seed() {
-  console.log('🌱 Starting Neon PostgreSQL DB Initialization & Seeding...');
+  console.log(' Starting Neon PostgreSQL DB Initialization & Seeding...');
   const client = await pool.connect();
   
   try {
@@ -13,7 +13,7 @@ async function seed() {
       const sql = fs.readFileSync(schemaPath, 'utf8');
       console.log('Executing neon_schema.sql...');
       await client.query(sql);
-      console.log('✅ Tables created successfully.');
+      console.log(' Tables created successfully.');
     }
 
     // 2. Seed Services Catalog
@@ -251,9 +251,9 @@ async function seed() {
       ON CONFLICT (id) DO NOTHING;
     `);
 
-    console.log('✨ Seed completed successfully with persistent customer wallets, technician referrals, and trade technicians!');
+    console.log(' Seed completed successfully with persistent customer wallets, technician referrals, and trade technicians!');
   } catch (err) {
-    console.error('❌ Seeding failed:', err);
+    console.error(' Seeding failed:', err);
   } finally {
     client.release();
     await pool.end();

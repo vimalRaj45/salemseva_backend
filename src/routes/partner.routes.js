@@ -110,8 +110,40 @@ async function partnerRoutes(fastify, options) {
           partsMode: activeJob.parts_mode || 'tech_buys',
           partsBillUrl: activeJob.parts_bill_url || null,
           partsBillUploadedAt: activeJob.parts_bill_uploaded_at || null,
+          voiceNoteUrl: activeJob.voice_note_url || null,
+          bookingType: activeJob.booking_type || 'instant',
+          scheduledSlot: activeJob.scheduled_slot || null,
           createdAt: activeJob.created_at
         } : null
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1b. Reject / Pass Incoming Lead (Technician declines job request)
+  fastify.post('/partner/bookings/:id/reject', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { technicianId, reason } = req.body || {};
+
+      // Reset technician_id and keep job in matching so other technicians or Salem central operations can pick it up
+      await query(`
+        UPDATE bookings 
+        SET technician_id = NULL, status = 'matching' 
+        WHERE id = $1
+      `, [id]);
+
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'TECHNICIAN_PASSED_LEAD', $2, 'technician', $3)
+      `, [id, technicianId || 'technician', JSON.stringify({ reason: reason || 'Technician passed lead' })]);
+
+      return {
+        success: true,
+        message: 'Lead successfully passed. Radar will resume searching for available jobs.',
+        bookingId: id
       };
     } catch (err) {
       fastify.log.error(err);
@@ -257,7 +289,23 @@ async function partnerRoutes(fastify, options) {
       ]);
 
       const hasReferral = Boolean(referralCode && referralCode.trim().length > 0);
-      const referralBonus = hasReferral ? 100.00 : 0.00; // ₹100 Welcome Tool Kit Bonus
+      let referralBonus = 0.00;
+      let referrerIncentive = 0.00;
+      if (hasReferral) {
+        try {
+          const sRes = await query(`SELECT partner_welcome_bonus, partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+          if (sRes.rows.length > 0) {
+            referralBonus = parseFloat(sRes.rows[0].partner_welcome_bonus);
+            referrerIncentive = parseFloat(sRes.rows[0].partner_referral_incentive);
+          } else {
+            referralBonus = 50.00;
+            referrerIncentive = 100.00;
+          }
+        } catch (sErr) {
+          referralBonus = 50.00;
+          referrerIncentive = 100.00;
+        }
+      }
 
       // Audit Log in DB
       try {
@@ -271,7 +319,7 @@ async function partnerRoutes(fastify, options) {
             trade,
             referralCodeUsed: hasReferral ? referralCode.toUpperCase() : null,
             welcomeBonus: referralBonus,
-            referrerIncentive: hasReferral ? 250.00 : 0.00,
+            referrerIncentive: referrerIncentive,
             timestamp: new Date().toISOString()
           })
         ]);
@@ -280,7 +328,7 @@ async function partnerRoutes(fastify, options) {
       return {
         success: true,
         message: hasReferral 
-          ? `Partner onboarded! Welcome bonus of ₹${referralBonus} unlocked via referral code ${referralCode.toUpperCase()}`
+          ? `Partner onboarded! Welcome bonus of INR ${referralBonus} unlocked via referral code ${referralCode.toUpperCase()}`
           : 'Partner onboarded and DigiLocker KYC verified successfully in Neon DB',
         technician: res.rows[0],
         referralApplied: hasReferral,
@@ -293,7 +341,7 @@ async function partnerRoutes(fastify, options) {
   });
 
   // 4. Partner Create Digital Job Card & Quote in Neon DB
-  fastify.post('/partner/quote/create', async (req, reply) => {
+  const handleCreateQuote = async (req, reply) => {
     try {
       const {
         bookingId = 'SLM-84920',
@@ -311,19 +359,13 @@ async function partnerRoutes(fastify, options) {
         targetBookingId = latest.rows[0]?.id || bookingId;
       }
 
-      // If items array is empty, fetch default catalog items for booking trade
+      // If items array is empty, default to standard labor tasks
       let resolvedItems = items;
       if (!resolvedItems || resolvedItems.length === 0) {
-        const bInfo = await query('SELECT service_id FROM bookings WHERE id = $1', [targetBookingId]);
-        const sId = bInfo.rows[0]?.service_id || 'ac';
-        const catRes = await query('SELECT * FROM service_spares_catalog WHERE service_id = $1 ORDER BY is_oem_part DESC LIMIT 3', [sId]);
-        resolvedItems = catRes.rows.map(i => ({
-          name: i.item_name,
-          type: i.item_type,
-          price: parseFloat(i.unit_price),
-          qty: 1,
-          isOem: Boolean(i.is_oem_part)
-        }));
+        resolvedItems = [
+          { name: 'Doorstep Diagnostics & Inspection Labor', type: 'Labor', price: 150, qty: 1 },
+          { name: 'Service Repair & Fitting Work Charge', type: 'Labor', price: 250, qty: 1 }
+        ];
       }
 
       // Delete previous items for this booking to allow clean edits
@@ -331,7 +373,7 @@ async function partnerRoutes(fastify, options) {
 
       let subtotal = 0;
       for (const item of resolvedItems) {
-        const price = parseFloat(item.price) || 0;
+        const price = parseFloat(item.price !== undefined ? item.price : (item.amount || 0));
         const qty = parseInt(item.qty, 10) || 1;
         subtotal += price * qty;
 
@@ -340,11 +382,11 @@ async function partnerRoutes(fastify, options) {
           VALUES ($1, $2, $3, $4, $5, $6)
         `, [
           targetBookingId,
-          item.name || 'Service Item',
-          item.type || 'Spare Part',
+          item.name || item.desc || 'Service Work Task',
+          item.category || item.type || 'Labor',
           price,
           qty,
-          Boolean(item.isOem)
+          Boolean(item.isOem || item.is_oem_part)
         ]);
       }
 
@@ -378,7 +420,10 @@ async function partnerRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.post('/partner/quote/create', handleCreateQuote);
+  fastify.post('/partner/quote', handleCreateQuote);
 
   // 5. Partner Dynamic Daily & Lifetime Earnings from DB
   fastify.get('/partner/earnings', async (req, reply) => {

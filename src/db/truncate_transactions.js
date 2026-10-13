@@ -27,13 +27,16 @@ async function truncateTransactions() {
       'chat_messages',
       'call_logs',
       'audit_logs',
+      'technician_payouts',
+      'technician_referrals',
+      'wallet_transactions',
       'bookings'
     ];
 
     for (const table of tablesToTruncate) {
       try {
         await query(`TRUNCATE TABLE ${table} CASCADE;`);
-        console.log(`  ✓ Truncated table: ${table}`);
+        console.log(`   Truncated table: ${table}`);
       } catch (err) {
         console.warn(`  ! Note for ${table}:`, err.message);
       }
@@ -42,7 +45,7 @@ async function truncateTransactions() {
     // 3. Reset technician online & active job state if needed
     try {
       await query(`UPDATE technicians SET is_online = TRUE WHERE is_kyc_verified = TRUE;`);
-      console.log('  ✓ Set verified technicians to online duty readiness');
+      console.log('   Set verified technicians to online duty readiness');
     } catch (e) {
       console.warn('  ! Technician online reset note:', e.message);
     }

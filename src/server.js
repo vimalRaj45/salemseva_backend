@@ -23,6 +23,8 @@ fastify.register(require('./routes/admin.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/auth.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/feedback.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/storage.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/settings.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/coupons.routes'), { prefix: '/api/v1' });
 
 
 // Health & System Telemetry Check
@@ -42,7 +44,7 @@ const PORT = process.env.PORT || 8080;
 const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: '0.0.0.0' });
-    console.log(`🚀 SalemSeva Fastify Server running at http://localhost:${PORT}`);
+    console.log(` SalemSeva Fastify Server running at http://localhost:${PORT}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

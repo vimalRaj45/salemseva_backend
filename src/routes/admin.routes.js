@@ -381,6 +381,121 @@ async function adminRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
+
+  // 12. Internal Team RBAC Management
+  async function initTeamTable() {
+    try {
+      await query(`
+        CREATE TABLE IF NOT EXISTS admin_team (
+          id VARCHAR(64) PRIMARY KEY,
+          name VARCHAR(128) NOT NULL,
+          email VARCHAR(128) NOT NULL UNIQUE,
+          phone VARCHAR(32),
+          role VARCHAR(64) NOT NULL DEFAULT 'ops_dispatcher',
+          hub_locality VARCHAR(128) DEFAULT 'Salem Central HQ',
+          status VARCHAR(32) DEFAULT 'active',
+          permissions JSONB DEFAULT '[]'::jsonb,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+
+      const countRes = await query(`SELECT count(*) as count FROM admin_team`);
+      if (parseInt(countRes.rows[0]?.count || 0, 10) === 0) {
+        await query(`
+          INSERT INTO admin_team (id, name, email, phone, role, hub_locality, status, permissions)
+          VALUES 
+            ('staff_01', 'Vimal Raj', 'vimal@salemseva.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
+            ('staff_02', 'Anand M.', 'anand.dispatch@salemseva.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
+            ('staff_03', 'Priya S.', 'priya.support@salemseva.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
+            ('staff_04', 'Karthik K.', 'karthik.fin@salemseva.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
+        `);
+      }
+    } catch (err) {
+      console.warn('admin_team init warning:', err.message);
+    }
+  }
+  await initTeamTable();
+
+  fastify.get('/admin/team', async (req, reply) => {
+    try {
+      const res = await query(`SELECT * FROM admin_team ORDER BY created_at ASC`);
+      return { success: true, count: res.rows.length, team: res.rows };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  fastify.post('/admin/team', async (req, reply) => {
+    try {
+      const { name, email, phone, role, hub_locality, status, permissions } = req.body;
+      if (!name || !email || !role) {
+        return reply.status(400).send({ success: false, error: 'Name, email and role are required' });
+      }
+      const id = 'staff_' + Date.now();
+      const res = await query(`
+        INSERT INTO admin_team (id, name, email, phone, role, hub_locality, status, permissions)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *
+      `, [
+        id,
+        name,
+        email,
+        phone || '',
+        role,
+        hub_locality || 'Salem Central HQ',
+        status || 'active',
+        JSON.stringify(permissions || [])
+      ]);
+      return { success: true, member: res.rows[0] };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  fastify.put('/admin/team/:id', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { name, email, phone, role, hub_locality, status, permissions } = req.body;
+      const res = await query(`
+        UPDATE admin_team
+        SET 
+          name = COALESCE($1, name),
+          email = COALESCE($2, email),
+          phone = COALESCE($3, phone),
+          role = COALESCE($4, role),
+          hub_locality = COALESCE($5, hub_locality),
+          status = COALESCE($6, status),
+          permissions = COALESCE($7, permissions)
+        WHERE id = $8
+        RETURNING *
+      `, [
+        name, email, phone, role, hub_locality, status,
+        permissions ? JSON.stringify(permissions) : null,
+        id
+      ]);
+
+      if (res.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Member not found' });
+      }
+      return { success: true, member: res.rows[0] };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  fastify.delete('/admin/team/:id', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      await query(`DELETE FROM admin_team WHERE id = $1`, [id]);
+      return { success: true, message: 'Member deleted successfully' };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 }
 
 module.exports = adminRoutes;

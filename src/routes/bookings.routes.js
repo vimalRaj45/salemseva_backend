@@ -2,11 +2,12 @@ const { query } = require('../db/db');
 
 async function bookingsRoutes(fastify, options) {
   // 1. Create Doorstep Inspection Booking
-  fastify.post('/bookings/create', async (req, reply) => {
+  const handleCreateBooking = async (req, reply) => {
     try {
       const {
         serviceId,
         issueId,
+        selectedIssue,
         customIssueText,
         customNotes,
         customerName,
@@ -17,15 +18,65 @@ async function bookingsRoutes(fastify, options) {
         lng,
         isUrgentDispatch,
         couponCode,
-        scheduledSlot
-      } = req.body;
+        scheduledSlot,
+        bookingType,
+        voiceNoteAudio,
+        voice_note_url
+      } = req.body || {};
+
+      if (!serviceId) {
+        return reply.status(400).send({ success: false, error: 'serviceId is required' });
+      }
 
       const bookingId = 'SLM-' + Math.floor(10000 + Math.random() * 90000);
-      const visitFee = 99.00;
+      let visitFee = 99.00;
+      if (serviceId) {
+        try {
+          const sRes = await query('SELECT visit_fee FROM services WHERE id = $1 LIMIT 1', [serviceId]);
+          if (sRes.rows.length > 0 && sRes.rows[0].visit_fee !== null) {
+            visitFee = parseFloat(sRes.rows[0].visit_fee);
+          }
+        } catch (sErr) {}
+      }
       let couponDiscount = 0.00;
 
-      if (couponCode && couponCode.toUpperCase() === 'SALEM100') {
-        couponDiscount = 50.00;
+      if (couponCode && couponCode.trim()) {
+        try {
+          const cleanCode = couponCode.trim().toUpperCase();
+          const cRes = await query(`
+            SELECT * FROM coupons 
+            WHERE UPPER(code) = $1 
+              AND is_active = TRUE 
+              AND (valid_until IS NULL OR valid_until >= NOW())
+              AND (usage_limit IS NULL OR times_used < usage_limit)
+            LIMIT 1
+          `, [cleanCode]);
+
+          if (cRes.rows.length > 0) {
+            const coup = cRes.rows[0];
+            const minAmt = parseFloat(coup.min_order_amount || 0);
+            if (visitFee >= minAmt) {
+              if (coup.discount_type === 'percent') {
+                couponDiscount = (visitFee * parseFloat(coup.discount_value)) / 100;
+                if (coup.max_discount_cap) {
+                  couponDiscount = Math.min(couponDiscount, parseFloat(coup.max_discount_cap));
+                }
+              } else {
+                couponDiscount = parseFloat(coup.discount_value);
+              }
+              couponDiscount = Math.min(couponDiscount, visitFee);
+
+              // Increment coupon usage
+              await query(`UPDATE coupons SET times_used = times_used + 1 WHERE id = $1`, [coup.id]);
+            }
+          } else if (cleanCode === 'SALEM100' || cleanCode === 'SALEM50') {
+            couponDiscount = 50.00;
+          }
+        } catch (cErr) {
+          if (couponCode.toUpperCase() === 'SALEM100') {
+            couponDiscount = 50.00;
+          }
+        }
       }
 
       const urgentSurgeFee = isUrgentDispatch ? 50.00 : 0.00;
@@ -49,10 +100,12 @@ async function bookingsRoutes(fastify, options) {
         [serviceId || 'ac']
       );
       
-      const onlineTech = techRes.rows[0] || null;
-      const defaultTechId = onlineTech ? onlineTech.id : null;
-      const initialStatus = 'matching';
+      const onlineTech = techRes.rows.length > 0 ? techRes.rows[0] : null;
+      const isScheduled = bookingType === 'scheduled' || (!isUrgentDispatch && scheduledSlot && scheduledSlot !== 'instant_now');
+      const defaultTechId = isScheduled ? null : (onlineTech ? onlineTech.id : null);
+      const initialStatus = isScheduled ? 'created' : 'matching';
       const customerOtp = String(Math.floor(1000 + Math.random() * 9000));
+      const finalVoiceNote = voiceNoteAudio || voice_note_url || null;
 
       const insertSql = `
         INSERT INTO bookings (
@@ -61,8 +114,8 @@ async function bookingsRoutes(fastify, options) {
           customer_lat, customer_lng,
           is_urgent_dispatch, urgent_surge_fee, visit_fee,
           coupon_discount, coupon_code, final_amount, status, technician_id, scheduled_slot,
-          customer_otp
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+          customer_otp, booking_type, voice_note_url
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         RETURNING *;
       `;
 
@@ -86,7 +139,9 @@ async function bookingsRoutes(fastify, options) {
         initialStatus,
         defaultTechId,
         scheduledSlot || 'priority_12h',
-        customerOtp
+        customerOtp,
+        isScheduled ? 'scheduled' : 'instant',
+        finalVoiceNote
       ]);
 
       // Audit Log
@@ -107,7 +162,10 @@ async function bookingsRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.post('/bookings/create', handleCreateBooking);
+  fastify.post('/bookings', handleCreateBooking);
 
   // 2. Get Live Tracking & Real Assigned Technician with Dynamic GPS & ETA
   fastify.get('/bookings/:id/track', async (req, reply) => {
@@ -116,11 +174,6 @@ async function bookingsRoutes(fastify, options) {
       const bookingResult = await query('SELECT * FROM bookings WHERE id = $1', [id]);
 
       let booking = bookingResult.rows[0];
-      if (!booking) {
-        const latestBooking = await query('SELECT * FROM bookings ORDER BY created_at DESC LIMIT 1');
-        booking = latestBooking.rows[0];
-      }
-
       if (!booking) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });
       }
@@ -384,17 +437,20 @@ async function bookingsRoutes(fastify, options) {
   });
 
   // 4. Update Booking Status (e.g., accepted, en_route, quote approved, arrived, completed)
-  fastify.post('/bookings/:id/status', async (req, reply) => {
+  const handleUpdateStatus = async (req, reply) => {
     try {
       const { id } = req.params;
-      const { status, technicianId, partsMode, rescheduledReturnDate, rescheduledReturnSlot } = req.body;
+      const { status, technicianId, partsMode, rescheduledReturnDate, rescheduledReturnSlot } = req.body || {};
 
       // Find the booking first to know its requested service_id
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
       let booking = bRes.rows[0];
       if (!booking) {
-        const latestB = await query('SELECT * FROM bookings ORDER BY created_at DESC LIMIT 1');
-        booking = latestB.rows[0];
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      if (booking.status === 'cancelled') {
+        return reply.status(400).send({ success: false, error: 'Cannot advance a cancelled booking' });
       }
 
       const targetServiceId = booking?.service_id || 'ac';
@@ -428,15 +484,17 @@ async function bookingsRoutes(fastify, options) {
       if (status === 'quote_presented') {
         const qiRes = await query('SELECT * FROM quote_items WHERE booking_id = $1', [targetId]);
         if (qiRes.rows.length === 0) {
-          const catRes = await query('SELECT * FROM service_spares_catalog WHERE service_id = $1 ORDER BY is_oem_part DESC LIMIT 3', [booking?.service_id || targetServiceId]);
+          const fallbackLaborItems = [
+            { name: 'Doorstep Diagnostics & Inspection Labor', price: 150 },
+            { name: 'Service Repair & Fitting Work Charge', price: 250 }
+          ];
           let dynamicSubtotal = 0;
-          for (const itm of catRes.rows) {
-            const price = parseFloat(itm.unit_price) || 0;
-            dynamicSubtotal += price;
+          for (const itm of fallbackLaborItems) {
+            dynamicSubtotal += itm.price;
             await query(`
               INSERT INTO quote_items (booking_id, item_name, item_type, price, qty, is_oem_part)
-              VALUES ($1, $2, $3, $4, 1, $5)
-            `, [targetId, itm.item_name, itm.item_type, price, Boolean(itm.is_oem_part)]);
+              VALUES ($1, $2, 'Labor', $3, 1, false)
+            `, [targetId, itm.name, itm.price]);
           }
           if (dynamicSubtotal > 0) {
             const upSub = await query(`
@@ -464,6 +522,29 @@ async function bookingsRoutes(fastify, options) {
       };
     } catch (err) {
       fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  };
+
+  fastify.post('/bookings/:id/status', handleUpdateStatus);
+  fastify.patch('/bookings/:id/status', handleUpdateStatus);
+
+  // 4.0 Customer Approves Digital Quote
+  fastify.post('/bookings/:id/approve-quote', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const res = await query(`
+        UPDATE bookings 
+        SET status = 'quote_approved' 
+        WHERE id = $1 
+        RETURNING *
+      `, [id]);
+      return { success: true, message: 'Quote approved successfully', booking: res.rows[0] };
+    } catch (err) {
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
@@ -568,22 +649,26 @@ async function bookingsRoutes(fastify, options) {
         isOem: item.is_oem_part
       }));
 
-      // If no quote items yet, query PostgreSQL service_spares_catalog dynamically
+      // If no quote items yet, supply standard labor tasks
       if (items.length === 0 && booking) {
-        const catRes = await query(
-          'SELECT * FROM service_spares_catalog WHERE service_id = $1 ORDER BY is_oem_part DESC LIMIT 3',
-          [booking.service_id || 'ac']
-        );
-        if (catRes.rows.length > 0) {
-          items = catRes.rows.map(item => ({
-            id: item.id,
-            name: item.item_name,
-            type: item.item_type,
-            price: parseFloat(item.unit_price),
+        items = [
+          {
+            id: 'init_labor_diag',
+            name: 'Doorstep Diagnostics & Inspection Labor',
+            type: 'Labor',
+            price: 150,
             qty: 1,
-            isOem: Boolean(item.is_oem_part)
-          }));
-        }
+            isOem: false
+          },
+          {
+            id: 'init_labor_repair',
+            name: 'Service Repair & Fitting Work Charge',
+            type: 'Labor',
+            price: 250,
+            qty: 1,
+            isOem: false
+          }
+        ];
       }
 
       const calculatedSubtotal = items.reduce((s, i) => s + i.price * (i.qty || 1), 0);
@@ -651,15 +736,21 @@ async function bookingsRoutes(fastify, options) {
 
       const isPreMatching = booking.status === 'matching' || booking.status === 'created';
       const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99);
+      const cancelReasonText = reason || 'Customer requested cancellation';
+      const cancelDetailsText = reasonDetails || '';
 
-      // Update status in database
+      // Update status and store full customer cancellation response in database
       const updateSql = `
         UPDATE bookings 
-        SET status = 'cancelled'
+        SET status = 'cancelled',
+            cancellation_reason = $2,
+            cancellation_details = $3,
+            cancelled_by = $4,
+            cancelled_at = NOW()
         WHERE id = $1
         RETURNING *
       `;
-      const updateRes = await query(updateSql, [booking.id]);
+      const updateRes = await query(updateSql, [booking.id, cancelReasonText, cancelDetailsText, cancelledBy]);
       const updatedBooking = updateRes.rows[0];
 
       // Audit Log

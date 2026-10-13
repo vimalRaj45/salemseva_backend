@@ -223,7 +223,15 @@ async function walletRoutes(fastify, options) {
 
       const targetPhone = phone || referrerPhone || '+919842711234';
       const cleanPhone = sanitizePhone(targetPhone);
-      const rewardAmt = 100.00;
+
+      // Fetch dynamic referral reward setting from DB
+      let rewardAmt = 50.00;
+      try {
+        const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+        if (sRes.rows.length > 0) {
+          rewardAmt = parseFloat(sRes.rows[0].customer_referral_credits);
+        }
+      } catch (sErr) {}
 
       // Update DB balance
       const updateRes = await query(`
@@ -238,9 +246,9 @@ async function walletRoutes(fastify, options) {
       if (!user) {
         const insertRes = await query(`
           INSERT INTO users (phone, full_name, role, wallet_balance, referral_code)
-          VALUES ($1, 'Customer', 'customer', 150.00, 'SALEM100')
+          VALUES ($1, 'Customer', 'customer', $2, 'SALEM100')
           RETURNING id, wallet_balance
-        `, [cleanPhone]);
+        `, [cleanPhone, rewardAmt]);
         user = insertRes.rows[0];
       }
 
@@ -254,12 +262,13 @@ async function walletRoutes(fastify, options) {
         cleanPhone,
         `Referral Completed: ${friendName}`,
         rewardAmt,
-        `Friend ${friendName} completed their 1st service in ${locality}. +100 Seva Credits unlocked!`
+        `Friend ${friendName} completed their 1st service in ${locality}. +${rewardAmt} Seva Credits unlocked!`
       ]);
 
       return {
         success: true,
-        message: `Friend ${friendName} completed service! +100 Credits added.`,
+        message: `Friend ${friendName} completed service! +${rewardAmt} Credits added.`,
+        rewardAmount: rewardAmt,
         newBalance: parseFloat(user.wallet_balance),
         transaction: txRes.rows[0]
       };

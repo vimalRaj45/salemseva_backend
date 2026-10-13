@@ -76,9 +76,49 @@ async function feedbackRoutes(fastify, options) {
         ]);
       } catch (auditErr) {}
 
+      // Award feedback credits if enabled by admin
+      let creditsAwarded = 0;
+      let newBalance = null;
+      try {
+        const sRes = await query(`
+          SELECT feedback_reward_credits, feedback_rewards_enabled 
+          FROM platform_settings 
+          WHERE id = 'reward_settings' 
+          LIMIT 1
+        `);
+        const isEnabled = sRes.rows.length > 0 ? Boolean(sRes.rows[0].feedback_rewards_enabled) : true;
+        const rewardAmount = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].feedback_reward_credits) : 15.00;
+
+        if (isEnabled && rewardAmount > 0 && userPhone) {
+          const cleanPhone = (userPhone || '').replace(/[\s\-\(\)]/g, '');
+          const updateRes = await query(`
+            UPDATE users 
+            SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
+            RETURNING id, phone, wallet_balance
+          `, [rewardAmount, cleanPhone]);
+
+          if (updateRes.rows.length > 0) {
+            creditsAwarded = rewardAmount;
+            newBalance = parseFloat(updateRes.rows[0].wallet_balance);
+            await query(`
+              INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
+              VALUES ($1, $2, 'Platform Feedback Reward', $3, 'CREDIT', 'FEEDBACK_REWARD', 'Credits rewarded for helpful platform feedback')
+            `, [updateRes.rows[0].id, cleanPhone, rewardAmount]);
+          }
+        }
+      } catch (fbCreditErr) {
+        fastify.log.warn('Could not award feedback credits: ' + fbCreditErr.message);
+      }
+
       return {
         success: true,
-        message: 'Feedback submitted successfully and sent to Salem Central Operations Desk',
+        message: creditsAwarded > 0
+          ? `Feedback submitted successfully! +${creditsAwarded} Credits added to your wallet.`
+          : 'Feedback submitted successfully and sent to Salem Central Operations Desk',
+        creditsAwarded,
+        newBalance,
         feedback: result.rows[0]
       };
     } catch (err) {

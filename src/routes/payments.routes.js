@@ -79,8 +79,16 @@ async function paymentsRoutes(fastify, options) {
         razorpay_signature,
         bookingId,
         amount = 99.00,
-        techId
+        techId,
+        payment_method
       } = req.body;
+
+      if (payment_method === 'cash' || req.body.paymentMethod === 'cash') {
+        return reply.status(400).send({
+          success: false,
+          error: 'Cash payments are not allowed. SalemSeva requires 100% digital escrow payments (UPI / Cards / Net Banking).'
+        });
+      }
 
       let isSignatureValid = false;
       if (razorpay_signature) {
@@ -232,11 +240,11 @@ async function paymentsRoutes(fastify, options) {
       }
 
       const targetId = booking.id;
-      const quoteSubtotal = parseFloat(booking.quote_subtotal) || 900.00;
+      const quoteSubtotal = parseFloat(booking.quote_subtotal) || 250.00;
       const visitFee = parseFloat(booking.visit_fee) || 99.00;
-      const techLaborShare = quoteSubtotal * 0.85; // 85% of quote
+      const techLaborShare = quoteSubtotal * 0.95; // 95% of labor work charge
       const totalTechPayout = visitFee + techLaborShare;
-      const platformCut = quoteSubtotal * 0.15;
+      const platformCut = quoteSubtotal * 0.05; // Strictly 5% platform commission on work charge
       const utrNumber = 'UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS';
 
       // 1. Update booking status to completed
