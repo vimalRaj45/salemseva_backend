@@ -22,17 +22,16 @@ async function couponsRoutes(fastify, options) {
       );
     `);
 
-    // Seed default coupons if none exist
-    const countRes = await query(`SELECT COUNT(*) as count FROM coupons`);
-    if (parseInt(countRes.rows[0]?.count || 0, 10) === 0) {
-      await query(`
-        INSERT INTO coupons (code, discount_type, discount_value, min_order_amount, description, is_active)
-        VALUES 
-          ('SALEM50', 'flat', 50.00, 99.00, 'Flat INR 50 discount on doorstep inspection', TRUE),
-          ('WELCOME20', 'percent', 20.00, 99.00, '20% off for new Salem customers (up to INR 60)', TRUE),
-          ('FESTIVE30', 'flat', 30.00, 99.00, 'Salem Festive Special flat INR 30 off', TRUE)
-      `);
-    }
+    // Seed default coupons if none exist, or ensure SALEM100 exists
+    await query(`
+      INSERT INTO coupons (code, discount_type, discount_value, min_order_amount, description, is_active)
+      VALUES 
+        ('SALEM100', 'flat', 100.00, 0.00, 'INR 100 off on first home service in Salem', TRUE),
+        ('SALEM50', 'flat', 50.00, 49.00, 'Flat INR 50 discount on doorstep inspection', TRUE),
+        ('WELCOME20', 'percent', 20.00, 49.00, '20% off for new Salem customers (up to INR 60)', TRUE),
+        ('FESTIVE30', 'flat', 30.00, 49.00, 'Salem Festive Special flat INR 30 off', TRUE)
+      ON CONFLICT (code) DO UPDATE SET discount_value = EXCLUDED.discount_value, is_active = TRUE;
+    `);
   } catch (err) {
     fastify.log.warn('Coupons table initialization warning: ' + err.message);
   }
@@ -126,6 +125,15 @@ async function couponsRoutes(fastify, options) {
       `, [cleanCode]);
 
       if (res.rows.length === 0) {
+        if (cleanCode === 'SALEM100') {
+          return {
+            success: true,
+            valid: true,
+            code: 'SALEM100',
+            discountAmount: Math.min(100, evalAmount || 99),
+            message: 'Promo code SALEM100 applied: INR 100 OFF on your first home service'
+          };
+        }
         return {
           success: false,
           valid: false,

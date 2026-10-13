@@ -28,6 +28,37 @@ async function bookingsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'serviceId is required' });
       }
 
+      // ================= SALEM REGION & PINCODE VALIDATION =================
+      let extractedPin = null;
+      if (req.body.pincode) {
+        extractedPin = String(req.body.pincode).trim();
+      } else if (address) {
+        const match = String(address).match(/\b(\d{6})\b/);
+        if (match) extractedPin = match[1];
+      }
+
+      if (extractedPin) {
+        // Salem District Postal Division strictly starts with 636 (636001 - 636999)
+        if (!extractedPin.startsWith('636')) {
+          return reply.status(400).send({
+            success: false,
+            error: `Outside Service Region: PIN code ${extractedPin} is outside our active Salem working region. SalemSeva only serves Salem (PIN codes: 636xxx). Your booking cannot be accepted.`
+          });
+        }
+      }
+
+      // Check if address/locality text explicitly mentions other major cities without Salem
+      const locationText = `${address || ''} ${locality || ''}`.toLowerCase();
+      const forbiddenCities = ['chennai', 'bangalore', 'bengaluru', 'coimbatore', 'madurai', 'trichy', 'tiruchirappalli', 'hyderabad', 'mumbai', 'delhi', 'pune', 'vellore', 'tiruppur'];
+      for (const fc of forbiddenCities) {
+        if (locationText.includes(fc) && !locationText.includes('salem')) {
+          return reply.status(400).send({
+            success: false,
+            error: `Outside Service Region: ${fc.toUpperCase()} is outside our active Salem working region. SalemSeva only operates within Salem.`
+          });
+        }
+      }
+
       const bookingId = 'SLM-' + Math.floor(10000 + Math.random() * 90000);
       let visitFee = 99.00;
       if (serviceId) {
@@ -69,12 +100,16 @@ async function bookingsRoutes(fastify, options) {
               // Increment coupon usage
               await query(`UPDATE coupons SET times_used = times_used + 1 WHERE id = $1`, [coup.id]);
             }
-          } else if (cleanCode === 'SALEM100' || cleanCode === 'SALEM50') {
-            couponDiscount = 50.00;
+          } else if (cleanCode === 'SALEM100') {
+            couponDiscount = Math.min(100.00, visitFee);
+          } else if (cleanCode === 'SALEM50') {
+            couponDiscount = Math.min(50.00, visitFee);
           }
         } catch (cErr) {
           if (couponCode.toUpperCase() === 'SALEM100') {
-            couponDiscount = 50.00;
+            couponDiscount = Math.min(100.00, visitFee);
+          } else if (couponCode.toUpperCase() === 'SALEM50') {
+            couponDiscount = Math.min(50.00, visitFee);
           }
         }
       }
