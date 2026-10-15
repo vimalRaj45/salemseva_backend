@@ -33,62 +33,80 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      // Check Technicians table first if phone matches
+      // Check Technicians table first if phone, email, or username matches
       let userRecord = null;
       let userRole = 'customer';
 
-      if (cleanPhone) {
-        const techRes = await query(`
-          SELECT * FROM technicians 
-          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE $1
-          LIMIT 1
-        `, [`%${cleanPhone}`]);
+      const techRes = await query(`
+        SELECT * FROM technicians 
+        WHERE (
+          $1::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+        )
+        OR (LOWER(email) = LOWER($2) AND $2::text <> '')
+        OR (LOWER(full_name) = LOWER($2) AND $2::text <> '')
+        LIMIT 1
+      `, [cleanPhone || '', rawInput.toLowerCase()]);
 
-        if (techRes.rows.length > 0) {
-          const t = techRes.rows[0];
-          // If technician has a password_hash set, verify it
-          if (t.password_hash) {
-            const hashedInput = hashPassword(password);
-            if (hashedInput !== t.password_hash && password !== 'salem123') {
-              return reply.status(401).send({
-                success: false,
-                error: 'Incorrect password for this technician account'
-              });
-            }
-          }
-          if (t.is_blocked) {
-            return reply.status(403).send({
+      if (techRes.rows.length > 0) {
+        const t = techRes.rows[0];
+        // If technician has a password_hash set, verify it
+        if (t.password_hash) {
+          const hashedInput = hashPassword(password);
+          if (hashedInput !== t.password_hash && password !== 'salem123') {
+            return reply.status(401).send({
               success: false,
-              error: `Your partner account has been suspended by Salem Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
+              error: 'Incorrect password for this technician account'
             });
           }
-          userRecord = {
-            id: t.id,
-            role: 'technician',
-            name: t.full_name || t.name || 'Certified Partner',
-            phone: t.phone || `+91 ${cleanPhone}`,
-            email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
-            trade: t.primary_trade || t.trade || 'ac',
-            isKycVerified: Boolean(t.is_kyc_verified),
-            isOnline: Boolean(t.is_online),
-            ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
-            jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
-            todayEarnings: 0,
-            serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem'
-          };
-          userRole = 'technician';
         }
+        if (t.is_blocked) {
+          return reply.status(403).send({
+            success: false,
+            error: `Your partner account has been suspended by Salem Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
+          });
+        }
+
+        const tradeNames = {
+          ac: 'AC Repair & Cooling Expert',
+          electrician: 'Electrician & Wiring Specialist',
+          plumber: 'Plumbing & Drainage Specialist',
+          cleaning: 'Home & Bathroom Cleaning Pro'
+        };
+
+        userRecord = {
+          id: t.id,
+          role: 'technician',
+          name: t.full_name || t.name || 'Certified Partner',
+          phone: t.phone || `+91 ${cleanPhone}`,
+          email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+          trade: t.primary_trade || t.trade || 'ac',
+          tradeName: tradeNames[t.primary_trade || t.trade] || 'Home Services Specialist',
+          upiId: t.upi_vpa,
+          upi_vpa: t.upi_vpa,
+          aadhaarCardUrl: t.aadhaar_card_url,
+          aadhaarNumber: t.aadhaar_number,
+          isKycVerified: Boolean(t.is_kyc_verified),
+          isOnline: Boolean(t.is_online),
+          ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
+          jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+          todayEarnings: 0,
+          serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
+          assignedLocalities: t.assigned_localities || ['Fairlands']
+        };
+        userRole = 'technician';
       }
 
       // If not technician, check users table (customers & admins)
       if (!userRecord) {
         const custRes = await query(`
           SELECT * FROM users 
-          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE $1 
-             OR LOWER(email) = LOWER($2)
-             OR LOWER(full_name) = LOWER($2)
+          WHERE (
+            $1::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+          )
+          OR LOWER(email) = LOWER($2)
+          OR LOWER(full_name) = LOWER($2)
           LIMIT 1
-        `, [`%${cleanPhone || 'NOMATCH'}`, rawInput.toLowerCase()]);
+        `, [cleanPhone || '', rawInput.toLowerCase()]);
 
         if (custRes.rows.length > 0) {
           const u = custRes.rows[0];
@@ -256,6 +274,12 @@ async function authRoutes(fastify, options) {
             VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, 0.00, 0, 0)
             ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name, password_hash = EXCLUDED.password_hash
           `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities, pwdHash]);
+
+          await query(`
+            INSERT INTO users (full_name, phone, email, role, locality, password_hash)
+            VALUES ($1, $2, $3, 'technician', $4, $5)
+            ON CONFLICT (phone) DO UPDATE SET role = 'technician', full_name = EXCLUDED.full_name, password_hash = EXCLUDED.password_hash
+          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.serviceArea, pwdHash]);
         } catch (dbErr) {
           fastify.log.warn('Could not insert tech to DB:', dbErr.message);
         }

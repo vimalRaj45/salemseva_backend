@@ -6,15 +6,15 @@ async function partnerRoutes(fastify, options) {
   fastify.get('/partner/duty', async (req, reply) => {
     try {
       const phoneParam = (req.query && req.query.phone) ? req.query.phone : '+919443288901';
-      const cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
+      const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
 
       const techRes = await query(`
         SELECT * FROM technicians 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 
-           OR id::text = $1
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1 
+           OR id::text = $2
         ORDER BY created_at ASC 
         LIMIT 1
-      `, [cleanPhone]);
+      `, [cleanDigits || 'NOMATCH', phoneParam]);
 
       let tech = techRes.rows[0];
       
@@ -609,7 +609,11 @@ async function partnerRoutes(fastify, options) {
         await query(`
           INSERT INTO users (full_name, phone, role, password_hash, locality)
           VALUES ($1, $2, 'technician', $3, $4)
-          ON CONFLICT (phone) DO UPDATE SET password_hash = EXCLUDED.password_hash
+          ON CONFLICT (phone) DO UPDATE SET 
+            role = 'technician',
+            full_name = EXCLUDED.full_name,
+            password_hash = EXCLUDED.password_hash,
+            locality = EXCLUDED.locality
         `, [fullName || 'Salem Verified Partner', cleanPhone, partnerPwdHash, serviceArea || 'Fairlands, Salem']);
       } catch (uErr) {}
 
@@ -650,14 +654,144 @@ async function partnerRoutes(fastify, options) {
         ]);
       } catch (e) {}
 
+      const createdTech = res.rows[0];
+      const tradeNames = {
+        ac: 'AC Repair & Cooling Expert',
+        electrician: 'Electrician & Wiring Specialist',
+        plumber: 'Plumbing & Drainage Specialist',
+        cleaning: 'Home & Bathroom Cleaning Pro'
+      };
+
+      const techUser = {
+        id: createdTech.id,
+        role: 'technician',
+        name: createdTech.full_name,
+        phone: createdTech.phone,
+        email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+        trade: createdTech.primary_trade,
+        tradeName: tradeNames[createdTech.primary_trade] || 'Home Services Specialist',
+        upiId: createdTech.upi_vpa,
+        upi_vpa: createdTech.upi_vpa,
+        aadhaarCardUrl: createdTech.aadhaar_card_url,
+        aadhaarNumber: createdTech.aadhaar_number,
+        isKycVerified: Boolean(createdTech.is_kyc_verified),
+        isOnline: Boolean(createdTech.is_online),
+        serviceArea: serviceArea || 'Fairlands, Salem',
+        assignedLocalities: createdTech.assigned_localities || ['Fairlands'],
+        ratingAvg: parseFloat(createdTech.rating_avg || 5.0),
+        ratingCount: parseInt(createdTech.rating_count || 0, 10),
+        jobsCompleted: parseInt(createdTech.jobs_completed_count || 0, 10),
+        experienceYears: createdTech.years_experience || 3
+      };
+
       return {
         success: true,
         message: hasReferral 
           ? `Partner onboarded! Welcome bonus of INR ${referralBonus} unlocked via referral code ${referralCode.toUpperCase()}`
           : 'Partner onboarded and DigiLocker KYC verified successfully in Neon DB',
-        technician: res.rows[0],
+        technician: createdTech,
+        user: techUser,
         referralApplied: hasReferral,
         welcomeToolBonus: referralBonus
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3b. Partner Profile & KYC Document Re-upload / Updation
+  fastify.post('/partner/profile/update', async (req, reply) => {
+    try {
+      const {
+        phone = '',
+        technicianId = '',
+        fullName,
+        upiId,
+        trade,
+        aadhaarCardUrl,
+        serviceArea
+      } = req.body || {};
+
+      const cleanDigits = (phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (!cleanDigits && !technicianId) {
+        return reply.status(400).send({ success: false, error: 'Valid phone number or technician ID required' });
+      }
+
+      const updateRes = await query(`
+        UPDATE technicians
+        SET
+          full_name = COALESCE($1, full_name),
+          upi_vpa = COALESCE($2, upi_vpa),
+          primary_trade = COALESCE($3, primary_trade),
+          aadhaar_card_url = COALESCE($4, aadhaar_card_url),
+          aadhaar_uploaded_at = CASE WHEN $4::text IS NOT NULL THEN NOW() ELSE aadhaar_uploaded_at END,
+          assigned_localities = CASE WHEN $5::text IS NOT NULL THEN ARRAY[$5::text] ELSE assigned_localities END
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $6
+           OR id::text = $7
+        RETURNING *;
+      `, [
+        fullName || null,
+        upiId || null,
+        trade || null,
+        aadhaarCardUrl || null,
+        serviceArea || null,
+        cleanDigits || 'NOMATCH',
+        technicianId || 'NOMATCH'
+      ]);
+
+      if (updateRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Technician account not found' });
+      }
+
+      const updatedTech = updateRes.rows[0];
+
+      // Sync users table as well
+      try {
+        await query(`
+          UPDATE users
+          SET
+            full_name = COALESCE($1, full_name),
+            locality = COALESCE($2, locality),
+            role = 'technician'
+          WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $3
+        `, [fullName || null, serviceArea || null, cleanDigits || 'NOMATCH']);
+      } catch (uErr) {}
+
+      const tradeNames = {
+        ac: 'AC Repair & Cooling Expert',
+        electrician: 'Electrician & Wiring Specialist',
+        plumber: 'Plumbing & Drainage Specialist',
+        cleaning: 'Home & Bathroom Cleaning Pro'
+      };
+
+      const techUser = {
+        id: updatedTech.id,
+        role: 'technician',
+        name: updatedTech.full_name,
+        phone: updatedTech.phone,
+        email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+        trade: updatedTech.primary_trade,
+        tradeName: tradeNames[updatedTech.primary_trade] || 'Home Services Specialist',
+        upiId: updatedTech.upi_vpa,
+        upi_vpa: updatedTech.upi_vpa,
+        aadhaarCardUrl: updatedTech.aadhaar_card_url,
+        aadhaarNumber: updatedTech.aadhaar_number,
+        isKycVerified: Boolean(updatedTech.is_kyc_verified),
+        isOnline: Boolean(updatedTech.is_online),
+        serviceArea: serviceArea || (updatedTech.assigned_localities?.[0] ? `${updatedTech.assigned_localities[0]}, Salem` : 'Fairlands, Salem'),
+        assignedLocalities: updatedTech.assigned_localities || ['Fairlands'],
+        ratingAvg: parseFloat(updatedTech.rating_avg || 5.0),
+        ratingCount: parseInt(updatedTech.rating_count || 0, 10),
+        jobsCompleted: parseInt(updatedTech.jobs_completed_count || 0, 10),
+        experienceYears: updatedTech.years_experience || 3
+      };
+
+      return {
+        success: true,
+        message: 'Profile and KYC documents updated successfully in SalemSeva database',
+        technician: updatedTech,
+        user: techUser
       };
     } catch (err) {
       fastify.log.error(err);
