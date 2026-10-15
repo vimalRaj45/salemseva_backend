@@ -29,15 +29,27 @@ async function partnerRoutes(fastify, options) {
       }
 
       // Get latest active job for this partner from DB (prioritize incoming 'matching' requests)
+      // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
       const jobRes = await query(`
         SELECT * FROM bookings 
         WHERE (
           technician_id = $1 
-          OR service_id = $2 
-          OR status = 'matching'
-          OR $2 IS NULL
+          OR (technician_id IS NULL AND (service_id = $2 OR $2 IS NULL))
         )
         AND status IN ('matching', 'accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress')
+        AND id NOT IN (
+          SELECT booking_id FROM technician_rejected_leads 
+          WHERE (technician_id = $1::text OR technician_id = $3)
+            AND rejected_at >= CURRENT_DATE
+        )
+        AND (
+          customer_phone IS NULL OR customer_phone NOT IN (
+            SELECT customer_phone FROM technician_rejected_leads 
+            WHERE (technician_id = $1::text OR technician_id = $3)
+              AND rejected_at >= CURRENT_DATE
+              AND customer_phone IS NOT NULL
+          )
+        )
         ORDER BY 
           CASE 
             WHEN status = 'matching' THEN 1 
@@ -47,7 +59,7 @@ async function partnerRoutes(fastify, options) {
           END,
           created_at DESC 
         LIMIT 1
-      `, [tech.id, tech.primary_trade]);
+      `, [tech.id, tech.primary_trade, cleanPhone]);
 
       const activeJob = jobRes.rows[0] || null;
 
@@ -124,11 +136,37 @@ async function partnerRoutes(fastify, options) {
         adminRequested: true
       } : null;
 
+      // Get technician's upcoming accepted scheduled appointments
+      const myScheduledRes = await query(`
+        SELECT * FROM bookings
+        WHERE technician_id = $1
+          AND status IN ('accepted', 'en_route', 'arrived')
+          AND (booking_type = 'scheduled' OR scheduled_slot IS NOT NULL)
+        ORDER BY created_at DESC
+        LIMIT 10
+      `, [tech.id]);
+
       return {
         success: true,
         technician: tech,
         cancelNotice,
         offlineJobRequest,
+        myScheduledJobs: myScheduledRes.rows.map(b => ({
+          id: b.id,
+          customerName: b.customer_name,
+          customerPhone: b.customer_phone,
+          serviceId: b.service_id,
+          issueDescription: b.custom_issue_description || 'Service Diagnostics & Inspection',
+          address: b.service_address,
+          locality: b.locality,
+          status: b.status,
+          visitFee: parseFloat(b.visit_fee || 49),
+          isUrgent: Boolean(b.is_urgent_dispatch),
+          scheduledSlot: b.scheduled_slot,
+          bookingType: b.booking_type || 'scheduled',
+          voiceNoteUrl: b.voice_note_url || null,
+          createdAt: b.created_at
+        })),
         activeJob: activeJob ? {
           id: activeJob.id,
           customerName: activeJob.customer_name,
@@ -148,6 +186,175 @@ async function partnerRoutes(fastify, options) {
           scheduledSlot: activeJob.scheduled_slot || null,
           createdAt: activeJob.created_at
         } : null
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1a-1. Get Open Scheduled Requests Available for Direct Technician Acceptance
+  fastify.get('/partner/scheduled-leads', async (req, reply) => {
+    try {
+      const phoneParam = (req.query && req.query.phone) ? req.query.phone : null;
+      let trade = (req.query && req.query.trade) ? req.query.trade : null;
+
+      let techId = null;
+      let cleanPhone = null;
+      if (phoneParam) {
+        cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
+        const techRes = await query(`
+          SELECT id, primary_trade FROM technicians 
+          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $1
+          LIMIT 1
+        `, [cleanPhone]);
+        if (techRes.rows.length > 0) {
+          techId = techRes.rows[0].id;
+          if (!trade) {
+            trade = techRes.rows[0].primary_trade;
+          }
+        }
+      }
+
+      // Exclude customer bookings this technician rejected for the current day. Other requests remain unaffected!
+      const scheduledRes = await query(`
+        SELECT 
+          id, service_id, selected_issue_id, custom_issue_description,
+          customer_name, customer_phone, service_address, locality,
+          visit_fee, is_urgent_dispatch, scheduled_slot, booking_type,
+          voice_note_url, created_at
+        FROM bookings
+        WHERE (service_id = $1 OR $1 IS NULL)
+          AND (technician_id IS NULL)
+          AND (status IN ('created', 'matching'))
+          AND (booking_type = 'scheduled' OR scheduled_slot IS NOT NULL)
+          AND (
+            $2::text IS NULL OR id NOT IN (
+              SELECT booking_id FROM technician_rejected_leads 
+              WHERE (technician_id = $2::text OR technician_id = $3)
+                AND rejected_at >= CURRENT_DATE
+            )
+          )
+          AND (
+            $2::text IS NULL OR customer_phone IS NULL OR customer_phone NOT IN (
+              SELECT customer_phone FROM technician_rejected_leads 
+              WHERE (technician_id = $2::text OR technician_id = $3)
+                AND rejected_at >= CURRENT_DATE
+                AND customer_phone IS NOT NULL
+            )
+          )
+        ORDER BY created_at DESC
+        LIMIT 30;
+      `, [trade, techId ? String(techId) : null, cleanPhone]);
+
+      return {
+        success: true,
+        trade,
+        count: scheduledRes.rows.length,
+        leads: scheduledRes.rows.map(b => ({
+          id: b.id,
+          customerName: b.customer_name || 'Customer',
+          customerPhone: b.customer_phone,
+          serviceId: b.service_id,
+          issueDescription: b.custom_issue_description || 'Doorstep Service & Diagnostic Inspection',
+          address: b.service_address,
+          locality: b.locality || 'Fairlands, Salem',
+          status: b.status,
+          visitFee: parseFloat(b.visit_fee || 49),
+          isUrgent: Boolean(b.is_urgent_dispatch),
+          scheduledSlot: b.scheduled_slot,
+          bookingType: b.booking_type || 'scheduled',
+          voiceNoteUrl: b.voice_note_url || null,
+          createdAt: b.created_at
+        }))
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1a-2. Directly Claim & Accept an Open Scheduled Booking (Autonomous without Admin)
+  fastify.post('/partner/duty/accept-scheduled-lead', async (req, reply) => {
+    try {
+      const { bookingId, phone = '+919443288901', technicianId } = req.body || {};
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'bookingId is required' });
+      }
+
+      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+      const techRes = await query(`
+        SELECT * FROM technicians 
+        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $2
+        LIMIT 1
+      `, [cleanPhone, technicianId || '']);
+
+      const tech = techRes.rows[0];
+      if (!tech) {
+        return reply.status(404).send({ success: false, error: 'Technician account not found' });
+      }
+
+      // Check if already claimed by someone else
+      const checkRes = await query(`SELECT technician_id, status, scheduled_slot, locality FROM bookings WHERE id = $1`, [bookingId]);
+      if (checkRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const existing = checkRes.rows[0];
+      if (existing.technician_id && existing.technician_id !== tech.id) {
+        return reply.status(409).send({
+          success: false,
+          error: 'This scheduled slot was already claimed by another specialist in Salem.'
+        });
+      }
+
+      // Update booking with technician_id and status = 'accepted'
+      const updateRes = await query(`
+        UPDATE bookings 
+        SET technician_id = $1, status = 'accepted', matched_at = COALESCE(matched_at, CURRENT_TIMESTAMP)
+        WHERE id = $2 AND (technician_id IS NULL OR technician_id = $1)
+        RETURNING *;
+      `, [tech.id, bookingId]);
+
+      if (updateRes.rows.length === 0) {
+        return reply.status(409).send({
+          success: false,
+          error: 'Could not claim slot. It may have been assigned or cancelled.'
+        });
+      }
+
+      const updatedBooking = updateRes.rows[0];
+
+      // Audit Log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'TECH_CLAIMED_SCHEDULED_SLOT', $2, 'technician', $3)
+      `, [bookingId, tech.id, JSON.stringify({
+        technicianName: tech.full_name,
+        technicianPhone: tech.phone,
+        scheduledSlot: updatedBooking.scheduled_slot,
+        locality: updatedBooking.locality,
+        claimedAt: new Date().toISOString()
+      })]);
+
+      return {
+        success: true,
+        message: `Scheduled appointment successfully assigned to your schedule for ${updatedBooking.scheduled_slot}!`,
+        booking: {
+          id: updatedBooking.id,
+          customerName: updatedBooking.customer_name,
+          customerPhone: updatedBooking.customer_phone,
+          serviceId: updatedBooking.service_id,
+          issueDescription: updatedBooking.custom_issue_description,
+          address: updatedBooking.service_address,
+          locality: updatedBooking.locality,
+          status: updatedBooking.status,
+          visitFee: parseFloat(updatedBooking.visit_fee || 49),
+          scheduledSlot: updatedBooking.scheduled_slot,
+          bookingType: updatedBooking.booking_type,
+          voiceNoteUrl: updatedBooking.voice_note_url,
+          createdAt: updatedBooking.created_at
+        }
       };
     } catch (err) {
       fastify.log.error(err);
@@ -203,22 +410,40 @@ async function partnerRoutes(fastify, options) {
       const { id } = req.params;
       const { technicianId, reason } = req.body || {};
 
-      // Reset technician_id and keep job in matching so other technicians or Salem central operations can pick it up
+      // Look up customer phone and details for this booking
+      const bRes = await query(`
+        SELECT customer_id, customer_phone 
+        FROM bookings 
+        WHERE id = $1
+      `, [id]);
+      const customerPhone = bRes.rows[0]?.customer_phone || null;
+      const customerId = bRes.rows[0]?.customer_id || null;
+
+      // Reset technician_id and keep job in matching so other technicians can pick it up
       await query(`
         UPDATE bookings 
         SET technician_id = NULL, status = 'matching' 
         WHERE id = $1
       `, [id]);
 
+      // Record rejection in technician_rejected_leads for this technician so this customer's job is hidden for the day
+      if (technicianId) {
+        await query(`
+          INSERT INTO technician_rejected_leads (booking_id, technician_id, customer_phone, customer_id, reason, rejected_at)
+          VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+        `, [id, String(technicianId), customerPhone, customerId ? String(customerId) : null, reason || 'Technician passed lead']);
+      }
+
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'TECHNICIAN_PASSED_LEAD', $2, 'technician', $3)
-      `, [id, technicianId || 'technician', JSON.stringify({ reason: reason || 'Technician passed lead' })]);
+      `, [id, technicianId || 'technician', JSON.stringify({ reason: reason || 'Technician passed lead', customerPhone, forDayOnly: true })]);
 
       return {
         success: true,
-        message: 'Lead successfully passed. Radar will resume searching for available jobs.',
-        bookingId: id
+        message: 'Lead successfully passed. This customer job will not be shown to you for the rest of today. Other customer requests remain active.',
+        bookingId: id,
+        customerPhone
       };
     } catch (err) {
       fastify.log.error(err);

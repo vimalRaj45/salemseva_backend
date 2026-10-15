@@ -12,6 +12,7 @@ async function bookingsRoutes(fastify, options) {
         customNotes,
         customerName,
         customerPhone,
+        phone,
         address,
         locality,
         lat,
@@ -29,7 +30,8 @@ async function bookingsRoutes(fastify, options) {
       }
 
       // Check if customer is blocked
-      const cleanPhone = (phone || '').replace(/[\s\-\(\)]/g, '');
+      const rawCustomerPhone = customerPhone || phone || req.body?.customerPhone || req.body?.phone || '';
+      const cleanPhone = (rawCustomerPhone || '').replace(/[\s\-\(\)]/g, '');
       if (cleanPhone) {
         const uCheck = await query(
           "SELECT is_blocked, block_reason FROM users WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE $1 LIMIT 1",
@@ -175,7 +177,7 @@ async function bookingsRoutes(fastify, options) {
         issueId || 'ac_cooling',
         issueDescription || 'Doorstep Service & Diagnostic Inspection',
         customerName || 'Vimal Raj',
-        customerPhone || '+919842711234',
+        rawCustomerPhone || '+919842711234',
         address || 'Plot 42, 5th Cross, Fairlands, Salem - 636016',
         locality || 'Fairlands',
         parseFloat(lat) || 11.6738,
@@ -198,7 +200,7 @@ async function bookingsRoutes(fastify, options) {
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'BOOKING_CREATED', $2, 'customer', $3)
-      `, [bookingId, customerPhone || '+919842711234', JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
+      `, [bookingId, rawCustomerPhone || '+919842711234', JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
 
       return {
         success: true,
