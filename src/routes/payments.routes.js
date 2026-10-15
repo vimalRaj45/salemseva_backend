@@ -242,9 +242,9 @@ async function paymentsRoutes(fastify, options) {
       const targetId = booking.id;
       const quoteSubtotal = parseFloat(booking.quote_subtotal) || 250.00;
       const visitFee = parseFloat(booking.visit_fee) || 99.00;
-      const techLaborShare = quoteSubtotal * 0.95; // 95% of labor work charge
-      const totalTechPayout = visitFee + techLaborShare;
-      const platformCut = quoteSubtotal * 0.05; // Strictly 5% platform commission on work charge
+      const totalBookingAmount = visitFee + quoteSubtotal;
+      const platformCut = parseFloat((totalBookingAmount * 0.02).toFixed(2)); // Strictly 2% SalemSeva platform commission
+      const totalTechPayout = parseFloat((totalBookingAmount - platformCut).toFixed(2)); // 98% technician payout
       const utrNumber = 'UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS';
 
       // 1. Update booking status to completed

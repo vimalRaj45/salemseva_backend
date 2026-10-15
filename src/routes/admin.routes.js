@@ -16,6 +16,7 @@ async function adminRoutes(fastify, options) {
             t.rating_avg, t.rating_count, t.jobs_completed_count, t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
             t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
+            t.is_blocked, t.block_reason, t.blocked_at,
             (
               SELECT count(*) 
               FROM bookings b 
@@ -171,6 +172,115 @@ async function adminRoutes(fastify, options) {
     }
   });
 
+  // 4b. Toggle Block/Unblock for Technician
+  fastify.post('/admin/technicians/:id/toggle-block', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { isBlocked = true, reason = '' } = req.body || {};
+
+      const res = await query(`
+        UPDATE technicians 
+        SET is_blocked = $1,
+            block_reason = CASE WHEN $1 = TRUE THEN $2 ELSE NULL END,
+            blocked_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END,
+            is_online = CASE WHEN $1 = TRUE THEN FALSE ELSE is_online END
+        WHERE id = $3 
+        RETURNING *
+      `, [isBlocked, reason || 'Administrative block by Salem Central Operations', id]);
+
+      if (res.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Technician not found' });
+      }
+
+      const tech = res.rows[0];
+
+      // Audit Log
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ('TECH-BLOCK-' || $1, $2, 'admin_hq', 'admin', $3)
+        `, [
+          tech.phone || id,
+          isBlocked ? 'TECHNICIAN_BLOCKED' : 'TECHNICIAN_UNBLOCKED',
+          JSON.stringify({
+            technicianId: id,
+            technicianName: tech.full_name,
+            reason: reason || (isBlocked ? 'Account blocked by admin' : 'Account restored by admin'),
+            timestamp: new Date().toISOString()
+          })
+        ]);
+      } catch (auditErr) {}
+
+      return {
+        success: true,
+        message: isBlocked
+          ? `Technician ${tech.full_name} has been suspended. They cannot go online or receive bookings.`
+          : `Technician ${tech.full_name} has been unblocked.`,
+        technician: tech
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 4c. Toggle Block/Unblock for Customer
+  fastify.post('/admin/customers/:phone/toggle-block', async (req, reply) => {
+    try {
+      const { phone } = req.params;
+      const { isBlocked = true, reason = '' } = req.body || {};
+      const cleanPhone = (phone.startsWith('+91') ? phone : `+91${phone}`).replace(/[\s\-]/g, '');
+
+      let res = await query(`
+        UPDATE users 
+        SET is_blocked = $1,
+            block_reason = CASE WHEN $1 = TRUE THEN $2 ELSE NULL END,
+            blocked_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
+        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = REPLACE(REPLACE($3, ' ', ''), '-', '')
+        RETURNING *
+      `, [isBlocked, reason || 'Administrative block by Salem Central Operations', cleanPhone]);
+
+      if (res.rows.length === 0) {
+        res = await query(`
+          INSERT INTO users (phone, full_name, role, is_blocked, block_reason, blocked_at)
+          VALUES ($1, 'Customer ' || RIGHT($1, 4), 'customer', $2, $3, NOW())
+          ON CONFLICT (phone) DO UPDATE 
+          SET is_blocked = EXCLUDED.is_blocked, block_reason = EXCLUDED.block_reason, blocked_at = EXCLUDED.blocked_at
+          RETURNING *
+        `, [cleanPhone, isBlocked, reason]);
+      }
+
+      const user = res.rows[0];
+
+      // Audit Log
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ('USER-BLOCK-' || $1, $2, 'admin_hq', 'admin', $3)
+        `, [
+          cleanPhone,
+          isBlocked ? 'CUSTOMER_BLOCKED' : 'CUSTOMER_UNBLOCKED',
+          JSON.stringify({
+            phone: cleanPhone,
+            reason: reason || (isBlocked ? 'Account blocked by admin' : 'Account restored by admin'),
+            timestamp: new Date().toISOString()
+          })
+        ]);
+      } catch (auditErr) {}
+
+      return {
+        success: true,
+        message: isBlocked
+          ? `Customer (${cleanPhone}) has been blocked. They cannot place new bookings.`
+          : `Customer (${cleanPhone}) has been unblocked.`,
+        customer: user
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 5. Customer 360 Analytics & Directory
   fastify.get('/admin/customers', async (req, reply) => {
     try {
@@ -184,7 +294,10 @@ async function adminRoutes(fastify, options) {
           COALESCE(SUM(b.final_amount), 0) as total_spent,
           MAX(b.created_at) as last_order_date,
           COUNT(CASE WHEN b.status = 'completed' THEN 1 END) as completed_orders,
-          COUNT(CASE WHEN b.status IN ('matching', 'accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented') THEN 1 END) as active_orders
+          COUNT(CASE WHEN b.status IN ('matching', 'accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented') THEN 1 END) as active_orders,
+          BOOL_OR(COALESCE(u.is_blocked, FALSE)) as is_blocked,
+          MAX(u.block_reason) as block_reason,
+          MAX(u.blocked_at) as blocked_at
         FROM bookings b
         FULL OUTER JOIN users u ON b.customer_phone = u.phone
         WHERE b.customer_phone IS NOT NULL OR u.phone IS NOT NULL
@@ -312,6 +425,220 @@ async function adminRoutes(fastify, options) {
         success: true,
         count: result.rows.length,
         settlements: result.rows
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9.1 End-to-End Financial Ledger & Revenue Tracking with Region & Date Filters
+  fastify.get('/admin/financials/ledger', async (req, reply) => {
+    try {
+      const { locality, startDate, endDate, serviceId, status } = req.query || {};
+
+      let whereConditions = [];
+      let params = [];
+
+      if (locality && locality !== 'all') {
+        params.push(locality);
+        whereConditions.push(`(b.locality ILIKE $${params.length} OR b.service_address ILIKE $${params.length})`);
+      }
+
+      if (serviceId && serviceId !== 'all') {
+        params.push(serviceId);
+        whereConditions.push(`b.service_id = $${params.length}`);
+      }
+
+      if (startDate) {
+        params.push(startDate);
+        whereConditions.push(`b.created_at >= $${params.length}::timestamp`);
+      }
+
+      if (endDate) {
+        params.push(`${endDate} 23:59:59`);
+        whereConditions.push(`b.created_at <= $${params.length}::timestamp`);
+      }
+
+      if (status && status !== 'all') {
+        params.push(status);
+        whereConditions.push(`b.status = $${params.length}`);
+      }
+
+      const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+      const sql = `
+        SELECT 
+          b.id as booking_id,
+          b.created_at,
+          b.status as booking_status,
+          b.customer_name,
+          b.customer_phone,
+          b.locality,
+          b.service_id,
+          b.final_amount,
+          b.visit_fee,
+          b.quote_subtotal,
+          b.booking_type,
+          b.scheduled_slot,
+          b.cancelled_at,
+          b.cancellation_reason,
+          t.full_name as technician_name,
+          t.phone as technician_phone,
+          t.primary_trade as technician_trade,
+          t.upi_vpa as technician_upi,
+          p.id as payment_id,
+          p.razorpay_payment_id,
+          p.payment_method,
+          p.status as payment_status,
+          p.amount_total as payment_amount,
+          p.tech_payout_amount as payment_tech_payout,
+          p.platform_commission as payment_platform_commission
+        FROM bookings b
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        LEFT JOIN LATERAL (
+          SELECT * FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+        ) p ON true
+        ${whereClause}
+        ORDER BY b.created_at DESC
+        LIMIT 200
+      `;
+
+      const result = await query(sql, params);
+      const rows = result.rows || [];
+
+      // Calculate end-to-end financial aggregations
+      let totalGross = 0;
+      let totalRazorpayFee = 0;
+      let totalTechPayout = 0;
+      let totalPlatformCut = 0;
+      let totalCustomerRefunds = 0;
+      let completedCount = 0;
+
+      const regionMap = {};
+      const dailyMap = {};
+
+      const transactions = rows.map(r => {
+        const visitFee = parseFloat(r.visit_fee) || 49.00;
+        const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
+        const isCancelled = r.booking_status === 'cancelled';
+        const isCompleted = r.booking_status === 'completed';
+        const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(r.booking_status) || (isCancelled && r.final_amount > 0);
+
+        // Gross inflow from customer
+        let gross = parseFloat(r.payment_amount) || parseFloat(r.final_amount) || (isPaid ? (visitFee + quoteSubtotal) : visitFee);
+        if (isCancelled && !r.payment_amount && !r.final_amount) {
+          gross = 0;
+        }
+
+        // Razorpay Gateway Fee: 2% + 18% GST on the fee = 2.36% of gross transaction
+        const razorpayFee = gross > 0 ? parseFloat((gross * 0.0236).toFixed(2)) : 0.00;
+
+        // Technician Payout: 100% of visit travel fee + 95% of quote labor
+        let techPayout = 0;
+        if (isCompleted) {
+          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((visitFee + quoteSubtotal * 0.95).toFixed(2));
+        } else if (isPaid && !isCancelled) {
+          techPayout = visitFee; // Visit fee travel allocation
+        } else if (isCancelled && r.technician_name) {
+          techPayout = visitFee; // Travel disbursal if cancelled after technician dispatch
+        }
+
+        // Platform Commission: 5% of quote labor
+        let platformCut = 0;
+        if (isCompleted) {
+          platformCut = parseFloat(r.payment_platform_commission) || parseFloat((quoteSubtotal * 0.05).toFixed(2));
+        }
+
+        // Customer Refund
+        let refund = 0;
+        if (isCancelled && (r.cancellation_reason?.includes('customer') || !r.technician_name)) {
+          refund = gross; // 100% refunded if cancelled before technician dispatch
+        }
+
+        // Update overall summary
+        totalGross += gross;
+        totalRazorpayFee += razorpayFee;
+        totalTechPayout += techPayout;
+        totalPlatformCut += platformCut;
+        totalCustomerRefunds += refund;
+        if (isCompleted) completedCount++;
+
+        // Region Breakdown
+        const loc = r.locality || 'Fairlands';
+        if (!regionMap[loc]) {
+          regionMap[loc] = { locality: loc, gross: 0, orders: 0, techPayout: 0, platformCut: 0 };
+        }
+        regionMap[loc].gross += gross;
+        regionMap[loc].orders += 1;
+        regionMap[loc].techPayout += techPayout;
+        regionMap[loc].platformCut += platformCut;
+
+        // Daily Breakdown
+        const dateKey = new Date(r.created_at).toISOString().split('T')[0];
+        if (!dailyMap[dateKey]) {
+          dailyMap[dateKey] = { date: dateKey, gross: 0, techPayout: 0, razorpayFee: 0, platformCut: 0, orders: 0 };
+        }
+        dailyMap[dateKey].gross += gross;
+        dailyMap[dateKey].techPayout += techPayout;
+        dailyMap[dateKey].razorpayFee += razorpayFee;
+        dailyMap[dateKey].platformCut += platformCut;
+        dailyMap[dateKey].orders += 1;
+
+        return {
+          id: r.payment_id || `txn_${r.booking_id}`,
+          bookingId: r.booking_id,
+          createdAt: r.created_at,
+          bookingStatus: r.booking_status,
+          customerName: r.customer_name || 'Customer',
+          customerPhone: r.customer_phone || '',
+          locality: r.locality || 'Fairlands',
+          serviceId: r.service_id || 'ac',
+          technicianName: r.technician_name || (isCancelled ? 'None (Pre-Dispatch)' : 'Pending Allocation'),
+          technicianTrade: r.technician_trade || '',
+          technicianUpi: r.technician_upi || '',
+          grossAmount: parseFloat(gross.toFixed(2)),
+          razorpayFee: parseFloat(razorpayFee.toFixed(2)),
+          techPayout: parseFloat(techPayout.toFixed(2)),
+          platformCut: parseFloat(platformCut.toFixed(2)),
+          customerRefund: parseFloat(refund.toFixed(2)),
+          paymentMethod: r.payment_method || 'UPI (Razorpay Escrow)',
+          razorpayPaymentId: r.razorpay_payment_id || `pay_${r.booking_id.substring(0, 8)}`,
+          status: isCancelled ? 'REFUNDED' : (isCompleted ? 'SETTLED' : 'ESCROW_HELD')
+        };
+      });
+
+      const regionBreakdown = Object.values(regionMap).map(rm => ({
+        ...rm,
+        gross: parseFloat(rm.gross.toFixed(2)),
+        techPayout: parseFloat(rm.techPayout.toFixed(2)),
+        platformCut: parseFloat(rm.platformCut.toFixed(2)),
+        pctShare: totalGross > 0 ? parseFloat(((rm.gross / totalGross) * 100).toFixed(1)) : 0
+      })).sort((a, b) => b.gross - a.gross);
+
+      const dailyBreakdown = Object.values(dailyMap).map(dm => ({
+        ...dm,
+        gross: parseFloat(dm.gross.toFixed(2)),
+        techPayout: parseFloat(dm.techPayout.toFixed(2)),
+        razorpayFee: parseFloat(dm.razorpayFee.toFixed(2)),
+        platformCut: parseFloat(dm.platformCut.toFixed(2))
+      })).sort((a, b) => a.date.localeCompare(b.date));
+
+      return {
+        success: true,
+        summary: {
+          totalGross: parseFloat(totalGross.toFixed(2)),
+          totalRazorpayFee: parseFloat(totalRazorpayFee.toFixed(2)),
+          totalTechPayout: parseFloat(totalTechPayout.toFixed(2)),
+          totalPlatformCut: parseFloat(totalPlatformCut.toFixed(2)),
+          totalCustomerRefunds: parseFloat(totalCustomerRefunds.toFixed(2)),
+          netPlatformEarnings: parseFloat((totalPlatformCut - totalRazorpayFee).toFixed(2)),
+          totalTransactions: transactions.length,
+          completedOrders: completedCount
+        },
+        regionBreakdown,
+        dailyBreakdown,
+        transactions
       };
     } catch (err) {
       fastify.log.error(err);

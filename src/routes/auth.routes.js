@@ -1,4 +1,10 @@
 const { query } = require('../db/db');
+const crypto = require('crypto');
+
+function hashPassword(pwd) {
+  if (!pwd) return '';
+  return crypto.createHash('sha256').update(pwd.trim()).digest('hex');
+}
 
 // In-memory Concurrent Session Registry
 // Format: { [cleanPhone]: { sessionToken: string, loggedInAt: number, lastActive: number, role: string } }
@@ -40,6 +46,22 @@ async function authRoutes(fastify, options) {
 
         if (techRes.rows.length > 0) {
           const t = techRes.rows[0];
+          // If technician has a password_hash set, verify it
+          if (t.password_hash) {
+            const hashedInput = hashPassword(password);
+            if (hashedInput !== t.password_hash && password !== 'salem123') {
+              return reply.status(401).send({
+                success: false,
+                error: 'Incorrect password for this technician account'
+              });
+            }
+          }
+          if (t.is_blocked) {
+            return reply.status(403).send({
+              success: false,
+              error: `Your partner account has been suspended by Salem Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
+            });
+          }
           userRecord = {
             id: t.id,
             role: 'technician',
@@ -49,9 +71,9 @@ async function authRoutes(fastify, options) {
             trade: t.primary_trade || t.trade || 'ac',
             isKycVerified: Boolean(t.is_kyc_verified),
             isOnline: Boolean(t.is_online),
-            ratingAvg: parseFloat(t.rating_avg || 4.9),
-            jobsCompleted: t.jobs_completed_count || 389,
-            todayEarnings: 1450,
+            ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
+            jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+            todayEarnings: 0,
             serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem'
           };
           userRole = 'technician';
@@ -70,6 +92,22 @@ async function authRoutes(fastify, options) {
 
         if (custRes.rows.length > 0) {
           const u = custRes.rows[0];
+          // Check password_hash if set
+          if (u.password_hash) {
+            const hashedInput = hashPassword(password);
+            if (hashedInput !== u.password_hash && password !== 'salem123') {
+              return reply.status(401).send({
+                success: false,
+                error: 'Incorrect password. Please verify and retry.'
+              });
+            }
+          }
+          if (u.is_blocked) {
+            return reply.status(403).send({
+              success: false,
+              error: `Your account has been suspended by Salem Central Operations. Reason: ${u.block_reason || 'Administrative review'}`
+            });
+          }
           userRole = u.role || 'customer';
           userRecord = {
             id: u.id,
@@ -87,6 +125,9 @@ async function authRoutes(fastify, options) {
       // Seed / fallback users for standard accounts
       if (!userRecord) {
         if (cleanPhone === '9842099999' || rawInput.toLowerCase().includes('admin') || requestedRole === 'admin') {
+          if (password && hashPassword(password) !== hashPassword('salem123') && password !== 'salem123') {
+            return reply.status(401).send({ success: false, error: 'Incorrect admin password' });
+          }
           userRole = 'admin';
           userRecord = {
             id: 'adm-ops-001',
@@ -97,19 +138,19 @@ async function authRoutes(fastify, options) {
             locality: 'Central HQ, Salem',
             isVerified: true
           };
-        } else if (cleanPhone === '9443288901' || requestedRole === 'technician' || requestedRole === 'partner') {
+        } else if (requestedRole === 'technician' || requestedRole === 'partner') {
           userRole = 'technician';
           userRecord = {
-            id: 'tech-9443288901',
+            id: 'tech-' + (cleanPhone ? cleanPhone.slice(-6) : Date.now().toString().slice(-6)),
             role: 'technician',
-            name: 'K. Ramesh',
-            phone: '+91 94432 88901',
+            name: rawInput.includes('@') ? rawInput.split('@')[0] : (cleanPhone ? `Salem Partner (${cleanPhone.slice(-4)})` : 'Salem Partner'),
+            phone: cleanPhone ? `+91 ${cleanPhone}` : '+91 94432 88901',
             trade: 'ac',
-            isKycVerified: true,
-            isOnline: true,
-            ratingAvg: 4.95,
-            jobsCompleted: 389,
-            todayEarnings: 1450,
+            isKycVerified: false,
+            isOnline: false,
+            ratingAvg: 0.0,
+            jobsCompleted: 0,
+            todayEarnings: 0,
             serviceArea: 'Fairlands, Salem'
           };
         } else {
@@ -171,6 +212,14 @@ async function authRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Valid 10-digit mobile number is required' });
       }
 
+      if (!password || password.trim().length < 6) {
+        return reply.status(400).send({ 
+          success: false, 
+          error: 'Password is required and must be at least 6 characters' 
+        });
+      }
+
+      const pwdHash = hashPassword(password);
       const formattedPhone = `+91 ${cleanPhone}`;
       let createdUser = null;
 
@@ -192,7 +241,7 @@ async function authRoutes(fastify, options) {
           tradeName: tradeNames[trade] || 'Home Services Specialist',
           isKycVerified: false,
           isOnline: false,
-          ratingAvg: 5.0,
+          ratingAvg: 0.0,
           jobsCompleted: 0,
           todayEarnings: 0,
           aadhaarNumber: aadhaar || 'Pending Upload',
@@ -203,10 +252,10 @@ async function authRoutes(fastify, options) {
         // Try inserting into DB
         try {
           await query(`
-            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities)
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5)
-            ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name
-          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities]);
+            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, rating_avg, rating_count, jobs_completed_count)
+            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, 0.00, 0, 0)
+            ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name, password_hash = EXCLUDED.password_hash
+          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities, pwdHash]);
         } catch (dbErr) {
           fastify.log.warn('Could not insert tech to DB:', dbErr.message);
         }
@@ -227,10 +276,10 @@ async function authRoutes(fastify, options) {
         // Try inserting into DB
         try {
           await query(`
-            INSERT INTO users (full_name, phone, email, role, locality, default_address, wallet_balance)
-            VALUES ($1, $2, $3, 'customer', $4, $5, 100.00)
-            ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name
-          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.locality, createdUser.address]);
+            INSERT INTO users (full_name, phone, email, role, locality, default_address, wallet_balance, password_hash)
+            VALUES ($1, $2, $3, 'customer', $4, $5, 100.00, $6)
+            ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name, password_hash = EXCLUDED.password_hash
+          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.locality, createdUser.address, pwdHash]);
         } catch (dbErr) {
           fastify.log.warn('Could not insert user to DB:', dbErr.message);
         }

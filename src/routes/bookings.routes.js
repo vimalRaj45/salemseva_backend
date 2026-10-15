@@ -28,6 +28,21 @@ async function bookingsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'serviceId is required' });
       }
 
+      // Check if customer is blocked
+      const cleanPhone = (phone || '').replace(/[\s\-\(\)]/g, '');
+      if (cleanPhone) {
+        const uCheck = await query(
+          "SELECT is_blocked, block_reason FROM users WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE $1 LIMIT 1",
+          [`%${cleanPhone.slice(-10)}`]
+        );
+        if (uCheck.rows.length > 0 && uCheck.rows[0].is_blocked) {
+          return reply.status(403).send({
+            success: false,
+            error: `Booking prohibited: Your customer account is suspended by Salem Central Operations. Reason: ${uCheck.rows[0].block_reason || 'Administrative restriction'}. Please contact Salem Central Ops support.`
+          });
+        }
+      }
+
       // ================= SALEM REGION & PINCODE VALIDATION =================
       let extractedPin = null;
       if (req.body.pincode) {
@@ -129,9 +144,9 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      // Check matching verified technician in DB
+      // Check matching verified technician in DB (excluding blocked technicians)
       const techRes = await query(
-        'SELECT id, full_name, phone, primary_trade, rating_avg, jobs_completed_count FROM technicians WHERE is_online = TRUE AND primary_trade = $1 ORDER BY rating_avg DESC LIMIT 1',
+        'SELECT id, full_name, phone, primary_trade, rating_avg, jobs_completed_count FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 ORDER BY rating_avg DESC LIMIT 1',
         [serviceId || 'ac']
       );
       
@@ -217,14 +232,18 @@ async function bookingsRoutes(fastify, options) {
       const custLat = parseFloat(booking.customer_lat) || 11.6643;
       const custLng = parseFloat(booking.customer_lng) || 78.1460;
 
+      // Check if booking is scheduled
+      const isScheduledBooking = booking.booking_type === 'scheduled' || (Boolean(booking.scheduled_slot) && booking.scheduled_slot !== 'instant_now');
+      const isRideStarted = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status);
+
       // Check if booking already has an assigned technician
       let technician = null;
       if (booking.technician_id) {
         const techRes = await query('SELECT * FROM technicians WHERE id = $1', [booking.technician_id]);
         if (techRes.rows.length > 0) {
           const t = techRes.rows[0];
-          // If booking is still matching and tech is offline, do NOT show them
-          if (booking.status === 'matching' && !t.is_online) {
+          // If booking is still in initial matching and tech is offline, do not show
+          if (booking.status === 'matching' && !t.is_online && !isScheduledBooking) {
             technician = null;
           } else {
             const techLat = parseFloat(t.current_lat) || 11.6780;
@@ -248,7 +267,7 @@ async function bookingsRoutes(fastify, options) {
               jobsCompleted: t.jobs_completed_count || 0,
               primaryTrade: t.primary_trade,
               isOnline: Boolean(t.is_online),
-              gpsActive: true,
+              gpsActive: isRideStarted,
               lastLocationUpdate: t.last_location_update || new Date().toISOString(),
               distanceKm: `${distanceKm} km`,
               etaMinutes: etaMinutes,
@@ -260,10 +279,10 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      // If no assigned tech yet, check if any online tech exists for that trade
-      if (!technician) {
+      // Only for non-scheduled instant matching bookings, query online technician if not assigned
+      if (!technician && !isScheduledBooking && booking.status !== 'cancelled' && booking.status !== 'completed') {
         const anyOnlineTech = await query(
-          'SELECT * FROM technicians WHERE is_online = TRUE AND primary_trade = $1 LIMIT 1',
+          'SELECT * FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 LIMIT 1',
           [booking.service_id || 'ac']
         );
         if (anyOnlineTech.rows.length > 0) {
@@ -281,7 +300,7 @@ async function bookingsRoutes(fastify, options) {
             jobsCompleted: t.jobs_completed_count || 0,
             primaryTrade: t.primary_trade,
             isOnline: true,
-            gpsActive: true,
+            gpsActive: isRideStarted,
             distanceKm: `${distanceKm} km`,
             etaMinutes: etaMinutes,
             eta: `${etaMinutes} mins`,
@@ -291,20 +310,115 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      const hasOnlineTech = Boolean(technician && (technician.isOnline || booking.status !== 'matching'));
+      // hasOnlineTech is true only if:
+      // 1. For instant bookings: an online technician is active
+      // 2. For scheduled bookings: a technician is officially assigned and ride has started or status is en_route/arrived/etc.
+      const hasOnlineTech = isScheduledBooking 
+        ? Boolean(technician && isRideStarted)
+        : Boolean(technician && (technician.isOnline || booking.status !== 'matching'));
+
+      // Compute Salem Central Ops Workflow transparency for Scheduled Bookings
+      let opsWorkflow = null;
+      if (isScheduledBooking) {
+        let currentStage = 2; // Default to Stage 2 once created
+        if (booking.status === 'completed') {
+          currentStage = 5;
+        } else if (['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress'].includes(booking.status)) {
+          currentStage = 5;
+        } else if (booking.technician_id || booking.status === 'accepted') {
+          currentStage = 4;
+        } else if (booking.status === 'matching' || booking.status === 'created') {
+          currentStage = 2;
+        }
+
+        const createdAtStr = new Date(booking.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + ', ' + new Date(booking.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+
+        opsWorkflow = {
+          currentStage,
+          bookingType: 'scheduled',
+          scheduledSlot: booking.scheduled_slot || 'Morning Slot (09:00 AM - 12:00 PM)',
+          opsDeskContact: '0427-2448888',
+          opsLeadOfficer: 'Anand K. (Salem Central Dispatch)',
+          stages: [
+            {
+              stage: 1,
+              id: 'payment_verified',
+              title: 'Request Received & Escrow Verified',
+              titleTa: 'கோரிக்கை பெறப்பட்டு கட்டணம் சரிபார்க்கப்பட்டது',
+              description: 'Booking token created. Doorstep visit fee held securely in Razorpay escrow.',
+              status: 'completed',
+              completedAt: createdAtStr,
+              officer: 'Automated Gateway'
+            },
+            {
+              stage: 2,
+              id: 'locality_feasibility',
+              title: 'Locality & Service Feasibility Check',
+              titleTa: 'பகுதி ஆய்வு & கருவிகள் சரிபார்ப்பு',
+              description: `Salem Central Ops confirmed specialist coverage and tooling readiness for ${booking.locality || 'Fairlands, Salem'}.`,
+              status: currentStage >= 2 ? 'completed' : 'in_progress',
+              completedAt: currentStage >= 2 ? 'Verified by Central Ops' : 'Evaluating',
+              officer: 'Salem Central Dispatch'
+            },
+            {
+              stage: 3,
+              id: 'specialist_allocation',
+              title: 'Specialist Allocation & Assignment',
+              titleTa: 'தொழில்முறை நிபுணர் ஒதுக்கீடு',
+              description: technician 
+                ? `Specialist assigned: ${technician.name} (${technician.rating} rating, ${technician.jobsCompleted}+ jobs completed).`
+                : 'Central Ops is allocating the highest-rated verified specialist in your Salem zone.',
+              status: currentStage >= 3 ? (currentStage > 3 ? 'completed' : 'in_progress') : 'pending',
+              completedAt: currentStage >= 3 ? (technician ? `${technician.name} Assigned` : 'In Progress') : 'Pending',
+              officer: technician ? technician.name : 'Central Ops Matchmaker'
+            },
+            {
+              stage: 4,
+              id: 'slot_staging',
+              title: 'Slot Confirmed & Tools Staging',
+              titleTa: 'பணி நேரம் உறுதி & கருவிகள் தயார்நிலை',
+              description: `Confirmed for window: ${booking.scheduled_slot || 'Scheduled Slot'}. Technician toolkit and diagnostic equipment staged.`,
+              status: currentStage >= 4 ? (currentStage > 4 ? 'completed' : 'in_progress') : 'pending',
+              completedAt: currentStage >= 4 ? 'Confirmed Window' : 'Awaiting Allocation',
+              officer: 'Salem Central Desk'
+            },
+            {
+              stage: 5,
+              id: 'pre_dispatch_departure',
+              title: 'Pre-Dispatch Readiness & Departure',
+              titleTa: 'களப்பணி புறப்பாடு மற்றும் நேரலை கண்காணிப்பு',
+              description: currentStage >= 5 
+                ? 'Technician has departed for your doorstep. Live GPS navigation active.'
+                : 'Live GPS navigation activates 30 minutes before your scheduled appointment window.',
+              status: currentStage >= 5 ? 'completed' : 'scheduled',
+              completedAt: currentStage >= 5 ? 'Departed' : 'Scheduled',
+              officer: technician ? technician.name : 'Field Partner'
+            }
+          ]
+        };
+      }
 
       return {
         success: true,
         booking,
-        hasOnlineTech: hasOnlineTech || booking.status !== 'matching',
-        technician: (hasOnlineTech || booking.status !== 'matching') ? technician : null,
-        dispatchQueueStatus: (!hasOnlineTech && booking.status === 'matching') ? {
+        opsWorkflow,
+        isScheduled: isScheduledBooking,
+        isRideStarted,
+        hasOnlineTech,
+        technician: technician,
+        dispatchQueueStatus: (!hasOnlineTech && (booking.status === 'matching' || booking.status === 'created')) ? {
           isQueued: true,
-          notice: 'No verified technician is currently online in this Salem locality right now.',
-          waitWindow: '12 Hours Guarantee Window',
+          notice: isScheduledBooking
+            ? (technician 
+                ? `Technician ${technician.name} is assigned. Live GPS tracking will unlock when they start their ride.`
+                : 'Your booking has been received by Salem Central Ops. We are assigning a certified specialist.')
+            : 'No verified technician is currently online in this Salem locality right now.',
+          waitWindow: isScheduledBooking ? (booking.scheduled_slot || 'Scheduled Window') : '12 Hours Guarantee Window',
           scheduledSlot: booking.scheduled_slot || 'priority_12h',
           opsDeskContact: '0427-2448888',
-          statusText: 'All technicians in this zone are currently offline. Your request is queued for assignment as soon as a technician toggles online.'
+          statusText: isScheduledBooking
+            ? 'Central Ops is monitoring your appointment window.'
+            : 'All technicians in this zone are currently offline. Your request is queued for assignment as soon as a technician toggles online.'
         } : null
       };
     } catch (err) {
@@ -496,7 +610,7 @@ async function bookingsRoutes(fastify, options) {
 
       if (!validTechId) {
         const tradeTech = await query(
-          'SELECT id FROM technicians WHERE is_online = TRUE AND primary_trade = $1 LIMIT 1',
+          'SELECT id FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 LIMIT 1',
           [targetServiceId]
         );
         validTechId = tradeTech.rows[0]?.id || null;
@@ -750,6 +864,11 @@ async function bookingsRoutes(fastify, options) {
       }
 
       if (booking.status === 'cancelled') {
+        const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
+        const platformFeeDeduction = parseFloat((originalPaid * 0.02).toFixed(2));
+        const gatewayChargeDeduction = parseFloat((originalPaid * 0.02).toFixed(2));
+        const refundAmount = parseFloat(Math.max(0, originalPaid - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
+
         return {
           success: true,
           message: 'Booking was already cancelled',
@@ -757,74 +876,99 @@ async function bookingsRoutes(fastify, options) {
           cancellationSummary: {
             bookingId: booking.id,
             cancelledBy,
-            reason: reason || 'Customer requested cancellation',
+            reason: reason || booking.cancellation_reason || 'Customer requested cancellation',
             previousStatus: booking.status,
-            originalPaid: parseFloat(booking.final_amount || booking.visit_fee || 99),
-            technicianTravelDisbursal: parseFloat(booking.final_amount || booking.visit_fee || 99),
-            platformCommission: 0.00,
-            refundAmount: 0.00,
-            policyNotice: '100% of the visit fee is disbursed to the technician for doorstep travel & fuel expenses. SalemSeva takes ₹0 commission.',
-            cancelledAt: new Date().toISOString()
+            originalPaid,
+            platformFeeRetained: platformFeeDeduction,
+            gatewayChargeRetained: gatewayChargeDeduction,
+            refundAmount,
+            policyNotice: `As per SalemSeva policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
+            cancelledAt: booking.cancelled_at || new Date().toISOString()
           }
         };
       }
 
       const isPreMatching = booking.status === 'matching' || booking.status === 'created';
-      const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99);
+      const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
       const cancelReasonText = reason || 'Customer requested cancellation';
       const cancelDetailsText = reasonDetails || '';
 
-      // Update status and store full customer cancellation response in database
+      // Platform Cut (2%) & Razorpay Gateway Processing Fee (2%) Retention
+      const platformFeeDeduction = parseFloat((originalAmount * 0.02).toFixed(2));
+      const gatewayChargeDeduction = parseFloat((originalAmount * 0.02).toFixed(2));
+      const totalDeductions = parseFloat((platformFeeDeduction + gatewayChargeDeduction).toFixed(2));
+      const refundAmount = parseFloat(Math.max(0, originalAmount - totalDeductions).toFixed(2));
+
+      // Update status and store full customer cancellation & refund details in database
       const updateSql = `
         UPDATE bookings 
         SET status = 'cancelled',
             cancellation_reason = $2,
             cancellation_details = $3,
             cancelled_by = $4,
-            cancelled_at = NOW()
+            cancelled_at = NOW(),
+            refund_amount = $5,
+            refund_platform_fee = $6,
+            refund_gateway_fee = $7,
+            refund_status = 'REFUND_INITIATED',
+            refunded_at = NOW()
         WHERE id = $1
         RETURNING *
       `;
-      const updateRes = await query(updateSql, [booking.id, cancelReasonText, cancelDetailsText, cancelledBy]);
+      const updateRes = await query(updateSql, [
+        booking.id, 
+        cancelReasonText, 
+        cancelDetailsText, 
+        cancelledBy,
+        refundAmount,
+        platformFeeDeduction,
+        gatewayChargeDeduction
+      ]);
       const updatedBooking = updateRes.rows[0];
+
+      // Record refund in payments ledger
+      try {
+        await query(`
+          INSERT INTO payments (booking_id, amount_total, pg_fee, platform_commission, tech_payout_amount, status, payment_method, settled_at)
+          VALUES ($1, $2, $3, $4, 0.00, 'refunded', 'Razorpay Gateway Refund', NOW())
+        `, [booking.id, originalAmount, gatewayChargeDeduction, platformFeeDeduction]);
+      } catch (payErr) {}
 
       // Audit Log
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
-        VALUES ($1, 'BOOKING_CANCELLED', $2, $3, $4)
+        VALUES ($1, 'BOOKING_CANCELLED_REFUNDED', $2, $3, $4)
       `, [
         booking.id, 
         booking.customer_phone || 'customer', 
         cancelledBy, 
         JSON.stringify({ 
-          reason: reason || 'Customer cancelled', 
-          reasonDetails: reasonDetails || null,
+          reason: cancelReasonText, 
+          reasonDetails: cancelDetailsText,
           previousStatus: booking.status,
-          isPreMatching,
-          originalAmount: isPreMatching ? 0 : originalAmount,
-          technicianTravelDisbursal: isPreMatching ? 0 : originalAmount,
-          platformCommission: 0,
+          originalAmount,
+          platformFeeRetained: platformFeeDeduction,
+          gatewayChargeRetained: gatewayChargeDeduction,
+          refundAmount,
           cancelledAt: new Date().toISOString()
         })
       ]);
 
       return {
         success: true,
-        message: 'Booking cancelled successfully',
+        message: 'Booking cancelled successfully. Refund initiated after retaining 2% platform fee and 2% Razorpay service charge.',
         booking: updatedBooking,
         cancellationSummary: {
           bookingId: booking.id,
           cancelledBy,
-          reason: reason || 'Customer requested cancellation',
+          reason: cancelReasonText,
           previousStatus: booking.status,
-          isPreMatching,
-          originalPaid: isPreMatching ? 0 : originalAmount,
-          technicianTravelDisbursal: isPreMatching ? 0 : originalAmount,
-          platformCommission: 0.00,
-          refundAmount: 0.00,
-          policyNotice: isPreMatching 
-            ? 'Cancelled during matching. No technician was assigned and no amount was charged.' 
-            : '100% of the visit fee is disbursed directly to your assigned technician for fuel and travel expenses. SalemSeva takes 0% platform commission.',
+          originalPaid: originalAmount,
+          platformFeeRetained: platformFeeDeduction,
+          gatewayChargeRetained: gatewayChargeDeduction,
+          refundAmount,
+          refundStatus: 'REFUND_INITIATED',
+          policyNotice: `As per SalemSeva policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
           cancelledAt: new Date().toISOString()
         }
       };

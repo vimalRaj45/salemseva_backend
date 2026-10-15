@@ -1,5 +1,5 @@
 const { query } = require('../db/db');
-const { uploadToS3, MAX_FILE_SIZE } = require('../services/storage.service');
+const { uploadToS3, getObjectFromS3, bucketName, MAX_FILE_SIZE } = require('../services/storage.service');
 
 async function storageRoutes(fastify, options) {
   // Ensure database columns exist in Neon PostgreSQL
@@ -40,11 +40,94 @@ async function storageRoutes(fastify, options) {
 
       return {
         success: true,
-        message: 'File successfully uploaded to S3 storage',
+        message: 'File successfully uploaded to Neon S3 storage',
         ...result
       };
     } catch (err) {
       fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 2. File Retrieval & Rendering Endpoint (Streams directly from Neon S3)
+  fastify.get('/storage/view', async (req, reply) => {
+    try {
+      let objectKey = req.query.key;
+      const rawUrl = req.query.url;
+
+      if (!objectKey && rawUrl) {
+        const parts = rawUrl.split(`${bucketName}/`);
+        if (parts.length > 1) {
+          objectKey = decodeURIComponent(parts.slice(1).join(`${bucketName}/`));
+        } else {
+          objectKey = rawUrl;
+        }
+      }
+
+      if (!objectKey) {
+        return reply.status(400).send({ success: false, error: 'Missing key or url query parameter.' });
+      }
+
+      const cleanKey = objectKey.replace(/^\/+/, '');
+      const s3Obj = await getObjectFromS3(cleanKey);
+
+      reply.header('Content-Type', s3Obj.contentType);
+      if (s3Obj.contentLength) {
+        reply.header('Content-Length', s3Obj.contentLength);
+      }
+      reply.header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=3600');
+      reply.header('Content-Disposition', 'inline');
+
+      return reply.send(s3Obj.stream);
+    } catch (err) {
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+        return reply.status(404).send({ success: false, error: 'Object not found in Neon S3 bucket' });
+      }
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3. Direct Wildcard File Retrieval
+  fastify.get('/storage/file/*', async (req, reply) => {
+    try {
+      const wildcard = req.params['*'];
+      if (!wildcard) {
+        return reply.status(400).send({ success: false, error: 'Missing object key path.' });
+      }
+      const s3Obj = await getObjectFromS3(wildcard);
+      reply.header('Content-Type', s3Obj.contentType);
+      if (s3Obj.contentLength) reply.header('Content-Length', s3Obj.contentLength);
+      reply.header('Cache-Control', 'public, max-age=86400');
+      reply.header('Content-Disposition', 'inline');
+      return reply.send(s3Obj.stream);
+    } catch (err) {
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+        return reply.status(404).send({ success: false, error: 'Object not found in Neon S3 bucket' });
+      }
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 4. Object Metadata Inspection
+  fastify.get('/storage/info', async (req, reply) => {
+    try {
+      const key = req.query.key;
+      if (!key) return reply.status(400).send({ success: false, error: 'Missing key query parameter.' });
+      const s3Obj = await getObjectFromS3(key);
+      return {
+        success: true,
+        key,
+        contentType: s3Obj.contentType,
+        contentLength: s3Obj.contentLength,
+        lastModified: s3Obj.lastModified,
+        metadata: s3Obj.metadata
+      };
+    } catch (err) {
+      if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {
+        return reply.status(404).send({ success: false, error: 'Object not found in Neon S3 bucket' });
+      }
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
@@ -216,7 +299,7 @@ async function storageRoutes(fastify, options) {
           UPDATE technicians 
           SET aadhaar_card_url = $1,
               aadhaar_uploaded_at = NOW()
-          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
+          WHERE REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+91', '') = REPLACE(REPLACE(REPLACE($2, ' ', ''), '-', ''), '+91', '')
           RETURNING *;
         `, [uploadRes.url, cleanPhone]);
         updatedTech = updateRes.rows[0] || null;

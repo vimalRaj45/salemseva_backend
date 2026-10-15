@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 
 // Clean environment variables (remove any extraneous quotes)
 const clean = (val) => (val ? val.replace(/^["']|["']$/g, '').trim() : '');
@@ -106,12 +106,14 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
 
     await s3Client.send(command);
 
-    // Build public / accessible S3 endpoint URL
-    const fileUrl = `${endpoint.replace(/\/$/, '')}/${bucketName}/${objectKey}`;
+    // Build accessible S3 endpoint and application proxy URLs
+    const rawS3Url = `${endpoint.replace(/\/$/, '')}/${bucketName}/${objectKey}`;
+    const proxyUrl = `/api/v1/storage/view?key=${encodeURIComponent(objectKey)}`;
 
     return {
       success: true,
-      url: fileUrl,
+      url: proxyUrl,
+      rawS3Url,
       key: objectKey,
       bucket: bucketName,
       size: buffer.length,
@@ -136,7 +138,33 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
   }
 }
 
+/**
+ * Retrieve an object stream and metadata from Neon S3 storage
+ * @param {string} key
+ */
+async function getObjectFromS3(key) {
+  if (!s3Client) {
+    throw new Error('S3 Client is not initialized');
+  }
+  const cleanKey = (key || '').replace(/^\/+/, '');
+  const command = new GetObjectCommand({
+    Bucket: bucketName,
+    Key: cleanKey
+  });
+  const response = await s3Client.send(command);
+  return {
+    stream: response.Body,
+    contentType: response.ContentType || 'application/octet-stream',
+    contentLength: response.ContentLength,
+    metadata: response.Metadata,
+    lastModified: response.LastModified
+  };
+}
+
 module.exports = {
   uploadToS3,
+  getObjectFromS3,
+  bucketName,
+  endpoint,
   MAX_FILE_SIZE
 };

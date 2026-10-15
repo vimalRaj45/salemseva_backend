@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const crypto = require('crypto');
 
 async function partnerRoutes(fastify, options) {
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
@@ -92,10 +93,42 @@ async function partnerRoutes(fastify, options) {
         };
       }
 
+      // Check if there is an explicit admin request assigned to this technician (especially when offline)
+      const directJobRes = await query(`
+        SELECT * FROM bookings 
+        WHERE technician_id = $1 
+          AND status IN ('matching', 'accepted')
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `, [tech.id]);
+
+      const directJob = directJobRes.rows[0] || null;
+      const offlineJobRequest = directJob ? {
+        id: directJob.id,
+        customerName: directJob.customer_name,
+        customerPhone: directJob.customer_phone,
+        serviceId: directJob.service_id,
+        issueDescription: directJob.custom_issue_description || 'Service Diagnostics & Inspection',
+        address: directJob.service_address,
+        locality: directJob.locality,
+        status: directJob.status,
+        visitFee: parseFloat(directJob.visit_fee || 99),
+        isUrgent: Boolean(directJob.is_urgent_dispatch),
+        partsMode: directJob.parts_mode || 'tech_buys',
+        partsBillUrl: directJob.parts_bill_url || null,
+        partsBillUploadedAt: directJob.parts_bill_uploaded_at || null,
+        voiceNoteUrl: directJob.voice_note_url || null,
+        bookingType: directJob.booking_type || 'instant',
+        scheduledSlot: directJob.scheduled_slot || null,
+        createdAt: directJob.created_at,
+        adminRequested: true
+      } : null;
+
       return {
         success: true,
         technician: tech,
         cancelNotice,
+        offlineJobRequest,
         activeJob: activeJob ? {
           id: activeJob.id,
           customerName: activeJob.customer_name,
@@ -115,6 +148,48 @@ async function partnerRoutes(fastify, options) {
           scheduledSlot: activeJob.scheduled_slot || null,
           createdAt: activeJob.created_at
         } : null
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1a. Accept Offline Job Request from Admin and Automatically Switch Online
+  fastify.post('/partner/duty/accept-offline-request', async (req, reply) => {
+    try {
+      const { bookingId, phone = '+919443288901', technicianId } = req.body;
+      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+
+      // 1. Toggle technician to ONLINE (is_online = true)
+      const techUpdate = await query(`
+        UPDATE technicians 
+        SET is_online = TRUE, last_location_update = CURRENT_TIMESTAMP 
+        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $2
+        RETURNING *
+      `, [cleanPhone, technicianId || '']);
+
+      const tech = techUpdate.rows[0];
+
+      // 2. Set booking status to 'accepted' and assign technician
+      await query(`
+        UPDATE bookings 
+        SET status = 'accepted', technician_id = $1, matched_at = COALESCE(matched_at, NOW()) 
+        WHERE id = $2
+      `, [tech ? tech.id : technicianId, bookingId]);
+
+      // 3. Record Audit Log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'OFFLINE_TECH_ACCEPTED_AND_ONLINE', $2, 'technician', $3)
+      `, [bookingId, tech ? tech.id : 'tech', JSON.stringify({ autoOnline: true, timestamp: new Date().toISOString() })]);
+
+      return {
+        success: true,
+        message: 'Job accepted successfully. You are now ONLINE and ready to start work.',
+        bookingId,
+        isOnline: true,
+        technician: tech
       };
     } catch (err) {
       fastify.log.error(err);
@@ -164,6 +239,14 @@ async function partnerRoutes(fastify, options) {
           techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE id = $1::uuid`, [technicianId]);
         } else {
           techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1`, [cleanPhone]);
+        }
+
+        if (techCheck.rows.length > 0 && techCheck.rows[0].is_blocked) {
+          return reply.status(403).send({
+            success: false,
+            code: 'ACCOUNT_SUSPENDED',
+            error: `Your partner account has been suspended by Salem Central Operations: ${techCheck.rows[0].block_reason || 'Administrative restriction'}. You cannot go online.`
+          });
         }
 
         if (techCheck.rows.length > 0 && !techCheck.rows[0].is_kyc_verified) {
@@ -250,43 +333,58 @@ async function partnerRoutes(fastify, options) {
       const {
         fullName,
         phone,
+        password,
         trade = 'ac',
-        aadhaar = '984271128901',
-        upiId = 'partner.pay@okaxis',
-        yearsExperience = 5,
+        aadhaar = '',
+        upiId = '',
+        yearsExperience = 0,
         serviceArea = 'Fairlands, Salem',
         referralCode,
         aadhaarCardUrl
       } = req.body;
 
       const cleanPhone = (phone.startsWith('+91') ? phone : `+91${phone}`).replace(/[\s\-]/g, '');
-      const cleanAadhaar = (aadhaar || '984271128901').replace(/[^0-9]/g, '').padEnd(12, '0').slice(0, 12);
+      const cleanAadhaar = aadhaar ? aadhaar.replace(/[^0-9]/g, '').padEnd(12, '0').slice(0, 12) : null;
+      const partnerPwd = (password && password.trim()) || 'salem123';
+      const partnerPwdHash = crypto.createHash('sha256').update(partnerPwd).digest('hex');
 
       const insertSql = `
         INSERT INTO technicians (
           full_name, phone, primary_trade, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
-          assigned_localities, aadhaar_card_url, aadhaar_uploaded_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END)
+          assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
+          rating_avg, rating_count, jobs_completed_count
+        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, 0.00, 0, 0)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
-          upi_vpa = EXCLUDED.upi_vpa,
+          aadhaar_number = COALESCE(EXCLUDED.aadhaar_number, technicians.aadhaar_number),
+          upi_vpa = COALESCE(EXCLUDED.upi_vpa, technicians.upi_vpa),
           aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
-          aadhaar_uploaded_at = COALESCE(EXCLUDED.aadhaar_uploaded_at, technicians.aadhaar_uploaded_at)
+          aadhaar_uploaded_at = COALESCE(EXCLUDED.aadhaar_uploaded_at, technicians.aadhaar_uploaded_at),
+          password_hash = EXCLUDED.password_hash
         RETURNING *;
       `;
 
       const res = await query(insertSql, [
-        fullName || 'Salem Verified Partner',
+        fullName || 'Salem Partner',
         cleanPhone,
         trade,
         cleanAadhaar,
-        upiId,
-        parseInt(yearsExperience, 10) || 5,
+        upiId || null,
+        parseInt(yearsExperience, 10) || 0,
         serviceArea || 'Fairlands',
-        aadhaarCardUrl || null
+        aadhaarCardUrl || null,
+        partnerPwdHash
       ]);
+
+      try {
+        await query(`
+          INSERT INTO users (full_name, phone, role, password_hash, locality)
+          VALUES ($1, $2, 'technician', $3, $4)
+          ON CONFLICT (phone) DO UPDATE SET password_hash = EXCLUDED.password_hash
+        `, [fullName || 'Salem Verified Partner', cleanPhone, partnerPwdHash, serviceArea || 'Fairlands, Salem']);
+      } catch (uErr) {}
 
       const hasReferral = Boolean(referralCode && referralCode.trim().length > 0);
       let referralBonus = 0.00;
@@ -572,17 +670,17 @@ async function partnerRoutes(fastify, options) {
         email: `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@salemseva.in`,
         trade: t.primary_trade,
         tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
-        experienceYears: t.years_experience || 5,
+        experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
         status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
         isKycVerified: Boolean(t.is_kyc_verified),
         aadhaarCardUrl: t.aadhaar_card_url || null,
         aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
         isOnline: Boolean(t.is_online),
-        ratingAvg: parseFloat(t.rating_avg || 4.9),
-        ratingCount: t.rating_count || 100,
-        jobsCompleted: t.jobs_completed_count || 300,
-        todayEarnings: 1450,
-        starTier: t.star_tier || 'Gold Partner (Salem)',
+        ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
+        ratingCount: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
+        jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+        todayEarnings: 0,
+        starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
         serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
         assignedLocalities: t.assigned_localities || ['Fairlands', 'Hasthampatti']
       }));
