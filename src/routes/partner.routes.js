@@ -43,8 +43,9 @@ async function partnerRoutes(fastify, options) {
             AND rejected_at >= CURRENT_DATE
         )
         AND (
-          customer_phone IS NULL OR customer_phone NOT IN (
-            SELECT customer_phone FROM technician_rejected_leads 
+          customer_phone IS NULL OR RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) NOT IN (
+            SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) 
+            FROM technician_rejected_leads 
             WHERE (technician_id = $1::text OR technician_id = $3)
               AND rejected_at >= CURRENT_DATE
               AND customer_phone IS NOT NULL
@@ -236,8 +237,9 @@ async function partnerRoutes(fastify, options) {
             )
           )
           AND (
-            $2::text IS NULL OR customer_phone IS NULL OR customer_phone NOT IN (
-              SELECT customer_phone FROM technician_rejected_leads 
+            $2::text IS NULL OR customer_phone IS NULL OR RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) NOT IN (
+              SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) 
+              FROM technician_rejected_leads 
               WHERE (technician_id = $2::text OR technician_id = $3)
                 AND rejected_at >= CURRENT_DATE
                 AND customer_phone IS NOT NULL
