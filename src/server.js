@@ -7,7 +7,7 @@ require('./db/db');
 // Register CORS
 fastify.register(cors, {
   origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE']
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 });
 
 // Register All Production Routes

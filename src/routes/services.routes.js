@@ -272,17 +272,17 @@ async function servicesRoutes(fastify, options) {
     }
   });
 
-  // PATCH /admin/services/:id/fee - Fast Inspection Fee update
-  fastify.patch('/admin/services/:id/fee', async (req, reply) => {
+  // PATCH / PUT /admin/services/:id/fee - Fast Inspection Fee update
+  const handleFeeUpdate = async (req, reply) => {
     try {
       const { id } = req.params;
-      const { visitFee } = req.body || {};
+      const rawFee = req.body?.visitFee ?? req.body?.visit_fee ?? req.body?.fee;
 
-      if (visitFee === undefined || isNaN(parseFloat(visitFee))) {
+      if (rawFee === undefined || isNaN(parseFloat(rawFee))) {
         return reply.status(400).send({ success: false, error: 'Valid visitFee is required' });
       }
 
-      const numericFee = Math.max(0, parseFloat(visitFee));
+      const numericFee = Math.max(0, parseFloat(rawFee));
 
       const updateRes = await query(`
         UPDATE services 
@@ -304,7 +304,10 @@ async function servicesRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.patch('/admin/services/:id/fee', handleFeeUpdate);
+  fastify.put('/admin/services/:id/fee', handleFeeUpdate);
 
   // DELETE /admin/services/:id - Delete or de-activate service
   fastify.delete('/admin/services/:id', async (req, reply) => {
