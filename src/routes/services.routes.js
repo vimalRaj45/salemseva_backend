@@ -149,24 +149,24 @@ async function servicesRoutes(fastify, options) {
   // POST /admin/services - Create new service category
   fastify.post('/admin/services', async (req, reply) => {
     try {
-      const {
-        id,
-        name_en,
-        name_ta,
-        category = 'Home Maintenance',
-        visitFee = 99.00,
-        estPriceRangeEn = 'INR 299 - INR 1,499',
-        estPriceRangeTa = 'ரூ.299 - ரூ.1,499',
-        icon = 'home_repair_service',
-        colorHex = '#0284c7',
-        isActive = true
-      } = req.body || {};
+      const body = req.body || {};
+      const id = body.id;
+      const name_en = body.name_en ?? body.name;
+      const name_ta = body.name_ta;
+      const category = body.category || 'Home Maintenance';
+      const rawFee = body.visitFee ?? body.visit_fee ?? body.fee;
+      const visitFee = rawFee !== undefined && !isNaN(parseFloat(rawFee)) ? parseFloat(rawFee) : 99.00;
+      const estPriceRangeEn = body.estPriceRangeEn ?? body.est_price_range_en ?? (body.base_price ? `INR ${body.base_price}` : 'INR 299 - INR 1,499');
+      const estPriceRangeTa = body.estPriceRangeTa ?? body.est_price_range_ta ?? (body.base_price ? `ரூ.${body.base_price}` : 'ரூ.299 - ரூ.1,499');
+      const icon = body.icon || 'home_repair_service';
+      const colorHex = body.colorHex ?? body.color_hex ?? '#0284c7';
+      const isActive = body.isActive !== undefined ? Boolean(body.isActive) : (body.is_active !== undefined ? Boolean(body.is_active) : true);
 
       if (!id || !name_en) {
         return reply.status(400).send({ success: false, error: 'Service ID and English Name are required' });
       }
 
-      const cleanId = id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      const cleanId = String(id).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
 
       // Check duplicate
       const dup = await query('SELECT id FROM services WHERE id = $1', [cleanId]);
@@ -182,10 +182,10 @@ async function servicesRoutes(fastify, options) {
         RETURNING *;
       `, [
         cleanId,
-        name_en.trim(),
+        String(name_en).trim(),
         (name_ta || name_en).trim(),
         category.trim(),
-        parseFloat(visitFee) || 99.00,
+        parseFloat(visitFee),
         estPriceRangeEn,
         estPriceRangeTa,
         icon,
@@ -216,17 +216,7 @@ async function servicesRoutes(fastify, options) {
   fastify.put('/admin/services/:id', async (req, reply) => {
     try {
       const { id } = req.params;
-      const {
-        name_en,
-        name_ta,
-        category,
-        visitFee,
-        estPriceRangeEn,
-        estPriceRangeTa,
-        icon,
-        colorHex,
-        isActive
-      } = req.body || {};
+      const body = req.body || {};
 
       const curRes = await query('SELECT * FROM services WHERE id = $1', [id]);
       if (curRes.rows.length === 0) {
@@ -234,15 +224,25 @@ async function servicesRoutes(fastify, options) {
       }
 
       const cur = curRes.rows[0];
-      const newNameEn = name_en !== undefined ? name_en.trim() : cur.name_en;
-      const newNameTa = name_ta !== undefined ? name_ta.trim() : cur.name_ta;
-      const newCat = category !== undefined ? category.trim() : cur.category;
-      const newFee = visitFee !== undefined ? parseFloat(visitFee) : parseFloat(cur.visit_fee);
-      const newRangeEn = estPriceRangeEn !== undefined ? estPriceRangeEn : cur.est_price_range_en;
-      const newRangeTa = estPriceRangeTa !== undefined ? estPriceRangeTa : cur.est_price_range_ta;
-      const newIcon = icon !== undefined ? icon : cur.icon;
-      const newColor = colorHex !== undefined ? colorHex : cur.color_hex;
-      const newActive = isActive !== undefined ? Boolean(isActive) : cur.is_active;
+      const rawNameEn = body.name_en ?? body.name;
+      const rawNameTa = body.name_ta;
+      const rawCat = body.category;
+      const rawFee = body.visitFee ?? body.visit_fee ?? body.fee;
+      const rawRangeEn = body.estPriceRangeEn ?? body.est_price_range_en ?? body.base_price;
+      const rawRangeTa = body.estPriceRangeTa ?? body.est_price_range_ta;
+      const rawIcon = body.icon;
+      const rawColor = body.colorHex ?? body.color_hex;
+      const rawActive = body.isActive !== undefined ? body.isActive : body.is_active;
+
+      const newNameEn = rawNameEn !== undefined && String(rawNameEn).trim() ? String(rawNameEn).trim() : cur.name_en;
+      const newNameTa = rawNameTa !== undefined && String(rawNameTa).trim() ? String(rawNameTa).trim() : cur.name_ta;
+      const newCat = rawCat !== undefined && String(rawCat).trim() ? String(rawCat).trim() : cur.category;
+      const newFee = rawFee !== undefined && !isNaN(parseFloat(rawFee)) ? Math.max(0, parseFloat(rawFee)) : parseFloat(cur.visit_fee);
+      const newRangeEn = rawRangeEn !== undefined ? String(rawRangeEn) : cur.est_price_range_en;
+      const newRangeTa = rawRangeTa !== undefined ? String(rawRangeTa) : cur.est_price_range_ta;
+      const newIcon = rawIcon !== undefined ? rawIcon : cur.icon;
+      const newColor = rawColor !== undefined ? rawColor : cur.color_hex;
+      const newActive = rawActive !== undefined ? Boolean(rawActive) : cur.is_active;
 
       const updateRes = await query(`
         UPDATE services 
