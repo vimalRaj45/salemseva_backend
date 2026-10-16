@@ -585,6 +585,7 @@ async function partnerRoutes(fastify, options) {
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
+          years_experience = COALESCE(EXCLUDED.years_experience, technicians.years_experience),
           aadhaar_number = COALESCE(EXCLUDED.aadhaar_number, technicians.aadhaar_number),
           upi_vpa = COALESCE(EXCLUDED.upi_vpa, technicians.upi_vpa),
           aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
