@@ -77,6 +77,8 @@ async function storageRoutes(fastify, options) {
       }
       reply.header('Cache-Control', 'public, max-age=86400, stale-while-revalidate=3600');
       reply.header('Content-Disposition', 'inline');
+      reply.header('Access-Control-Allow-Origin', '*');
+      reply.header('Cross-Origin-Resource-Policy', 'cross-origin');
 
       return reply.send(s3Obj.stream);
     } catch (err) {
@@ -100,6 +102,8 @@ async function storageRoutes(fastify, options) {
       if (s3Obj.contentLength) reply.header('Content-Length', s3Obj.contentLength);
       reply.header('Cache-Control', 'public, max-age=86400');
       reply.header('Content-Disposition', 'inline');
+      reply.header('Access-Control-Allow-Origin', '*');
+      reply.header('Cross-Origin-Resource-Policy', 'cross-origin');
       return reply.send(s3Obj.stream);
     } catch (err) {
       if (err.name === 'NoSuchKey' || err.$metadata?.httpStatusCode === 404) {

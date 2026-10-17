@@ -82,7 +82,169 @@ async function servicesRoutes(fastify, options) {
   });
 
 
-  // 5. Get Real Spares & Labor Catalog for a Service from DB
+  // 4. Get Technician Domain Availability and Slot Capacity for a Service
+  fastify.get('/services/:id/availability', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const lang = req.query.lang || 'en';
+
+      const svcRes = await query('SELECT * FROM services WHERE id = $1', [id]);
+      if (svcRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Service not found' });
+      }
+      const s = svcRes.rows[0];
+      const serviceName = lang === 'ta' ? s.name_ta : s.name_en;
+
+      // Check verified, unblocked technicians for this trade in Salem
+      const techsRes = await query(`
+        SELECT id, full_name, phone, is_online, rating_avg, primary_trade, secondary_trades
+        FROM technicians 
+        WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
+          AND is_blocked = FALSE 
+          AND is_kyc_verified = TRUE;
+      `, [id]);
+
+      const totalTechnicians = techsRes.rows.length;
+      const onlineTechnicians = techsRes.rows.filter(t => Boolean(t.is_online)).length;
+
+      // Case 1: No technician in system for this domain
+      if (totalTechnicians === 0) {
+        return {
+          success: true,
+          serviceId: id,
+          serviceName,
+          hasTechniciansInDomain: false,
+          totalTechnicians: 0,
+          onlineTechnicians: 0,
+          isTemporarilyClosed: true,
+          notice: {
+            title: lang === 'ta' 
+              ? `${serviceName} சேவை தற்காலிகமாக மூடப்பட்டுள்ளது`
+              : `${serviceName} Temporarily Closed in Salem`,
+            description: lang === 'ta'
+              ? `சேலம் மற்றும் சுற்றுவட்டார பகுதிகளில் தற்போது ${serviceName} தொழில்நுட்ப வல்லுநர்கள் பதிவு செய்யப்படவில்லை. சான்றளிக்கப்பட்ட உள்ளூர் நிபுணர்களை சேர்க்க தீவிரமாக தேடி வருகிறோம்.`
+              : `No certified ${serviceName} technicians are currently available in Salem & surroundings. We are actively looking for certified technicians for this domain. Service is temporarily closed.`,
+            badge: lang === 'ta' ? 'தற்காலிகமாக மூடப்பட்டுள்ளது' : 'Temporarily Closed',
+            status: 'temporarily_closed'
+          },
+          dates: {}
+        };
+      }
+
+      // Case 2: Technicians exist -> Calculate 14-day capacity and slot availability
+      const dailyCapacityPerTech = 4;
+      const totalDailyCapacity = Math.max(1, totalTechnicians * dailyCapacityPerTech);
+
+      // Fetch existing active bookings for this service
+      const bookingsRes = await query(`
+        SELECT id, scheduled_slot, status, created_at
+        FROM bookings
+        WHERE service_id = $1
+          AND status != 'cancelled';
+      `, [id]);
+
+      const activeBookings = bookingsRes.rows;
+
+      // Generate 14-day slot map starting today
+      const datesAvailability = {};
+      const standardSlots = [
+        '08:00 AM - 10:00 AM',
+        '10:00 AM - 12:00 PM',
+        '12:00 PM - 02:00 PM',
+        '02:00 PM - 04:00 PM',
+        '04:00 PM - 06:00 PM',
+        '06:00 PM - 08:00 PM'
+      ];
+
+      for (let i = 0; i < 14; i++) {
+        const d = new Date();
+        d.setDate(d.getDate() + i);
+        const iso = d.toISOString().split('T')[0];
+
+        // Filter bookings matching this date
+        const dateBookings = activeBookings.filter(b => {
+          const slot = b.scheduled_slot || '';
+          if (slot.includes(iso)) return true;
+          const createdIso = new Date(b.created_at).toISOString().split('T')[0];
+          return slot.includes(iso) || (!slot.match(/202\d-\d{2}-\d{2}/) && createdIso === iso);
+        });
+
+        const bookedCount = dateBookings.length;
+        const isFullyBooked = bookedCount >= totalDailyCapacity;
+
+        // Slot level counts
+        const slotsStatus = {};
+        for (const slotName of standardSlots) {
+          const countInSlot = dateBookings.filter(b => (b.scheduled_slot || '').includes(slotName)).length;
+          slotsStatus[slotName] = {
+            booked: countInSlot,
+            capacity: totalTechnicians,
+            isFull: countInSlot >= totalTechnicians
+          };
+        }
+
+        datesAvailability[iso] = {
+          iso,
+          bookedCount,
+          totalCapacity: totalDailyCapacity,
+          isFullyBooked,
+          slots: slotsStatus,
+          message: isFullyBooked 
+            ? (lang === 'ta' ? 'இந்த தேதியில் அனைத்து தொழில்நுட்ப வல்லுநர்களும் முன்பதிவு செய்யப்பட்டுள்ளனர். மற்றொரு தேதியைத் தேர்ந்தெடுக்கவும்.' : 'All technicians are booked on this date. Please choose another date.')
+            : null
+        };
+      }
+
+      return {
+        success: true,
+        serviceId: id,
+        serviceName,
+        hasTechniciansInDomain: true,
+        totalTechnicians,
+        onlineTechnicians,
+        isTemporarilyClosed: false,
+        totalDailyCapacity,
+        dailyCapacityPerTech,
+        dates: datesAvailability
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 4b. Summary of all services technician availability
+  fastify.get('/services-availability', async (req, reply) => {
+    try {
+      const servicesRes = await query('SELECT id, name_en, name_ta FROM services WHERE is_active = TRUE');
+      const techsRes = await query(`
+        SELECT id, primary_trade, secondary_trades, is_online 
+        FROM technicians 
+        WHERE is_blocked = FALSE AND is_kyc_verified = TRUE;
+      `);
+
+      const allTechs = techsRes.rows;
+      const availabilitySummary = {};
+
+      for (const s of servicesRes.rows) {
+        const matchingTechs = allTechs.filter(t => 
+          t.primary_trade === s.id || 
+          (Array.isArray(t.secondary_trades) && t.secondary_trades.includes(s.id))
+        );
+        availabilitySummary[s.id] = {
+          hasTechnicians: matchingTechs.length > 0,
+          totalTechnicians: matchingTechs.length,
+          onlineTechnicians: matchingTechs.filter(t => Boolean(t.is_online)).length,
+          isTemporarilyClosed: matchingTechs.length === 0
+        };
+      }
+
+      return { success: true, services: availabilitySummary };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
   fastify.get('/services/:id/spares', async (req, reply) => {
     try {
       const { id } = req.params;

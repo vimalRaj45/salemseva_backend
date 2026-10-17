@@ -171,6 +171,46 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
+      // Check if technicians exist in system for this domain
+      const techCountRes = await query(`
+        SELECT COUNT(*) as count FROM technicians 
+        WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
+          AND is_blocked = FALSE 
+          AND is_kyc_verified = TRUE;
+      `, [serviceId || 'ac']);
+      const totalDomainTechs = parseInt(techCountRes.rows[0]?.count || 0, 10);
+
+      if (totalDomainTechs === 0) {
+        return reply.status(400).send({
+          success: false,
+          code: 'NO_TECHNICIANS_IN_DOMAIN',
+          error: `No technicians are currently available in Salem & surroundings for this service (${serviceId}). Service is temporarily closed while we onboard certified local specialists.`
+        });
+      }
+
+      // Check if selected date is fully booked
+      const slotStr = String(scheduledSlot || '');
+      const isoDateMatch = slotStr.match(/\b(202\d-\d{2}-\d{2})\b/);
+      if (isoDateMatch) {
+        const targetDate = isoDateMatch[1];
+        const dayBookingsRes = await query(`
+          SELECT COUNT(*) as count FROM bookings 
+          WHERE service_id = $1 
+            AND scheduled_slot LIKE $2
+            AND status != 'cancelled';
+        `, [serviceId || 'ac', `%${targetDate}%`]);
+        const dayBookingsCount = parseInt(dayBookingsRes.rows[0]?.count || 0, 10);
+        const maxDailyCapacity = Math.max(1, totalDomainTechs * 4);
+
+        if (dayBookingsCount >= maxDailyCapacity) {
+          return reply.status(400).send({
+            success: false,
+            code: 'DATE_FULLY_BOOKED',
+            error: 'All technicians are booked on this date. Please choose another date.'
+          });
+        }
+      }
+
       // Check if customer requested a specific active specialist
       const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
       let assignedTechId = null;
