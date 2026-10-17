@@ -184,6 +184,16 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
+      // Check for available active specialists in Salem for this trade
+      const onlineTechRes = await query(`
+        SELECT id, full_name, phone FROM technicians 
+        WHERE (primary_trade = $1 OR $1 IS NULL) 
+          AND is_online = TRUE 
+          AND is_blocked = FALSE 
+        LIMIT 1
+      `, [serviceId || null]);
+      const onlineTech = assignedTechId ? { id: assignedTechId } : (onlineTechRes.rows[0] || null);
+
       const isEmergency = Boolean(isUrgentDispatch || (scheduledSlot && String(scheduledSlot).toLowerCase().includes('emergency')));
       const customerOtp = String(Math.floor(1000 + Math.random() * 9000));
       const finalVoiceNote = voiceNoteAudio || voice_note_url || null;
