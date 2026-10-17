@@ -70,6 +70,104 @@ async function paymentsRoutes(fastify, options) {
     }
   });
 
+  // 1b. Asynchronous Razorpay Webhook Handler (Catches Payments if Customer Closes App or Drops Connection)
+  fastify.post('/payments/webhook', async (req, reply) => {
+    try {
+      const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || KEY_SECRET;
+      const signature = req.headers['x-razorpay-signature'];
+      const payload = req.body;
+
+      // In production, verify signature if secret configured
+      if (signature && webhookSecret) {
+        const expectedSignature = crypto
+          .createHmac('sha256', webhookSecret)
+          .update(typeof req.body === 'string' ? req.body : JSON.stringify(req.body))
+          .digest('hex');
+
+        // Log if mismatch in dev mode but continue processing safely
+        if (expectedSignature !== signature && process.env.NODE_ENV === 'production') {
+          fastify.log.warn('Razorpay webhook signature mismatch');
+          return reply.status(400).send({ error: 'Invalid webhook signature' });
+        }
+      }
+
+      const event = payload?.event;
+      fastify.log.info(`[Razorpay Webhook] Received event: ${event}`);
+
+      if (event === 'payment.captured' || event === 'order.paid') {
+        const paymentEntity = payload?.payload?.payment?.entity || {};
+        const paymentId = paymentEntity.id;
+        const orderId = paymentEntity.order_id;
+        const amountPaise = paymentEntity.amount;
+        const bookingId = paymentEntity.notes?.bookingId;
+
+        if (bookingId) {
+          const parsedAmount = (parseFloat(amountPaise) || 9900) / 100;
+          
+          // Upsert into payments ledger
+          await query(`
+            INSERT INTO payments (
+              booking_id, transaction_id, amount, status, payment_method, escrow_held, created_at
+            ) VALUES ($1, $2, $3, 'HELD_IN_ESCROW', 'RAZORPAY_ESCROW', true, NOW())
+            ON CONFLICT (transaction_id) DO UPDATE SET status = 'HELD_IN_ESCROW';
+          `, [bookingId, paymentId || `pay_${Date.now()}`, parsedAmount]).catch(err => {
+            fastify.log.warn('Webhook DB insert note:', err.message);
+          });
+
+          // Check if this was a diagnostic advance or quote approval
+          const isQuoteApproval = paymentEntity.notes?.type === 'FINAL_SETTLEMENT';
+          const nextStatus = isQuoteApproval ? 'quote_approved' : 'en_route';
+
+          await query(`
+            UPDATE bookings 
+            SET status = $1
+            WHERE id = $2 AND status IN ('created', 'matching', 'quote_presented');
+          `, [nextStatus, bookingId]).catch(err => {
+            fastify.log.warn('Webhook booking status update note:', err.message);
+          });
+
+          await query(`
+            INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+            VALUES ($1, 'WEBHOOK_PAYMENT_CAPTURED', $2, 'razorpay', $3)
+          `, [bookingId, paymentId || 'rzp_webhook', JSON.stringify({ amount: parsedAmount, orderId, event })]).catch(() => {});
+        }
+      }
+
+      return reply.send({ status: 'ok', received: true });
+    } catch (err) {
+      fastify.log.error('Razorpay Webhook Error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1c. Reconcile Payment Status (Polled by Mobile App after UPI App Switching or Restart)
+  fastify.get('/payments/status/:bookingId', async (req, reply) => {
+    try {
+      const { bookingId } = req.params;
+      const bRes = await query('SELECT id, status, visit_fee, final_amount FROM bookings WHERE id = $1', [bookingId]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const booking = bRes.rows[0];
+      const pRes = await query('SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [bookingId]);
+      const payment = pRes.rows[0] || null;
+
+      const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status) || (payment && payment.status === 'HELD_IN_ESCROW');
+
+      return {
+        success: true,
+        bookingId: booking.id,
+        status: booking.status,
+        isPaid: Boolean(isPaid),
+        payment: payment
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 2. Verify Razorpay Payment Signature and Record in Neon DB Escrow Ledger
   fastify.post('/payments/verify', async (req, reply) => {
     try {

@@ -1,6 +1,31 @@
 const { query } = require('../db/db');
 
 async function bookingsRoutes(fastify, options) {
+  // Ensure reschedule columns and reschedule logs table exist
+  try {
+    await query(`
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS last_rescheduled_by TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS last_rescheduled_at TIMESTAMPTZ;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_reason TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS proposed_rescheduled_slot TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS proposed_rescheduled_by TEXT;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_status TEXT DEFAULT 'none';
+
+      CREATE TABLE IF NOT EXISTS booking_reschedule_logs (
+        id SERIAL PRIMARY KEY,
+        booking_id VARCHAR(100) NOT NULL,
+        old_slot TEXT,
+        new_slot TEXT,
+        rescheduled_by VARCHAR(50),
+        reason TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+  } catch (schemaErr) {
+    fastify.log.warn('Reschedule schema init: ' + schemaErr.message);
+  }
+
   // 1. Create Doorstep Inspection Booking
   const handleCreateBooking = async (req, reply) => {
     try {
@@ -146,16 +171,20 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      // Check matching verified technician in DB (excluding blocked technicians)
-      const techRes = await query(
-        'SELECT id, full_name, phone, primary_trade, rating_avg, jobs_completed_count FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 ORDER BY rating_avg DESC LIMIT 1',
-        [serviceId || 'ac']
-      );
-      
-      const onlineTech = techRes.rows.length > 0 ? techRes.rows[0] : null;
-      const isScheduled = bookingType === 'scheduled' || (!isUrgentDispatch && scheduledSlot && scheduledSlot !== 'instant_now');
-      const defaultTechId = isScheduled ? null : (onlineTech ? onlineTech.id : null);
-      const initialStatus = isScheduled ? 'created' : 'matching';
+      // Check if customer requested a specific active specialist
+      const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
+      let assignedTechId = null;
+      let initialStatus = 'created';
+
+      if (requestedTechId) {
+        const checkTech = await query('SELECT id, full_name, phone FROM technicians WHERE id = $1', [requestedTechId]);
+        if (checkTech.rows.length > 0) {
+          assignedTechId = checkTech.rows[0].id;
+          initialStatus = 'accepted';
+        }
+      }
+
+      const isEmergency = Boolean(isUrgentDispatch || (scheduledSlot && String(scheduledSlot).toLowerCase().includes('emergency')));
       const customerOtp = String(Math.floor(1000 + Math.random() * 9000));
       const finalVoiceNote = voiceNoteAudio || voice_note_url || null;
 
@@ -182,17 +211,17 @@ async function bookingsRoutes(fastify, options) {
         locality || 'Fairlands',
         parseFloat(lat) || 11.6738,
         parseFloat(lng) || 78.1460,
-        Boolean(isUrgentDispatch),
+        Boolean(isEmergency),
         urgentSurgeFee,
         visitFee,
         couponDiscount,
         couponCode || null,
         finalAmount,
         initialStatus,
-        defaultTechId,
-        scheduledSlot || 'priority_12h',
+        assignedTechId,
+        scheduledSlot || '10:00 AM - 12:00 PM',
         customerOtp,
-        isScheduled ? 'scheduled' : 'instant',
+        'scheduled',
         finalVoiceNote
       ]);
 
@@ -429,26 +458,175 @@ async function bookingsRoutes(fastify, options) {
     }
   });
 
-  // 3. Reschedule / Change Preferred Slot for Booking
+  // 3. Reschedule / Change Preferred Slot for Booking (Customer Driven)
   fastify.post('/bookings/:id/reschedule', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { scheduledSlot } = req.body;
+      const { scheduledSlot, reason } = req.body || {};
+
+      if (!scheduledSlot) {
+        return reply.status(400).send({ success: false, error: 'scheduledSlot is required' });
+      }
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const b = bRes.rows[0];
+
+      // Guard: Cannot reschedule if technician is already en route or on-site
+      if (['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status)) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Technician is already en route or on-site. Reschedule is locked. Please contact Salem Central Ops hotline.'
+        });
+      }
 
       const updateRes = await query(
-        `UPDATE bookings SET scheduled_slot = $1 WHERE id = $2 RETURNING *`,
-        [scheduledSlot, id]
+        `UPDATE bookings 
+         SET scheduled_slot = $1,
+             reschedule_count = COALESCE(reschedule_count, 0) + 1,
+             last_rescheduled_by = 'customer',
+             last_rescheduled_at = CURRENT_TIMESTAMP,
+             reschedule_reason = $2,
+             reschedule_status = 'rescheduled_by_customer',
+             proposed_rescheduled_slot = NULL,
+             proposed_rescheduled_by = NULL
+         WHERE id = $3 
+         RETURNING *`,
+        [scheduledSlot, reason || 'Customer requested revised appointment slot', id]
       );
 
-      if (updateRes.rows.length === 0) {
-        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      // Audit log entry
+      try {
+        await query(
+          `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, b.scheduled_slot || 'Unassigned', scheduledSlot, 'customer', reason || 'Customer changed schedule']
+        );
+      } catch (logErr) {
+        fastify.log.warn('Failed to insert reschedule log: ' + logErr.message);
       }
 
       return {
         success: true,
-        message: 'Scheduled slot updated successfully',
+        message: 'Appointment slot rescheduled successfully without additional fee',
         booking: updateRes.rows[0]
       };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3b. Resolve Technician Reschedule Request (Customer Accepts or Rejects Tech's Proposal)
+  fastify.post('/bookings/:id/resolve-tech-reschedule', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { action, alternativeSlot, requestHandover, reason } = req.body || {};
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const b = bRes.rows[0];
+
+      if (action === 'accept') {
+        const finalSlot = b.proposed_rescheduled_slot || b.scheduled_slot;
+        const updateRes = await query(
+          `UPDATE bookings
+           SET scheduled_slot = $1,
+               proposed_rescheduled_slot = NULL,
+               proposed_rescheduled_by = NULL,
+               reschedule_status = 'none',
+               reschedule_count = COALESCE(reschedule_count, 0) + 1,
+               last_rescheduled_by = 'technician_accepted_by_customer',
+               last_rescheduled_at = CURRENT_TIMESTAMP
+           WHERE id = $2
+           RETURNING *`,
+          [finalSlot, id]
+        );
+
+        try {
+          await query(
+            `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, b.scheduled_slot, finalSlot, 'customer_accepted_tech_proposal', 'Customer accepted revised technician slot']
+          );
+        } catch (_) {}
+
+        return {
+          success: true,
+          message: 'Revised appointment slot confirmed with your technician',
+          booking: updateRes.rows[0]
+        };
+      } else {
+        // Customer rejected technician proposal
+        if (requestHandover) {
+          // Reassign technician: unassign current tech and escalate to Central Ops
+          const updateRes = await query(
+            `UPDATE bookings
+             SET technician_id = NULL,
+                 status = 'matching',
+                 proposed_rescheduled_slot = NULL,
+                 proposed_rescheduled_by = NULL,
+                 reschedule_status = 'escalated_to_ops',
+                 reschedule_reason = $1,
+                 last_rescheduled_by = 'customer_requested_handover',
+                 last_rescheduled_at = CURRENT_TIMESTAMP
+             WHERE id = $2
+             RETURNING *`,
+            [reason || 'Customer rejected technician proposed slot and requested new specialist', id]
+          );
+
+          try {
+            await query(
+              `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [id, b.scheduled_slot, b.scheduled_slot, 'customer_rejected_tech_proposal', 'Customer requested reassignment by Salem Central Ops']
+            );
+          } catch (_) {}
+
+          return {
+            success: true,
+            message: 'Handover requested. Salem Central Ops is assigning another verified specialist.',
+            booking: updateRes.rows[0]
+          };
+        } else {
+          // Customer chose their own counter-proposed slot
+          const targetSlot = alternativeSlot || b.scheduled_slot;
+          const updateRes = await query(
+            `UPDATE bookings
+             SET scheduled_slot = $1,
+                 proposed_rescheduled_slot = NULL,
+                 proposed_rescheduled_by = NULL,
+                 reschedule_status = 'rescheduled_by_customer',
+                 reschedule_count = COALESCE(reschedule_count, 0) + 1,
+                 last_rescheduled_by = 'customer_counter_proposal',
+                 last_rescheduled_at = CURRENT_TIMESTAMP,
+                 reschedule_reason = $2
+             WHERE id = $3
+             RETURNING *`,
+            [targetSlot, reason || 'Customer counter-proposed different slot', id]
+          );
+
+          try {
+            await query(
+              `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [id, b.scheduled_slot, targetSlot, 'customer_counter_proposal', reason || 'Customer counter-proposed slot']
+            );
+          } catch (_) {}
+
+          return {
+            success: true,
+            message: 'Appointment rescheduled to your preferred slot',
+            booking: updateRes.rows[0]
+          };
+        }
+      }
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
