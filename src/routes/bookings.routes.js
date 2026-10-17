@@ -834,10 +834,33 @@ async function bookingsRoutes(fastify, options) {
 
       const targetServiceId = booking?.service_id || 'ac';
 
-      // If valid UUID passed, use it; otherwise query online technician matching that exact trade
-      const isUuid = technicianId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId);
-      let validTechId = isUuid ? technicianId : null;
-
+      // If valid UUID passed, use it; otherwise query by technicianId or technicianPhone
+      let validTechId = null;
+      if (technicianId) {
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId);
+        if (isUuid) {
+          validTechId = technicianId;
+        } else {
+          const clean = String(technicianId).replace(/[^0-9]/g, '').slice(-10);
+          if (clean) {
+            const tRes = await query(
+              'SELECT id FROM technicians WHERE RIGHT(REGEXP_REPLACE(phone, \'[^0-9]\', \'\', \'g\'), 10) = $1 LIMIT 1',
+              [clean]
+            );
+            validTechId = tRes.rows[0]?.id || null;
+          }
+        }
+      }
+      if (!validTechId && req.body?.technicianPhone) {
+        const clean = String(req.body.technicianPhone).replace(/[^0-9]/g, '').slice(-10);
+        if (clean) {
+          const tRes = await query(
+            'SELECT id FROM technicians WHERE RIGHT(REGEXP_REPLACE(phone, \'[^0-9]\', \'\', \'g\'), 10) = $1 LIMIT 1',
+            [clean]
+          );
+          validTechId = tRes.rows[0]?.id || null;
+        }
+      }
       if (!validTechId) {
         const tradeTech = await query(
           'SELECT id FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 LIMIT 1',

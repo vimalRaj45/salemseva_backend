@@ -6,15 +6,18 @@ async function partnerRoutes(fastify, options) {
   fastify.get('/partner/duty', async (req, reply) => {
     try {
       const phoneParam = (req.query && req.query.phone) ? req.query.phone : '+919443288901';
+      const techIdParam = (req.query && (req.query.technicianId || req.query.id)) ? String(req.query.technicianId || req.query.id) : '';
       const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
+      const cleanPhone = cleanDigits;
 
       const techRes = await query(`
         SELECT * FROM technicians 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1 
-           OR id::text = $2
+        WHERE ($1::text <> '' AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+           OR id::text = $3
         ORDER BY created_at ASC 
         LIMIT 1
-      `, [cleanDigits || 'NOMATCH', phoneParam]);
+      `, [techIdParam, cleanDigits || '', phoneParam]);
 
       let tech = techRes.rows[0];
       
@@ -145,9 +148,29 @@ async function partnerRoutes(fastify, options) {
         LIMIT 100
       `, [tech.id]);
 
+      // Calculate real today earnings and completed jobs from actual DB bookings
+      const statsRes = await query(`
+        SELECT 
+          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * 0.98, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs_count
+        FROM bookings WHERE technician_id = $1
+      `, [tech.id]);
+      const techStats = statsRes.rows[0] || { today_earnings: 0, completed_jobs_count: 0 };
+      const realTodayEarnings = parseFloat(techStats.today_earnings || 0);
+      const realJobsCount = parseInt(techStats.completed_jobs_count || tech.jobs_completed_count || 0, 10);
+
       return {
         success: true,
-        technician: tech,
+        technician: {
+          ...tech,
+          is_kyc_verified: Boolean(tech.is_kyc_verified),
+          isKycVerified: Boolean(tech.is_kyc_verified),
+          status: tech.is_kyc_verified ? 'Verified' : 'Pending Verification',
+          today_earnings: realTodayEarnings,
+          todayEarnings: realTodayEarnings,
+          jobs_completed_count: realJobsCount,
+          jobsCompleted: realJobsCount
+        },
         cancelNotice,
         offlineJobRequest,
         myScheduledJobs: myScheduledRes.rows.map(b => ({
@@ -161,8 +184,8 @@ async function partnerRoutes(fastify, options) {
           status: b.status,
           visitFee: parseFloat(b.visit_fee || 49),
           isUrgent: Boolean(b.is_urgent_dispatch),
-          scheduledSlot: b.scheduled_slot,
-          bookingType: b.booking_type || 'scheduled',
+          scheduledSlot: b.scheduled_slot || (b.booking_type === 'instant' ? 'Instant Today' : null),
+          bookingType: b.booking_type || (b.scheduled_slot ? 'scheduled' : 'instant'),
           voiceNoteUrl: b.voice_note_url || null,
           createdAt: b.created_at
         })),
@@ -277,17 +300,19 @@ async function partnerRoutes(fastify, options) {
   // 1a-2. Directly Claim & Accept an Open Scheduled Booking (Autonomous without Admin)
   fastify.post('/partner/duty/accept-scheduled-lead', async (req, reply) => {
     try {
-      const { bookingId, phone = '+919443288901', technicianId } = req.body || {};
+      const { bookingId, phone, technicianId } = req.body || {};
       if (!bookingId) {
         return reply.status(400).send({ success: false, error: 'bookingId is required' });
       }
 
-      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+      const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '').slice(-10) : '';
       const techRes = await query(`
         SELECT * FROM technicians 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $2
+        WHERE ($1::text <> '' AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        ORDER BY created_at ASC
         LIMIT 1
-      `, [cleanPhone, technicianId || '']);
+      `, [technicianId || '', cleanPhone]);
 
       const tech = techRes.rows[0];
       if (!tech) {
@@ -1033,6 +1058,7 @@ async function partnerRoutes(fastify, options) {
         experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
         status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
         isKycVerified: Boolean(t.is_kyc_verified),
+        is_kyc_verified: Boolean(t.is_kyc_verified),
         aadhaarCardUrl: t.aadhaar_card_url || null,
         aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
         isOnline: Boolean(t.is_online),
@@ -1040,6 +1066,7 @@ async function partnerRoutes(fastify, options) {
         ratingCount: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
         jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
         todayEarnings: 0,
+        today_earnings: 0,
         starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
         serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
         assignedLocalities: t.assigned_localities || ['Fairlands', 'Hasthampatti']
