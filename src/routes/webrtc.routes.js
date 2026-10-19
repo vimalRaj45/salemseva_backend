@@ -43,10 +43,13 @@ async function webrtcRoutes(fastify, options) {
 
       if (response.ok) {
         const data = await response.json();
+        const cfServers = Array.isArray(data.iceServers)
+          ? data.iceServers
+          : (data.iceServers ? [data.iceServers] : []);
         return {
           success: true,
           iceServers: [
-            ...(data.iceServers || []),
+            ...cfServers,
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' }
           ]
