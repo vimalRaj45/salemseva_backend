@@ -587,6 +587,7 @@ async function partnerRoutes(fastify, options) {
         trade = 'ac',
         aadhaar = '',
         upiId = '',
+        payoutPhone = '',
         yearsExperience = 0,
         serviceArea = 'Fairlands, Salem',
         referralCode,
@@ -597,6 +598,9 @@ async function partnerRoutes(fastify, options) {
       const cleanAadhaar = aadhaar ? aadhaar.replace(/[^0-9]/g, '').padEnd(12, '0').slice(0, 12) : null;
       const partnerPwd = (password && password.trim()) || 'salem123';
       const partnerPwdHash = crypto.createHash('sha256').update(partnerPwd).digest('hex');
+      // Derive phone-linked UPI if explicit UPI not given
+      const cleanPayoutDigits = payoutPhone ? String(payoutPhone).replace(/[^0-9]/g, '').slice(-10) : '';
+      const resolvedUpi = upiId?.trim() || (cleanPayoutDigits ? `${cleanPayoutDigits}@ybl` : null);
 
       const insertSql = `
         INSERT INTO technicians (
@@ -622,7 +626,7 @@ async function partnerRoutes(fastify, options) {
         cleanPhone,
         trade,
         cleanAadhaar,
-        upiId || null,
+        resolvedUpi || null,
         parseInt(yearsExperience, 10) || 0,
         serviceArea || 'Fairlands',
         aadhaarCardUrl || null,
@@ -694,7 +698,7 @@ async function partnerRoutes(fastify, options) {
         email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
         trade: createdTech.primary_trade,
         tradeName: tradeNames[createdTech.primary_trade] || 'Home Services Specialist',
-        upiId: createdTech.upi_vpa,
+        payoutPhone: cleanPayoutDigits || (createdTech.upi_vpa?.replace(/@.*$/, '') || ''),
         upi_vpa: createdTech.upi_vpa,
         aadhaarCardUrl: createdTech.aadhaar_card_url,
         aadhaarNumber: createdTech.aadhaar_number,
@@ -732,6 +736,7 @@ async function partnerRoutes(fastify, options) {
         technicianId = '',
         fullName,
         upiId,
+        payoutPhone = '',
         trade,
         aadhaarCardUrl,
         serviceArea
@@ -741,6 +746,9 @@ async function partnerRoutes(fastify, options) {
       if (!cleanDigits && !technicianId) {
         return reply.status(400).send({ success: false, error: 'Valid phone number or technician ID required' });
       }
+      // Derive UPI from payoutPhone if explicit UPI not provided
+      const cleanPayoutDigits2 = payoutPhone ? String(payoutPhone).replace(/[^0-9]/g, '').slice(-10) : '';
+      const resolvedUpi2 = upiId?.trim() || (cleanPayoutDigits2 ? `${cleanPayoutDigits2}@ybl` : null);
 
       const updateRes = await query(`
         UPDATE technicians
@@ -756,7 +764,7 @@ async function partnerRoutes(fastify, options) {
         RETURNING *;
       `, [
         fullName || null,
-        upiId || null,
+        resolvedUpi2 || null,
         trade || null,
         aadhaarCardUrl || null,
         serviceArea || null,
@@ -797,7 +805,7 @@ async function partnerRoutes(fastify, options) {
         email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
         trade: updatedTech.primary_trade,
         tradeName: tradeNames[updatedTech.primary_trade] || 'Home Services Specialist',
-        upiId: updatedTech.upi_vpa,
+        payoutPhone: cleanPayoutDigits2 || (updatedTech.upi_vpa?.replace(/@.*$/, '') || ''),
         upi_vpa: updatedTech.upi_vpa,
         aadhaarCardUrl: updatedTech.aadhaar_card_url,
         aadhaarNumber: updatedTech.aadhaar_number,

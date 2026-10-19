@@ -1,48 +1,71 @@
 const { query, pool } = require('./db');
 
 async function truncateAllExceptAdmin() {
-  console.log('--- Starting complete database purge (retaining only Admin ID) ---');
+  console.log('--- SalemSeva: Starting full database purge (keeping Admin + config only) ---');
   try {
-    // 1. Check all existing tables in public schema
+    // 1. Discover all existing tables in the public schema
     const tablesRes = await query(`
       SELECT table_name 
       FROM information_schema.tables 
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     `);
     const allTables = tablesRes.rows.map(r => r.table_name);
-    console.log('Existing tables:', allTables.join(', '));
+    console.log('Found tables:', allTables.join(', '));
 
-    // Tables to purge completely
+    // Tables to keep untouched (config / catalog data)
+    const preservedTables = [
+      'services',
+      'service_issues',
+      'service_spares_catalog',
+    ];
+
+    // All transactional tables in safe truncation order
+    // (children before parents so CASCADE handles the rest)
     const tablesToPurge = [
+      'booking_reschedule_logs',
       'audit_logs',
-      'reviews',
-      'payments',
-      'quote_items',
-      'bookings',
-      'store_bills',
       'chat_messages',
+      'call_logs',
+      'reviews',
+      'quote_items',
+      'payments',
+      'wallet_transactions',
+      'technician_payouts',
+      'technician_referrals',
+      'technician_rejected_leads',
+      'platform_feedback',
+      'bookings',
+      'technicians',
+      'users',
+      // Extra tables that may exist
+      'store_bills',
       'messages',
       'feedback',
-      'technicians',
-      'users'
+      'tickets',
+      'support_tickets',
+      'coupons',
     ].filter(t => allTables.includes(t));
 
     if (tablesToPurge.length > 0) {
-      console.log('Truncating tables with cascade:', tablesToPurge.join(', '));
-      await query(`TRUNCATE TABLE ${tablesToPurge.join(', ')} RESTART IDENTITY CASCADE;`);
-      console.log('Tables successfully truncated.');
+      console.log('\nTruncating with CASCADE:', tablesToPurge.join(', '));
+      await query(
+        `TRUNCATE TABLE ${tablesToPurge.join(', ')} RESTART IDENTITY CASCADE;`
+      );
+      console.log('All transactional tables truncated successfully.');
+    } else {
+      console.log('No matching transactional tables found.');
     }
 
-    // 2. Insert the single official Admin Account into users table
+    // 2. Re-insert the single official Admin account
     const adminSql = `
       INSERT INTO users (
-        id, 
-        phone, 
-        full_name, 
-        email, 
-        role, 
-        default_address, 
-        locality, 
+        id,
+        phone,
+        full_name,
+        email,
+        role,
+        default_address,
+        locality,
         wallet_balance
       ) VALUES (
         '00000000-0000-0000-0000-000000000001',
@@ -53,28 +76,30 @@ async function truncateAllExceptAdmin() {
         'Salem Central Operations HQ, Fairlands, Salem - 636016',
         'Fairlands',
         0.00
-      ) RETURNING *;
+      ) RETURNING id, phone, full_name, role;
     `;
-
     const adminRes = await query(adminSql);
-    console.log('Created single Admin account:', adminRes.rows[0]);
+    console.log('\nAdmin account recreated:', adminRes.rows[0]);
 
-    // 3. Verify counts
-    const [uRes, tRes, bRes, sRes] = await Promise.all([
+    // 3. Verification summary
+    const checks = await Promise.all([
       query('SELECT COUNT(*) FROM users'),
       query('SELECT COUNT(*) FROM technicians'),
       query('SELECT COUNT(*) FROM bookings'),
-      query('SELECT COUNT(*) FROM services')
+      query('SELECT COUNT(*) FROM services'),
+      query('SELECT COUNT(*) FROM service_issues'),
     ]);
 
-    console.log('--- Verification Summary ---');
-    console.log(`- Users count: ${uRes.rows[0].count} (Only Admin)`);
-    console.log(`- Technicians count: ${tRes.rows[0].count} (Purged)`);
-    console.log(`- Bookings count: ${bRes.rows[0].count} (Purged)`);
-    console.log(`- Services catalog: ${sRes.rows[0].count} (Preserved for bookings)`);
-    console.log('Purge completed successfully.');
+    console.log('\n--- Final State ---');
+    console.log(`  users              : ${checks[0].rows[0].count}  (Admin only)`);
+    console.log(`  technicians        : ${checks[1].rows[0].count}  (Purged)`);
+    console.log(`  bookings           : ${checks[2].rows[0].count}  (Purged)`);
+    console.log(`  services (config)  : ${checks[3].rows[0].count}  (Preserved)`);
+    console.log(`  service_issues     : ${checks[4].rows[0].count}  (Preserved)`);
+    console.log('\nPurge completed. Database is clean and production-ready.');
   } catch (err) {
-    console.error('Error during purge:', err);
+    console.error('\nError during purge:', err.message);
+    process.exit(1);
   } finally {
     await pool.end();
   }
