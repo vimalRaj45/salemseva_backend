@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 async function feedbackRoutes(fastify, options) {
   // Ensure platform_feedback table exists
@@ -116,7 +116,7 @@ async function feedbackRoutes(fastify, options) {
         success: true,
         message: creditsAwarded > 0
           ? `Feedback submitted successfully! +${creditsAwarded} Credits added to your wallet.`
-          : 'Feedback submitted successfully and sent to Salem Central Operations Desk',
+          : 'Feedback submitted successfully and sent to Shazu One Central Operations Desk',
         creditsAwarded,
         newBalance,
         feedback: result.rows[0]

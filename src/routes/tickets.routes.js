@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 async function ticketsRoutes(fastify, options) {
   // 1. Create a support ticket (authenticated or auth help guest)
@@ -183,7 +183,7 @@ async function ticketsRoutes(fastify, options) {
         status = 'resolved',
         adminNotes = '',
         resolutionSummary = '',
-        resolvedBy = 'Salem Central Operations Desk'
+        resolvedBy = 'Shazu One Central Operations Desk'
       } = req.body || {};
 
       const check = await query('SELECT * FROM support_tickets WHERE id = $1 OR UPPER(ticket_number) = UPPER($1)', [id]);

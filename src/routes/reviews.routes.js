@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 async function reviewsRoutes(fastify, options) {
   // 1. Submit Customer Review with Dynamic Below 3-Star Escalation
@@ -67,7 +67,7 @@ async function reviewsRoutes(fastify, options) {
           try {
             await query(`
               INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-              SELECT id, phone, 'Service Review Reward', $1, 'CREDIT', 'REVIEW_REWARD', 'Credits earned for completing 5-star service rating on SalemSeva'
+              SELECT id, phone, 'Service Review Reward', $1, 'CREDIT', 'REVIEW_REWARD', 'Credits earned for completing 5-star service rating on Shazu One'
               FROM users WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
             `, [reviewCredits, bookingId]);
           } catch (txErr) {}

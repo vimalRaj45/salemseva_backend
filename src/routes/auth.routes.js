@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 const crypto = require('crypto');
 
 function hashPassword(pwd) {
@@ -72,7 +72,7 @@ async function authRoutes(fastify, options) {
         if (t.is_blocked) {
           return reply.status(403).send({
             success: false,
-            error: `Your partner account has been suspended by Salem Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
+            error: `Your partner account has been suspended by Shazu One Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
           });
         }
 
@@ -88,7 +88,7 @@ async function authRoutes(fastify, options) {
           role: 'technician',
           name: t.full_name || t.name || 'Certified Partner',
           phone: t.phone || `+91 ${cleanPhone}`,
-          email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+          email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
           trade: t.primary_trade || t.trade || 'ac',
           tradeName: tradeNames[t.primary_trade || t.trade] || 'Home Services Specialist',
           upiId: t.upi_vpa,
@@ -146,7 +146,7 @@ async function authRoutes(fastify, options) {
           if (u.is_blocked) {
             return reply.status(403).send({
               success: false,
-              error: `Your account has been suspended by Salem Central Operations. Reason: ${u.block_reason || 'Administrative review'}`
+              error: `Your account has been suspended by Shazu One Central Operations. Reason: ${u.block_reason || 'Administrative review'}`
             });
           }
 
@@ -156,7 +156,7 @@ async function authRoutes(fastify, options) {
             role: userRole,
             name: u.full_name || 'Salem Customer',
             phone: u.phone || (cleanPhone ? `+91 ${cleanPhone}` : ''),
-            email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+            email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
             locality: u.locality || 'Fairlands, Salem',
             address: u.default_address || 'Fairlands, Salem - 636016',
             walletBalance: parseFloat(u.wallet_balance || 100)
@@ -164,9 +164,9 @@ async function authRoutes(fastify, options) {
         }
       }
 
-      // Dedicated Salem Central Ops Admin authentication
+      // Dedicated Shazu One Central Ops Admin authentication
       if (!userRecord) {
-        if (cleanPhone === '9842099999' || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@salemseva.in') {
+        if (cleanPhone === '9842099999' || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@Shazu One.in') {
           if (!password || hashPassword(password) !== hashPassword('salem123')) {
             return reply.status(401).send({ success: false, error: 'Incorrect admin credentials' });
           }
@@ -174,9 +174,9 @@ async function authRoutes(fastify, options) {
           userRecord = {
             id: 'adm-ops-001',
             role: 'admin',
-            name: 'Salem Central Ops Admin',
+            name: 'Shazu One Central Ops Admin',
             phone: '+91 98420 99999',
-            email: 'ops.admin@salemseva.in',
+            email: 'ops.admin@Shazu One.in',
             locality: 'Central HQ, Salem',
             isVerified: true
           };
@@ -253,7 +253,7 @@ async function authRoutes(fastify, options) {
       if (phoneCheck.rows.length > 0) {
         return reply.status(409).send({
           success: false,
-          error: `Mobile number +91 ${cleanPhone} is already registered on SalemSeva. Please sign in instead of creating a duplicate account.`
+          error: `Mobile number +91 ${cleanPhone} is already registered on Shazu One. Please sign in instead of creating a duplicate account.`
         });
       }
 
@@ -291,7 +291,7 @@ async function authRoutes(fastify, options) {
           role: 'technician',
           name: name || 'Salem Technician Partner',
           phone: formattedPhone,
-          email: email || `${(name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+          email: email || `${(name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
           trade: trade || 'ac',
           tradeName: tradeNames[trade] || 'Home Services Specialist',
           isKycVerified: false,
@@ -330,7 +330,7 @@ async function authRoutes(fastify, options) {
           role: 'customer',
           name: name || 'Salem Customer',
           phone: formattedPhone,
-          email: email || `${(name || 'customer').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+          email: email || `${(name || 'customer').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
           locality: locality || 'Fairlands, Salem',
           address: address || `${locality}, Salem - 636016`,
           walletBalance: 100, // ₹100 Welcome reward

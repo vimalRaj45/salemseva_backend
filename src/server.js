@@ -1,4 +1,4 @@
-const fastify = require('fastify')({ logger: true });
+﻿const fastify = require('fastify')({ logger: true });
 const cors = require('@fastify/cors');
 require('dotenv').config();
 require('./db/db');
@@ -32,7 +32,7 @@ fastify.register(require('./routes/tickets.routes'), { prefix: '/api/v1' });
 fastify.get('/health', async () => {
   return {
     status: 'HEALTHY',
-    service: 'SalemSeva Fastify Engine',
+    service: 'Shazu One Fastify Engine',
     database: 'Neon PostgreSQL (Connected)',
     razorpay: process.env.RAZORPAY_KEY_ID ? 'Configured (rzp_test)' : 'Missing',
     cloudflareTurn: process.env.CLOUDFLARE_TURN_KEY_ID ? 'Configured' : 'Missing',
@@ -45,7 +45,7 @@ const PORT = process.env.PORT || 8080;
 const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: '0.0.0.0' });
-    console.log(` SalemSeva Fastify Server running at http://localhost:${PORT}`);
+    console.log(` Shazu One Fastify Server running at http://localhost:${PORT}`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

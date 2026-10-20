@@ -1,4 +1,4 @@
-const fs = require('fs');
+﻿const fs = require('fs');
 const path = require('path');
 const { pool } = require('./db');
 
@@ -153,7 +153,7 @@ async function seed() {
     await client.query(`
       INSERT INTO users (id, phone, full_name, email, role, wallet_balance, referral_code, default_address, locality, preferred_lang)
       VALUES 
-        ('c0000000-0000-0000-0000-000000000001', '+919842711234', 'Vimal Raj', 'vimal.raj@salemseva.in', 'customer', 150.00, 'SALEM100', '14/2, 5th Cross, Fairlands, Salem - 636016', 'Fairlands', 'ta'),
+        ('c0000000-0000-0000-0000-000000000001', '+919842711234', 'Vimal Raj', 'vimal.raj@Shazu One.in', 'customer', 150.00, 'SALEM100', '14/2, 5th Cross, Fairlands, Salem - 636016', 'Fairlands', 'ta'),
         ('c0000000-0000-0000-0000-000000000002', '+919842100001', 'Kavitha S.', 'kavitha.s@gmail.com', 'customer', 50.00, 'KAVITHA50', '22, Saradha College Rd, Meyyanur, Salem', 'Meyyanur', 'ta'),
         ('c0000000-0000-0000-0000-000000000003', '+919443211111', 'Anand M.', 'anand.m@gmail.com', 'customer', 100.00, 'ANAND100', '58, Junction Main Road, Suramangalam, Salem', 'Suramangalam', 'ta'),
         ('c0000000-0000-0000-0000-000000000004', '+919843299999', 'Deepa R.', 'deepa.r@gmail.com', 'customer', 75.00, 'DEEPA75', '8A, Gorimedu Main Rd, Hasthampatti, Salem', 'Hasthampatti', 'ta')
@@ -170,7 +170,7 @@ async function seed() {
     await client.query(`
       INSERT INTO wallet_transactions (id, user_id, user_phone, title, amount, type, category, description, created_at)
       VALUES
-        ('fa000000-0000-0000-0000-000000000001', 'c0000000-0000-0000-0000-000000000001', '+919842711234', 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on SalemSeva', NOW() - INTERVAL '7 days'),
+        ('fa000000-0000-0000-0000-000000000001', 'c0000000-0000-0000-0000-000000000001', '+919842711234', 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on Shazu One', NOW() - INTERVAL '7 days'),
         ('fa000000-0000-0000-0000-000000000002', 'c0000000-0000-0000-0000-000000000001', '+919842711234', 'Referral: Kavitha (1st Service Done)', 100.00, 'CREDIT', 'REFERRAL_REWARD', 'Friend Kavitha completed AC service in Meyyanur (+100 Credits)', NOW() - INTERVAL '3 days')
       ON CONFLICT (id) DO NOTHING;
     `);

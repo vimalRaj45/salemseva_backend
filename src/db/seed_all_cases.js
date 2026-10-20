@@ -1,7 +1,7 @@
-const { pool, query } = require('./db');
+﻿const { pool, query } = require('./db');
 
 async function seedAllCases() {
-  console.log('Seeding Comprehensive Sample Data for ALL Cases across SalemSeva...');
+  console.log('Seeding Comprehensive Sample Data for ALL Cases across Shazu One...');
 
   try {
     // 1. Fetch available technicians
@@ -24,7 +24,7 @@ async function seedAllCases() {
     await query(`
       INSERT INTO users (phone, full_name, email, role, wallet_balance, default_address, locality)
       VALUES 
-        ('+919842711234', 'Vimal Raj', 'vimal.raj@salemseva.in', 'customer', 250.00, '14/2, 5th Cross, Fairlands, Salem - 636016', 'Fairlands'),
+        ('+919842711234', 'Vimal Raj', 'vimal.raj@Shazu One.in', 'customer', 250.00, '14/2, 5th Cross, Fairlands, Salem - 636016', 'Fairlands'),
         ('+919842100001', 'Kavitha S.', 'kavitha.s@gmail.com', 'customer', 120.00, '22, Saradha College Rd, Meyyanur, Salem', 'Meyyanur'),
         ('+919443211111', 'Anand M.', 'anand.m@gmail.com', 'customer', 100.00, '58, Junction Main Road, Suramangalam, Salem', 'Suramangalam'),
         ('+919843299999', 'Deepa R.', 'deepa.r@gmail.com', 'customer', 75.00, '8A, Gorimedu Main Rd, Hasthampatti, Salem', 'Hasthampatti')

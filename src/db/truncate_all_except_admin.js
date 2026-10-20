@@ -1,7 +1,7 @@
-const { query, pool } = require('./db');
+﻿const { query, pool } = require('./db');
 
 async function truncateAllExceptAdmin() {
-  console.log('--- SalemSeva: Starting full database purge (keeping Admin + config only) ---');
+  console.log('--- Shazu One: Starting full database purge (keeping Admin + config only) ---');
   try {
     // 1. Discover all existing tables in the public schema
     const tablesRes = await query(`
@@ -70,10 +70,10 @@ async function truncateAllExceptAdmin() {
       ) VALUES (
         '00000000-0000-0000-0000-000000000001',
         '+919842099999',
-        'Salem Central Ops Admin',
-        'ops.admin@salemseva.in',
+        'Shazu One Central Ops Admin',
+        'ops.admin@Shazu One.in',
         'admin',
-        'Salem Central Operations HQ, Fairlands, Salem - 636016',
+        'Shazu One Central Operations HQ, Fairlands, Salem - 636016',
         'Fairlands',
         0.00
       ) RETURNING id, phone, full_name, role;

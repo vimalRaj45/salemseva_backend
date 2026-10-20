@@ -1,7 +1,7 @@
-const { query, pool } = require('./db');
+﻿const { query, pool } = require('./db');
 
 async function truncateTransactionalData() {
-  console.log('SalemSeva: Truncating all transactional test data...');
+  console.log('Shazu One: Truncating all transactional test data...');
   try {
     // 1. Fetch all existing tables in public schema
     const tablesRes = await query(`

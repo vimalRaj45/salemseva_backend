@@ -1,7 +1,7 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 /**
- * SALEMSEVA: WALLET & INCENTIVE ROUTES (100% PERSISTENT NEON POSTGRESQL)
+ * Shazu One: WALLET & INCENTIVE ROUTES (100% PERSISTENT NEON POSTGRESQL)
  * Architecture: Zero In-Memory Mocks - All Ledgers, Referrals, Rewards & Payouts in DB
  */
 async function walletRoutes(fastify, options) {
@@ -43,7 +43,7 @@ async function walletRoutes(fastify, options) {
         // Seed initial signup bonus transaction in DB
         await query(`
           INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-          VALUES ($1, $2, 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on SalemSeva')
+          VALUES ($1, $2, 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on Shazu One')
         `, [user.id, cleanPhone]);
       }
 
@@ -102,7 +102,7 @@ async function walletRoutes(fastify, options) {
         phone = '+919842711234', 
         amount = 50, 
         title = '+50 Seva Credits Reward', 
-        description = 'Credits added to your SalemSeva wallet', 
+        description = 'Credits added to your Shazu One wallet', 
         category = 'REWARD' 
       } = req.body || {};
 

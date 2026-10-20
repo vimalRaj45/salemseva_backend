@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 const crypto = require('crypto');
 
 async function partnerRoutes(fastify, options) {
@@ -495,7 +495,7 @@ async function partnerRoutes(fastify, options) {
           return reply.status(403).send({
             success: false,
             code: 'ACCOUNT_SUSPENDED',
-            error: `Your partner account has been suspended by Salem Central Operations: ${techCheck.rows[0].block_reason || 'Administrative restriction'}. You cannot go online.`
+            error: `Your partner account has been suspended by Shazu One Central Operations: ${techCheck.rows[0].block_reason || 'Administrative restriction'}. You cannot go online.`
           });
         }
 
@@ -503,7 +503,7 @@ async function partnerRoutes(fastify, options) {
           return reply.status(403).send({
             success: false,
             code: 'KYC_PENDING',
-            error: 'KYC Verification Pending: You cannot go online until your Aadhaar and trade documents are verified by Salem Central Ops.'
+            error: 'KYC Verification Pending: You cannot go online until your Aadhaar and trade documents are verified by Shazu One Central Ops.'
           });
         }
       }
@@ -563,7 +563,7 @@ async function partnerRoutes(fastify, options) {
 
       return {
         success: true,
-        message: 'Live GPS coordinates broadcasted to SalemSeva tracking network',
+        message: 'Live GPS coordinates broadcasted to Shazu One tracking network',
         location: {
           lat: parseFloat(lat),
           lng: parseFloat(lng),
@@ -695,7 +695,7 @@ async function partnerRoutes(fastify, options) {
         role: 'technician',
         name: createdTech.full_name,
         phone: createdTech.phone,
-        email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+        email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
         trade: createdTech.primary_trade,
         tradeName: tradeNames[createdTech.primary_trade] || 'Home Services Specialist',
         payoutPhone: cleanPayoutDigits || (createdTech.upi_vpa?.replace(/@.*$/, '') || ''),
@@ -802,7 +802,7 @@ async function partnerRoutes(fastify, options) {
         role: 'technician',
         name: updatedTech.full_name,
         phone: updatedTech.phone,
-        email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@salemseva.in`,
+        email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
         trade: updatedTech.primary_trade,
         tradeName: tradeNames[updatedTech.primary_trade] || 'Home Services Specialist',
         payoutPhone: cleanPayoutDigits2 || (updatedTech.upi_vpa?.replace(/@.*$/, '') || ''),
@@ -821,7 +821,7 @@ async function partnerRoutes(fastify, options) {
 
       return {
         success: true,
-        message: 'Profile and KYC documents updated successfully in SalemSeva database',
+        message: 'Profile and KYC documents updated successfully in Shazu One database',
         technician: updatedTech,
         user: techUser
       };
@@ -1060,7 +1060,7 @@ async function partnerRoutes(fastify, options) {
         name: t.full_name,
         phone: t.phone,
         rawPhone: (t.phone || '').replace(/[\s\-]/g, ''),
-        email: `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@salemseva.in`,
+        email: `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@Shazu One.in`,
         trade: t.primary_trade,
         tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
         experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
@@ -1106,7 +1106,7 @@ async function partnerRoutes(fastify, options) {
         name: u.full_name,
         phone: u.phone,
         rawPhone: (u.phone || '').replace(/[\s\-]/g, ''),
-        email: u.email || `${u.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@salemseva.in`,
+        email: u.email || `${u.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@Shazu One.in`,
         locality: u.locality || 'Fairlands, Salem',
         address: u.default_address || `${u.locality || 'Fairlands'}, Salem`,
         walletBalance: parseFloat(u.wallet_balance || 0),
@@ -1219,7 +1219,7 @@ async function partnerRoutes(fastify, options) {
       if (['inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status)) {
         return reply.status(400).send({
           success: false,
-          error: 'Service inspection is already underway. Contact Salem Central Ops for emergency on-site assistance.'
+          error: 'Service inspection is already underway. Contact Shazu One Central Ops for emergency on-site assistance.'
         });
       }
 
@@ -1281,7 +1281,7 @@ async function partnerRoutes(fastify, options) {
 
         return {
           success: true,
-          message: 'Job escalated to Salem Central Ops for immediate specialist reassignment',
+          message: 'Job escalated to Shazu One Central Ops for immediate specialist reassignment',
           booking: updateRes.rows[0]
         };
       } else {

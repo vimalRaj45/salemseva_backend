@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -153,7 +153,7 @@ async function adminRoutes(fastify, options) {
             technicianId: id,
             technicianName: tech.full_name,
             action,
-            reason: reason || (isApproved ? 'Aadhaar document verified by Salem Central Ops' : 'Aadhaar document rejected / resubmission requested'),
+            reason: reason || (isApproved ? 'Aadhaar document verified by Shazu One Central Ops' : 'Aadhaar document rejected / resubmission requested'),
             timestamp: new Date().toISOString()
           })
         ]);
@@ -186,7 +186,7 @@ async function adminRoutes(fastify, options) {
             is_online = CASE WHEN $1 = TRUE THEN FALSE ELSE is_online END
         WHERE id = $3 
         RETURNING *
-      `, [isBlocked, reason || 'Administrative block by Salem Central Operations', id]);
+      `, [isBlocked, reason || 'Administrative block by Shazu One Central Operations', id]);
 
       if (res.rows.length === 0) {
         return reply.status(404).send({ success: false, error: 'Technician not found' });
@@ -238,7 +238,7 @@ async function adminRoutes(fastify, options) {
             blocked_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
         WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = REPLACE(REPLACE($3, ' ', ''), '-', '')
         RETURNING *
-      `, [isBlocked, reason || 'Administrative block by Salem Central Operations', cleanPhone]);
+      `, [isBlocked, reason || 'Administrative block by Shazu One Central Operations', cleanPhone]);
 
       if (res.rows.length === 0) {
         res = await query(`
@@ -675,6 +675,215 @@ async function adminRoutes(fastify, options) {
     }
   });
 
+  // 10B. Admin Emergency Release: Release Technician & Cancel Unresponsive Booking
+  fastify.post('/admin/bookings/release-technician', async (req, reply) => {
+    try {
+      const {
+        bookingId,
+        reason = 'Customer not answering phone calls / Doorbell no response at doorstep',
+        reasonDetails = '',
+        compensateTech = true,
+        adminNotes = ''
+      } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'bookingId is required' });
+      }
+
+      const bookingRes = await query(`SELECT * FROM bookings WHERE id = $1`, [bookingId]);
+      if (bookingRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const booking = bookingRes.rows[0];
+      const technicianId = booking.technician_id;
+      let techName = 'Assigned Partner';
+
+      if (technicianId) {
+        const techRes = await query(`SELECT full_name FROM technicians WHERE id = $1`, [technicianId]);
+        if (techRes.rows.length > 0) {
+          techName = techRes.rows[0].full_name;
+        }
+
+        // Release technician: mark online & ready for dispatches
+        await query(`
+          UPDATE technicians 
+          SET is_online = TRUE,
+              jobs_completed_count = COALESCE(jobs_completed_count, 0) + ${compensateTech ? 1 : 0}
+          WHERE id = $1
+        `, [technicianId]);
+
+        // If compensateTech is true, record compensation in payments
+        if (compensateTech) {
+          try {
+            await query(`
+              INSERT INTO payments (booking_id, amount, status, tech_payout_amount, payment_method)
+              VALUES ($1, 99.00, 'tech_compensated', 99.00, 'admin_travel_allowance')
+            `, [bookingId]);
+          } catch (e) {
+            fastify.log.warn('Could not insert payment compensation row:', e.message);
+          }
+        }
+      }
+
+      const fullReason = `Customer Unresponsive: ${reason}`;
+      const fullDetails = adminNotes 
+        ? `${reasonDetails} [Admin Note: ${adminNotes}]` 
+        : (reasonDetails || 'Customer did not respond to technician/ops attempts. Technician released by central dispatch.');
+
+      // Update booking to cancelled
+      const updateRes = await query(`
+        UPDATE bookings 
+        SET status = 'cancelled',
+            cancellation_reason = $1,
+            cancellation_details = $2,
+            cancelled_by = 'admin_ops',
+            cancelled_at = NOW(),
+            technician_id = NULL
+        WHERE id = $3
+        RETURNING *
+      `, [fullReason, fullDetails, bookingId]);
+
+      // Record immutable audit log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'ADMIN_RELEASE_TECH_CUSTOMER_UNRESPONSIVE', 'admin_salem_central', 'admin', $2)
+      `, [bookingId, JSON.stringify({
+        technicianId,
+        techName,
+        reason: fullReason,
+        compensateTech,
+        adminNotes,
+        timestamp: new Date().toISOString()
+      })]);
+
+      return {
+        success: true,
+        message: `Technician ${techName} has been released. Booking #${bookingId} marked as cancelled due to customer unresponsiveness.${compensateTech ? ' Technician compensated ₹99 travel fee.' : ''}`,
+        booking: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 10C. Admin General-Purpose Cancel Order & Release Technician
+  fastify.post('/admin/bookings/cancel-order', async (req, reply) => {
+    try {
+      const {
+        bookingId,
+        reason,
+        reasonDetails = '',
+        compensateTech = false,
+        adminNotes = '',
+        adminId = 'admin_ops'
+      } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'bookingId is required' });
+      }
+      if (!reason) {
+        return reply.status(400).send({ success: false, error: 'reason is required' });
+      }
+
+      // Fetch booking
+      const bookingRes = await query(`
+        SELECT b.*, 
+               t.full_name as tech_name, t.phone as tech_phone
+        FROM bookings b
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE b.id = $1
+      `, [bookingId]);
+
+      if (bookingRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const booking = bookingRes.rows[0];
+
+      // Guard: already cancelled/completed
+      if (['cancelled', 'completed'].includes(booking.status)) {
+        return reply.status(400).send({
+          success: false,
+          error: `Booking is already ${booking.status} and cannot be cancelled again.`
+        });
+      }
+
+      const technicianId = booking.technician_id;
+      const techName = booking.tech_name || 'Unassigned';
+      const hasTech = Boolean(technicianId);
+
+      // 1. Release the technician — set back online & available
+      if (hasTech) {
+        await query(`
+          UPDATE technicians
+          SET is_online = TRUE
+          WHERE id = $1
+        `, [technicianId]);
+
+        // Optional travel compensation
+        if (compensateTech) {
+          try {
+            await query(`
+              INSERT INTO payments (booking_id, amount_total, amount, status, tech_payout_amount, payment_method, settled_at)
+              VALUES ($1, 99.00, 99.00, 'tech_compensated', 99.00, 'admin_travel_allowance', NOW())
+            `, [bookingId]);
+          } catch (payErr) {
+            fastify.log.warn('Travel compensation payment insert failed: ' + payErr.message);
+          }
+        }
+      }
+
+      // 2. Cancel the booking
+      const fullDetails = [
+        reasonDetails,
+        adminNotes ? `[Admin Note: ${adminNotes}]` : ''
+      ].filter(Boolean).join(' ').trim() || 'Cancelled by Shazu One Central Operations admin.';
+
+      const updateRes = await query(`
+        UPDATE bookings
+        SET status            = 'cancelled',
+            cancellation_reason  = $1,
+            cancellation_details = $2,
+            cancelled_by      = $3,
+            cancelled_at      = NOW(),
+            technician_id     = NULL
+        WHERE id = $4
+        RETURNING *
+      `, [reason, fullDetails, adminId, bookingId]);
+
+      // 3. Audit log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'ADMIN_CANCEL_ORDER', $2, 'admin', $3)
+      `, [
+        bookingId,
+        adminId,
+        JSON.stringify({
+          reason,
+          reasonDetails: fullDetails,
+          previousStatus: booking.status,
+          technicianId: technicianId || null,
+          techName,
+          compensateTech,
+          timestamp: new Date().toISOString()
+        })
+      ]);
+
+      return {
+        success: true,
+        message: `Order #${bookingId} cancelled by admin.${hasTech ? ` Technician ${techName} released and set online.` : ''}${compensateTech ? ' Travel allowance (₹99) credited to technician.' : ''}`,
+        booking: updateRes.rows[0],
+        techReleased: hasTech,
+        compensated: compensateTech && hasTech
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 11. Deep Booking Traceability
   fastify.get('/admin/bookings/:id/trace', async (req, reply) => {
     try {
@@ -731,10 +940,10 @@ async function adminRoutes(fastify, options) {
         await query(`
           INSERT INTO admin_team (id, name, email, phone, role, hub_locality, status, permissions)
           VALUES 
-            ('staff_01', 'Vimal Raj', 'vimal@salemseva.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
-            ('staff_02', 'Anand M.', 'anand.dispatch@salemseva.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
-            ('staff_03', 'Priya S.', 'priya.support@salemseva.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
-            ('staff_04', 'Karthik K.', 'karthik.fin@salemseva.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
+            ('staff_01', 'Vimal Raj', 'vimal@Shazu One.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
+            ('staff_02', 'Anand M.', 'anand.dispatch@Shazu One.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
+            ('staff_03', 'Priya S.', 'priya.support@Shazu One.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
+            ('staff_04', 'Karthik K.', 'karthik.fin@Shazu One.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
         `);
       }
     } catch (err) {

@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -65,7 +65,7 @@ async function bookingsRoutes(fastify, options) {
         if (uCheck.rows.length > 0 && uCheck.rows[0].is_blocked) {
           return reply.status(403).send({
             success: false,
-            error: `Booking prohibited: Your customer account is suspended by Salem Central Operations. Reason: ${uCheck.rows[0].block_reason || 'Administrative restriction'}. Please contact Salem Central Ops support.`
+            error: `Booking prohibited: Your customer account is suspended by Shazu One Central Operations. Reason: ${uCheck.rows[0].block_reason || 'Administrative restriction'}. Please contact Shazu One Central Ops support.`
           });
         }
       }
@@ -84,7 +84,7 @@ async function bookingsRoutes(fastify, options) {
         if (!extractedPin.startsWith('636')) {
           return reply.status(400).send({
             success: false,
-            error: `Outside Service Region: PIN code ${extractedPin} is outside our active Salem working region. SalemSeva only serves Salem (PIN codes: 636xxx). Your booking cannot be accepted.`
+            error: `Outside Service Region: PIN code ${extractedPin} is outside our active Salem working region. Shazu One only serves Salem (PIN codes: 636xxx). Your booking cannot be accepted.`
           });
         }
       }
@@ -96,7 +96,7 @@ async function bookingsRoutes(fastify, options) {
         if (locationText.includes(fc) && !locationText.includes('salem')) {
           return reply.status(400).send({
             success: false,
-            error: `Outside Service Region: ${fc.toUpperCase()} is outside our active Salem working region. SalemSeva only operates within Salem.`
+            error: `Outside Service Region: ${fc.toUpperCase()} is outside our active Salem working region. Shazu One only operates within Salem.`
           });
         }
       }
@@ -285,7 +285,7 @@ async function bookingsRoutes(fastify, options) {
         success: true,
         message: onlineTech 
           ? 'Inspection booking created and placed into live matching radar' 
-          : 'Booking placed in Salem Central Ops queue for assignment within 12 hours or scheduled slot',
+          : 'Booking placed in Shazu One Central Ops queue for assignment within 12 hours or scheduled slot',
         hasOnlineTech: Boolean(onlineTech),
         booking: result.rows[0]
       };
@@ -398,7 +398,7 @@ async function bookingsRoutes(fastify, options) {
         ? Boolean(technician && isRideStarted)
         : Boolean(technician && (technician.isOnline || booking.status !== 'matching'));
 
-      // Compute Salem Central Ops Workflow transparency for Scheduled Bookings
+      // Compute Shazu One Central Ops Workflow transparency for Scheduled Bookings
       let opsWorkflow = null;
       if (isScheduledBooking) {
         let currentStage = 2; // Default to Stage 2 once created
@@ -436,7 +436,7 @@ async function bookingsRoutes(fastify, options) {
               id: 'locality_feasibility',
               title: 'Locality & Service Feasibility Check',
               titleTa: 'பகுதி ஆய்வு & கருவிகள் சரிபார்ப்பு',
-              description: `Salem Central Ops confirmed specialist coverage and tooling readiness for ${booking.locality || 'Fairlands, Salem'}.`,
+              description: `Shazu One Central Ops confirmed specialist coverage and tooling readiness for ${booking.locality || 'Fairlands, Salem'}.`,
               status: currentStage >= 2 ? 'completed' : 'in_progress',
               completedAt: currentStage >= 2 ? 'Verified by Central Ops' : 'Evaluating',
               officer: 'Salem Central Dispatch'
@@ -492,7 +492,7 @@ async function bookingsRoutes(fastify, options) {
           notice: isScheduledBooking
             ? (technician 
                 ? `Technician ${technician.name} is assigned. Live GPS tracking will unlock when they start their ride.`
-                : 'Your booking has been received by Salem Central Ops. We are assigning a certified specialist.')
+                : 'Your booking has been received by Shazu One Central Ops. We are assigning a certified specialist.')
             : 'No verified technician is currently online in this Salem locality right now.',
           waitWindow: isScheduledBooking ? (booking.scheduled_slot || 'Scheduled Window') : '12 Hours Guarantee Window',
           scheduledSlot: booking.scheduled_slot || 'priority_12h',
@@ -529,7 +529,7 @@ async function bookingsRoutes(fastify, options) {
       if (['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status)) {
         return reply.status(400).send({
           success: false,
-          error: 'Technician is already en route or on-site. Reschedule is locked. Please contact Salem Central Ops hotline.'
+          error: 'Technician is already en route or on-site. Reschedule is locked. Please contact Shazu One Central Ops hotline.'
         });
       }
 
@@ -635,13 +635,13 @@ async function bookingsRoutes(fastify, options) {
             await query(
               `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
                VALUES ($1, $2, $3, $4, $5)`,
-              [id, b.scheduled_slot, b.scheduled_slot, 'customer_rejected_tech_proposal', 'Customer requested reassignment by Salem Central Ops']
+              [id, b.scheduled_slot, b.scheduled_slot, 'customer_rejected_tech_proposal', 'Customer requested reassignment by Shazu One Central Ops']
             );
           } catch (_) {}
 
           return {
             success: true,
-            message: 'Handover requested. Salem Central Ops is assigning another verified specialist.',
+            message: 'Handover requested. Shazu One Central Ops is assigning another verified specialist.',
             booking: updateRes.rows[0]
           };
         } else {
@@ -799,7 +799,7 @@ async function bookingsRoutes(fastify, options) {
             part2PaymentId: b.status === 'completed' ? `TXN-FINAL-${b.id}` : null,
             part2Status: b.status === 'completed' ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
             platformCommission: b.status === 'completed' ? parseFloat((finalQuoteSubtotal * 0.05).toFixed(2)) : 0,
-            escrowGuarantee: '100% Protected under SalemSeva Escrow'
+            escrowGuarantee: '100% Protected under Shazu One Escrow'
           }
         };
       }));
@@ -978,7 +978,7 @@ async function bookingsRoutes(fastify, options) {
       if (!isValid) {
         return reply.status(400).send({
           success: false,
-          error: 'Incorrect Safety PIN. For your family safety, do not allow entry. Please ask the technician to read the 4-digit PIN on their SalemSeva Partner app.'
+          error: 'Incorrect Safety PIN. For your family safety, do not allow entry. Please ask the technician to read the 4-digit PIN on their Shazu One Partner app.'
         });
       }
 
@@ -1135,7 +1135,7 @@ async function bookingsRoutes(fastify, options) {
             platformFeeRetained: platformFeeDeduction,
             gatewayChargeRetained: gatewayChargeDeduction,
             refundAmount,
-            policyNotice: `As per SalemSeva policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
+            policyNotice: `As per Shazu One policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
             cancelledAt: booking.cancelled_at || new Date().toISOString()
           }
         };
@@ -1221,7 +1221,7 @@ async function bookingsRoutes(fastify, options) {
           gatewayChargeRetained: gatewayChargeDeduction,
           refundAmount,
           refundStatus: 'REFUND_INITIATED',
-          policyNotice: `As per SalemSeva policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
+          policyNotice: `As per Shazu One policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
           cancelledAt: new Date().toISOString()
         }
       };

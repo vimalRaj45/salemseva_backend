@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+﻿const crypto = require('crypto');
 const { query } = require('../db/db');
 
 async function paymentsRoutes(fastify, options) {
@@ -27,7 +27,7 @@ async function paymentsRoutes(fastify, options) {
             notes: {
               bookingId: bookingId || 'SLM-84920',
               type: isDiagnosticOnly ? 'DIAGNOSTIC_ESCROW' : 'FINAL_SETTLEMENT',
-              platform: 'SalemSeva Escrow'
+              platform: 'Shazu One Escrow'
             }
           })
         });
@@ -184,7 +184,7 @@ async function paymentsRoutes(fastify, options) {
       if (payment_method === 'cash' || req.body.paymentMethod === 'cash') {
         return reply.status(400).send({
           success: false,
-          error: 'Cash payments are not allowed. SalemSeva requires 100% digital escrow payments (UPI / Cards / Net Banking).'
+          error: 'Cash payments are not allowed. Shazu One requires 100% digital escrow payments (UPI / Cards / Net Banking).'
         });
       }
 
@@ -264,7 +264,7 @@ async function paymentsRoutes(fastify, options) {
         paymentId: paymentTxId,
         orderId: orderTxId,
         escrowStatus: 'HELD_IN_ESCROW',
-        guarantee: '100% Protected under SalemSeva Escrow Policy',
+        guarantee: '100% Protected under Shazu One Escrow Policy',
         disbursalSummary: {
           part1Fee: parsedAmount,
           technicianShare: parsedAmount,
@@ -316,7 +316,7 @@ async function paymentsRoutes(fastify, options) {
           deskFee: deskFee
         },
         pgFee: parseFloat(pgFee.toFixed(2)),
-        escrowNodalAccount: 'acc_RazorpayEscrow_SalemSeva'
+        escrowNodalAccount: 'acc_RazorpayEscrow_Shazu One'
       }
     };
   });
@@ -341,7 +341,7 @@ async function paymentsRoutes(fastify, options) {
       const quoteSubtotal = parseFloat(booking.quote_subtotal) || 250.00;
       const visitFee = parseFloat(booking.visit_fee) || 99.00;
       const totalBookingAmount = visitFee + quoteSubtotal;
-      const platformCut = parseFloat((totalBookingAmount * 0.02).toFixed(2)); // Strictly 2% SalemSeva platform commission
+      const platformCut = parseFloat((totalBookingAmount * 0.02).toFixed(2)); // Strictly 2% Shazu One platform commission
       const totalTechPayout = parseFloat((totalBookingAmount - platformCut).toFixed(2)); // 98% technician payout
       const utrNumber = 'UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS';
 
