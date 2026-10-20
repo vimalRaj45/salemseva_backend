@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 const crypto = require('crypto');
 
 function hashPassword(pwd) {
@@ -33,84 +33,77 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      // Check Technicians table first if phone, email, or username matches
+      // Role-aware lookup: if customer portal, check customer account first; if partner portal, check technician account first
       let userRecord = null;
-      let userRole = 'customer';
+      let userRole = requestedRole === 'technician' || requestedRole === 'partner' ? 'technician' : 'customer';
 
-      const techRes = await query(`
-        SELECT * FROM technicians 
-        WHERE (
-          $1::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-        )
-        OR (LOWER(email) = LOWER($2) AND $2::text <> '')
-        OR (LOWER(full_name) = LOWER($2) AND $2::text <> '')
-        LIMIT 1
-      `, [cleanPhone || '', rawInput.toLowerCase()]);
+      const checkTechnician = async () => {
+        const techRes = await query(`
+          SELECT * FROM technicians 
+          WHERE (
+            $1::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+          )
+          OR (LOWER(email) = LOWER($2) AND $2::text <> '')
+          OR (LOWER(full_name) = LOWER($2) AND $2::text <> '')
+          LIMIT 1
+        `, [cleanPhone || '', rawInput.toLowerCase()]);
 
-      if (techRes.rows.length > 0) {
-        const t = techRes.rows[0];
-        const hashedInput = hashPassword(password);
-        
-        // Strict password check for technicians
-        if (t.password_hash) {
-          if (hashedInput !== t.password_hash) {
-            return reply.status(401).send({
-              success: false,
-              error: 'Incorrect password for this technician account. Please verify and retry.'
-            });
+        if (techRes.rows.length > 0) {
+          const t = techRes.rows[0];
+          const hashedInput = hashPassword(password);
+          
+          if (t.password_hash) {
+            if (hashedInput !== t.password_hash) {
+              return { error: 'Incorrect password for this technician account. Please verify and retry.', status: 401 };
+            }
+          } else if (!password || password.trim().length < 4) {
+            return { error: 'Password is required to sign in.', status: 401 };
+          } else {
+            await query(`UPDATE technicians SET password_hash = $1 WHERE id = $2`, [hashedInput, t.id]);
           }
-        } else if (!password || password.trim().length < 4) {
-          return reply.status(401).send({
-            success: false,
-            error: 'Password is required to sign in.'
-          });
-        } else {
-          // Initialize password hash for legacy partner record
-          await query(`UPDATE technicians SET password_hash = $1 WHERE id = $2`, [hashedInput, t.id]);
+
+          if (t.is_blocked) {
+            return { error: `Your partner account has been suspended by Shazu One Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`, status: 403 };
+          }
+
+          const tradeNames = {
+            ac: 'AC Repair & Cooling Expert',
+            electrician: 'Electrician & Wiring Specialist',
+            plumber: 'Plumbing & Drainage Specialist',
+            cleaning: 'Home & Bathroom Cleaning Pro'
+          };
+
+          return {
+            user: {
+              id: t.id,
+              role: 'technician',
+              name: t.full_name || t.name || 'Certified Partner',
+              phone: t.phone || `+91 ${cleanPhone}`,
+              email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
+              trade: t.primary_trade || t.trade || 'ac',
+              tradeName: tradeNames[t.primary_trade || t.trade] || 'Home Services Specialist',
+              upiId: t.upi_vpa,
+              upi_vpa: t.upi_vpa,
+              aadhaarCardUrl: t.aadhaar_card_url,
+              aadhaarNumber: t.aadhaar_number,
+              isKycVerified: Boolean(t.is_kyc_verified),
+              is_kyc_verified: Boolean(t.is_kyc_verified),
+              status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
+              isOnline: Boolean(t.is_online),
+              ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
+              jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+              todayEarnings: 0,
+              today_earnings: 0,
+              serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
+              assignedLocalities: t.assigned_localities || ['Fairlands']
+            },
+            role: 'technician'
+          };
         }
+        return null;
+      };
 
-        if (t.is_blocked) {
-          return reply.status(403).send({
-            success: false,
-            error: `Your partner account has been suspended by Shazu One Central Operations. Reason: ${t.block_reason || 'Administrative compliance review'}`
-          });
-        }
-
-        const tradeNames = {
-          ac: 'AC Repair & Cooling Expert',
-          electrician: 'Electrician & Wiring Specialist',
-          plumber: 'Plumbing & Drainage Specialist',
-          cleaning: 'Home & Bathroom Cleaning Pro'
-        };
-
-        userRecord = {
-          id: t.id,
-          role: 'technician',
-          name: t.full_name || t.name || 'Certified Partner',
-          phone: t.phone || `+91 ${cleanPhone}`,
-          email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
-          trade: t.primary_trade || t.trade || 'ac',
-          tradeName: tradeNames[t.primary_trade || t.trade] || 'Home Services Specialist',
-          upiId: t.upi_vpa,
-          upi_vpa: t.upi_vpa,
-          aadhaarCardUrl: t.aadhaar_card_url,
-          aadhaarNumber: t.aadhaar_number,
-          isKycVerified: Boolean(t.is_kyc_verified),
-          is_kyc_verified: Boolean(t.is_kyc_verified),
-          status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
-          isOnline: Boolean(t.is_online),
-          ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
-          jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
-          todayEarnings: 0,
-          today_earnings: 0,
-          serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-          assignedLocalities: t.assigned_localities || ['Fairlands']
-        };
-        userRole = 'technician';
-      }
-
-      // If not technician, check users table (customers & admins)
-      if (!userRecord) {
+      const checkCustomer = async () => {
         const custRes = await query(`
           SELECT * FROM users 
           WHERE (
@@ -125,48 +118,72 @@ async function authRoutes(fastify, options) {
           const u = custRes.rows[0];
           const hashedInput = hashPassword(password);
 
-          // Strict password verification
           if (u.password_hash) {
             if (hashedInput !== u.password_hash) {
-              return reply.status(401).send({
-                success: false,
-                error: 'Incorrect password. Please verify and retry.'
-              });
+              return { error: 'Incorrect password. Please verify and retry.', status: 401 };
             }
           } else if (!password || password.trim().length < 4) {
-            return reply.status(401).send({
-              success: false,
-              error: 'Password is required to sign in.'
-            });
+            return { error: 'Password is required to sign in.', status: 401 };
           } else {
-            // Save initial password hash
             await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashedInput, u.id]);
           }
 
           if (u.is_blocked) {
-            return reply.status(403).send({
-              success: false,
-              error: `Your account has been suspended by Shazu One Central Operations. Reason: ${u.block_reason || 'Administrative review'}`
-            });
+            return { error: `Your account has been suspended by Shazu One Central Operations. Reason: ${u.block_reason || 'Administrative review'}`, status: 403 };
           }
 
-          userRole = u.role || 'customer';
-          userRecord = {
-            id: u.id,
-            role: userRole,
-            name: u.full_name || 'Salem Customer',
-            phone: u.phone || (cleanPhone ? `+91 ${cleanPhone}` : ''),
-            email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
-            locality: u.locality || 'Fairlands, Salem',
-            address: u.default_address || 'Fairlands, Salem - 636016',
-            walletBalance: parseFloat(u.wallet_balance || 100)
+          return {
+            user: {
+              id: u.id,
+              role: u.role || 'customer',
+              name: u.full_name || 'Salem Customer',
+              phone: u.phone || (cleanPhone ? `+91 ${cleanPhone}` : ''),
+              email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
+              locality: u.locality || 'Fairlands, Salem',
+              address: u.default_address || 'Fairlands, Salem - 636016',
+              walletBalance: parseFloat(u.wallet_balance || 100)
+            },
+            role: u.role || 'customer'
           };
+        }
+        return null;
+      };
+
+      // Execute role-prioritized check
+      if (requestedRole === 'customer') {
+        const custResult = await checkCustomer();
+        if (custResult?.error) return reply.status(custResult.status).send({ success: false, error: custResult.error });
+        if (custResult?.user) {
+          userRecord = custResult.user;
+          userRole = custResult.role;
+        } else {
+          const techResult = await checkTechnician();
+          if (techResult?.error) return reply.status(techResult.status).send({ success: false, error: techResult.error });
+          if (techResult?.user) {
+            userRecord = techResult.user;
+            userRole = techResult.role;
+          }
+        }
+      } else {
+        // Default or technician requested: check technician first
+        const techResult = await checkTechnician();
+        if (techResult?.error) return reply.status(techResult.status).send({ success: false, error: techResult.error });
+        if (techResult?.user) {
+          userRecord = techResult.user;
+          userRole = techResult.role;
+        } else {
+          const custResult = await checkCustomer();
+          if (custResult?.error) return reply.status(custResult.status).send({ success: false, error: custResult.error });
+          if (custResult?.user) {
+            userRecord = custResult.user;
+            userRole = custResult.role;
+          }
         }
       }
 
       // Dedicated Shazu One Central Ops Admin authentication
       if (!userRecord) {
-        if (cleanPhone === '9842099999' || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@Shazu One.in') {
+        if (cleanPhone === '9842099999' || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@shazuone.in') {
           if (!password || hashPassword(password) !== hashPassword('salem123')) {
             return reply.status(401).send({ success: false, error: 'Incorrect admin credentials' });
           }
@@ -176,7 +193,7 @@ async function authRoutes(fastify, options) {
             role: 'admin',
             name: 'Shazu One Central Ops Admin',
             phone: '+91 98420 99999',
-            email: 'ops.admin@Shazu One.in',
+            email: 'ops.admin@shazuone.in',
             locality: 'Central HQ, Salem',
             isVerified: true
           };
@@ -242,35 +259,61 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      // 1. Strict Duplicate Check: Prevent duplicate accounts with the same phone number
-      const phoneCheck = await query(`
-        SELECT phone, 'customer' as account_type FROM users WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-        UNION
-        SELECT phone, 'technician' as account_type FROM technicians WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-        LIMIT 1
-      `, [cleanPhone]);
+      // Allow same mobile number for 1 customer account AND 1 partner/technician account
+      // Enforce: at most ONCE as customer, at most ONCE as technician
+      const isTechRole = (role === 'technician' || role === 'partner');
 
-      if (phoneCheck.rows.length > 0) {
-        return reply.status(409).send({
-          success: false,
-          error: `Mobile number +91 ${cleanPhone} is already registered on Shazu One. Please sign in instead of creating a duplicate account.`
-        });
-      }
-
-      // 2. Strict Duplicate Check: Prevent duplicate accounts with the same email address
-      if (email && email.trim()) {
-        const emailCheck = await query(`
-          SELECT email FROM users WHERE LOWER(email) = LOWER($1)
-          UNION
-          SELECT email FROM technicians WHERE LOWER(email) = LOWER($1)
+      if (isTechRole) {
+        // Check if already registered as technician
+        const techCheck = await query(`
+          SELECT phone FROM technicians 
+          WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
           LIMIT 1
-        `, [email.trim()]);
+        `, [cleanPhone]);
 
-        if (emailCheck.rows.length > 0) {
+        if (techCheck.rows.length > 0) {
           return reply.status(409).send({
             success: false,
-            error: `Email address ${email.trim()} is already registered with another account. Please use a different email or sign in.`
+            error: `Mobile number +91 ${cleanPhone} is already registered as a Partner/Technician. Each mobile number can only have one partner account. Please sign in instead.`
           });
+        }
+
+        if (email && email.trim()) {
+          const emailCheck = await query(`
+            SELECT email FROM technicians WHERE LOWER(email) = LOWER($1) LIMIT 1
+          `, [email.trim()]);
+          if (emailCheck.rows.length > 0) {
+            return reply.status(409).send({
+              success: false,
+              error: `Email address ${email.trim()} is already registered with another partner account. Please use a different email or sign in.`
+            });
+          }
+        }
+      } else {
+        // Customer registration: check if already registered as customer
+        const custCheck = await query(`
+          SELECT phone FROM users 
+          WHERE role = 'customer' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+          LIMIT 1
+        `, [cleanPhone]);
+
+        if (custCheck.rows.length > 0) {
+          return reply.status(409).send({
+            success: false,
+            error: `Mobile number +91 ${cleanPhone} is already registered as a Customer. Each mobile number can only have one customer account. Please sign in instead.`
+          });
+        }
+
+        if (email && email.trim()) {
+          const emailCheck = await query(`
+            SELECT email FROM users WHERE role = 'customer' AND LOWER(email) = LOWER($1) LIMIT 1
+          `, [email.trim()]);
+          if (emailCheck.rows.length > 0) {
+            return reply.status(409).send({
+              success: false,
+              error: `Email address ${email.trim()} is already registered with another customer account. Please use a different email or sign in.`
+            });
+          }
         }
       }
 

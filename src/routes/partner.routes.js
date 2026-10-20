@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 const crypto = require('crypto');
 
 async function partnerRoutes(fastify, options) {
@@ -637,11 +637,7 @@ async function partnerRoutes(fastify, options) {
         await query(`
           INSERT INTO users (full_name, phone, role, password_hash, locality)
           VALUES ($1, $2, 'technician', $3, $4)
-          ON CONFLICT (phone) DO UPDATE SET 
-            role = 'technician',
-            full_name = EXCLUDED.full_name,
-            password_hash = EXCLUDED.password_hash,
-            locality = EXCLUDED.locality
+          ON CONFLICT (phone) DO NOTHING
         `, [fullName || 'Salem Verified Partner', cleanPhone, partnerPwdHash, serviceArea || 'Fairlands, Salem']);
       } catch (uErr) {}
 
