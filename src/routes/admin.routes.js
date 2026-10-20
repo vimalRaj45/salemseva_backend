@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -940,10 +940,10 @@ async function adminRoutes(fastify, options) {
         await query(`
           INSERT INTO admin_team (id, name, email, phone, role, hub_locality, status, permissions)
           VALUES 
-            ('staff_01', 'Vimal Raj', 'vimal@Shazu One.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
-            ('staff_02', 'Anand M.', 'anand.dispatch@Shazu One.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
-            ('staff_03', 'Priya S.', 'priya.support@Shazu One.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
-            ('staff_04', 'Karthik K.', 'karthik.fin@Shazu One.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
+            ('staff_01', 'Operations Lead', 'admin@shazuone.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
+            ('staff_02', 'Dispatch Controller', 'dispatch@shazuone.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
+            ('staff_03', 'Quality & Support', 'support@shazuone.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
+            ('staff_04', 'Finance & Escrow', 'finance@shazuone.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
         `);
       }
     } catch (err) {

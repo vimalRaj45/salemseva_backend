@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 /**
  * Shazu One: WALLET & INCENTIVE ROUTES (100% PERSISTENT NEON POSTGRESQL)
@@ -16,7 +16,10 @@ async function walletRoutes(fastify, options) {
   // GET /wallet/customer - Fetch live customer wallet balance and transaction ledger
   fastify.get('/wallet/customer', async (req, reply) => {
     try {
-      const rawPhone = req.query.phone || '+919842711234';
+      const rawPhone = req.query?.phone ? String(req.query.phone).trim() : '';
+      if (!rawPhone) {
+        return reply.status(400).send({ success: false, error: 'Customer phone number is required' });
+      }
       const cleanPhone = sanitizePhone(rawPhone);
 
       // 1. Fetch user from PostgreSQL
@@ -99,12 +102,16 @@ async function walletRoutes(fastify, options) {
   fastify.post('/wallet/customer/credit', async (req, reply) => {
     try {
       const { 
-        phone = '+919842711234', 
+        phone = '', 
         amount = 50, 
         title = '+50 Seva Credits Reward', 
         description = 'Credits added to your Shazu One wallet', 
         category = 'REWARD' 
       } = req.body || {};
+
+      if (!phone || !phone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Customer phone number is required' });
+      }
 
       const cleanPhone = sanitizePhone(phone);
       const creditAmt = parseFloat(amount) || 50;
@@ -151,7 +158,13 @@ async function walletRoutes(fastify, options) {
   // POST /wallet/customer/debit - Debit wallet at checkout with 20% burn cap
   fastify.post('/wallet/customer/debit', async (req, reply) => {
     try {
-      const { phone = '+919842711234', amount = 100, bookingId = 'SLM-84920' } = req.body || {};
+      const { phone = '', amount = 0, bookingId = '' } = req.body || {};
+      if (!phone || !phone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Customer phone is required' });
+      }
+      if (!bookingId || !bookingId.trim()) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+      }
       const cleanPhone = sanitizePhone(phone);
       const requestedDebit = parseFloat(amount) || 0;
 
@@ -222,7 +235,10 @@ async function walletRoutes(fastify, options) {
         referrerPhone = ''
       } = req.body || {};
 
-      const targetPhone = phone || referrerPhone || '+919842711234';
+      const targetPhone = phone || referrerPhone;
+      if (!targetPhone || !targetPhone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Customer phone number is required' });
+      }
       const cleanPhone = sanitizePhone(targetPhone);
 
       // Fetch dynamic referral reward setting from DB
@@ -290,9 +306,11 @@ async function walletRoutes(fastify, options) {
   // GET /partner/incentives - Fetch technician incentive balance, star progression & referrals
   fastify.get('/partner/incentives', async (req, reply) => {
     try {
-      const rawPhone = req.query.phone || '+919443288901';
+      const rawPhone = req.query?.phone ? String(req.query.phone).trim() : '';
+      if (!rawPhone) {
+        return reply.status(400).send({ success: false, error: 'Technician phone number is required' });
+      }
       const cleanPhone = sanitizePhone(rawPhone);
-      const reqName = req.query.name || 'K. Ramesh';
 
       // 1. Fetch technician from DB
       let techRes = await query(`
@@ -304,15 +322,8 @@ async function walletRoutes(fastify, options) {
 
       let tech = techRes.rows[0];
 
-      // Auto-create in DB if new partner
       if (!tech) {
-        const insertTech = await query(`
-          INSERT INTO technicians (full_name, phone, primary_trade, is_kyc_verified, star_points, star_tier)
-          VALUES ($1, $2, 'ac', TRUE, 15, 'Gold Partner (Salem)')
-          ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name
-          RETURNING id, full_name, phone, star_points, star_tier, zero_comm_unlocked, primary_trade
-        `, [reqName, cleanPhone]);
-        tech = insertTech.rows[0];
+        return reply.status(404).send({ success: false, error: 'Technician partner not found in database' });
       }
 
       // 2. Fetch referred technicians ledger from DB
@@ -410,12 +421,22 @@ async function walletRoutes(fastify, options) {
   fastify.post('/partner/refer', async (req, reply) => {
     try {
       const {
-        referrerPhone = '+919443288901',
-        referredName = 'A. Manikandan',
-        referredPhone = '+919442077884',
+        referrerPhone = '',
+        referredName = '',
+        referredPhone = '',
         referredTrade = 'AC & Refrigeration Specialist',
-        referredLocality = 'Alagapuram, Salem'
+        referredLocality = 'Salem'
       } = req.body || {};
+
+      if (!referrerPhone || !referrerPhone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Referrer technician phone is required' });
+      }
+      if (!referredName || !referredName.trim()) {
+        return reply.status(400).send({ success: false, error: 'Referred partner name is required' });
+      }
+      if (!referredPhone || !referredPhone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Referred partner mobile number is required' });
+      }
 
       const cleanReferrer = sanitizePhone(referrerPhone);
       const cleanReferred = sanitizePhone(referredPhone);
@@ -513,7 +534,13 @@ async function walletRoutes(fastify, options) {
   // POST /partner/payout - 1-Click Instant Payout Claim directly recorded in PostgreSQL
   fastify.post('/partner/payout', async (req, reply) => {
     try {
-      const { phone = '+919443288901', upiId = 'partner.pay@okaxis' } = req.body || {};
+      const { phone = '', upiId = '' } = req.body || {};
+      if (!phone || !phone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Technician phone is required' });
+      }
+      if (!upiId || !upiId.trim() || !upiId.includes('@')) {
+        return reply.status(400).send({ success: false, error: 'Valid UPI ID (e.g. name@upi) is required for payout' });
+      }
       const cleanPhone = sanitizePhone(phone);
 
       // Check available payout sum in DB

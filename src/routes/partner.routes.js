@@ -5,30 +5,28 @@ async function partnerRoutes(fastify, options) {
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
   fastify.get('/partner/duty', async (req, reply) => {
     try {
-      const phoneParam = (req.query && req.query.phone) ? req.query.phone : '+919443288901';
-      const techIdParam = (req.query && (req.query.technicianId || req.query.id)) ? String(req.query.technicianId || req.query.id) : '';
+      const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
+      const techIdParam = (req.query?.technicianId || req.query?.id) ? String(req.query.technicianId || req.query.id).trim() : '';
+      
+      if (!phoneParam && !techIdParam) {
+        return reply.status(401).send({ success: false, error: 'Technician authentication (phone or ID) is required' });
+      }
+
       const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
-      const cleanPhone = cleanDigits;
 
       const techRes = await query(`
         SELECT * FROM technicians 
         WHERE ($1::text <> '' AND id::text = $1)
            OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
-           OR id::text = $3
+           OR ($3::text <> '' AND phone = $3)
         ORDER BY created_at ASC 
         LIMIT 1
       `, [techIdParam, cleanDigits || '', phoneParam]);
 
       let tech = techRes.rows[0];
-      
-      // If not matched by exact phone, grab first technician in DB
-      if (!tech) {
-        const fallback = await query(`SELECT * FROM technicians ORDER BY rating_avg DESC LIMIT 1`);
-        tech = fallback.rows[0];
-      }
 
       if (!tech) {
-        return reply.status(404).send({ success: false, error: 'Technician not found in database' });
+        return reply.status(404).send({ success: false, error: 'Technician partner not found in database. Please register or sign in.' });
       }
 
       // Get latest active job for this partner from DB (prioritize incoming 'matching' requests)
@@ -390,14 +388,18 @@ async function partnerRoutes(fastify, options) {
   // 1a. Accept Offline Job Request from Admin and Automatically Switch Online
   fastify.post('/partner/duty/accept-offline-request', async (req, reply) => {
     try {
-      const { bookingId, phone = '+919443288901', technicianId } = req.body;
-      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+      const { bookingId, phone = '', technicianId } = req.body || {};
+      const cleanPhone = phone ? phone.replace(/[\s\-\(\)]/g, '') : '';
+
+      if (!cleanPhone && !technicianId) {
+        return reply.status(400).send({ success: false, error: 'Technician phone or ID is required' });
+      }
 
       // 1. Toggle technician to ONLINE (is_online = true)
       const techUpdate = await query(`
         UPDATE technicians 
         SET is_online = TRUE, last_location_update = CURRENT_TIMESTAMP 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $2
+        WHERE ($1::text <> '' AND REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1) OR ($2::text <> '' AND id::text = $2)
         RETURNING *
       `, [cleanPhone, technicianId || '']);
 
@@ -479,8 +481,12 @@ async function partnerRoutes(fastify, options) {
   // 2. Toggle Duty Status (Online / Offline) directly in DB
   fastify.post('/partner/duty/toggle', async (req, reply) => {
     try {
-      const { isOnline, phone = '+919443288901', technicianId } = req.body;
-      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+      const { isOnline, phone = '', technicianId } = req.body || {};
+      const cleanPhone = phone ? phone.replace(/[\s\-\(\)]/g, '') : '';
+
+      if (!cleanPhone && !technicianId) {
+        return reply.status(400).send({ success: false, error: 'Technician phone or ID is required to toggle duty status' });
+      }
 
       // Enforce KYC Gate: Unverified technicians cannot go online
       if (Boolean(isOnline)) {
@@ -541,8 +547,15 @@ async function partnerRoutes(fastify, options) {
   // 2.1 Update Real-Time GPS Location & Live Transmitter
   fastify.post('/partner/duty/location', async (req, reply) => {
     try {
-      const { phone = '+919443288901', technicianId, lat = 11.6710, lng = 78.1520, speed = 25 } = req.body;
-      const cleanPhone = phone.replace(/[\s\-\(\)]/g, '');
+      const { phone = '', technicianId, lat, lng, speed = 0 } = req.body || {};
+      const cleanPhone = phone ? phone.replace(/[\s\-\(\)]/g, '') : '';
+
+      if (!cleanPhone && !technicianId) {
+        return reply.status(400).send({ success: false, error: 'Technician phone or ID is required' });
+      }
+      if (lat == null || lng == null) {
+        return reply.status(400).send({ success: false, error: 'Valid latitude and longitude are required' });
+      }
 
       let result;
       if (technicianId) {
@@ -691,7 +704,7 @@ async function partnerRoutes(fastify, options) {
         role: 'technician',
         name: createdTech.full_name,
         phone: createdTech.phone,
-        email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
+        email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
         trade: createdTech.primary_trade,
         tradeName: tradeNames[createdTech.primary_trade] || 'Home Services Specialist',
         payoutPhone: cleanPayoutDigits || (createdTech.upi_vpa?.replace(/@.*$/, '') || ''),
@@ -798,7 +811,7 @@ async function partnerRoutes(fastify, options) {
         role: 'technician',
         name: updatedTech.full_name,
         phone: updatedTech.phone,
-        email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
+        email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
         trade: updatedTech.primary_trade,
         tradeName: tradeNames[updatedTech.primary_trade] || 'Home Services Specialist',
         payoutPhone: cleanPayoutDigits2 || (updatedTech.upi_vpa?.replace(/@.*$/, '') || ''),
@@ -831,29 +844,29 @@ async function partnerRoutes(fastify, options) {
   const handleCreateQuote = async (req, reply) => {
     try {
       const {
-        bookingId = 'SLM-84920',
+        bookingId,
         items = [],
         partsMode = 'tech_buys',
         notes
-      } = req.body;
+      } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required to create quote' });
+      }
 
       // Find booking first
       let bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
       let targetBookingId = bRes.rows[0]?.id;
 
       if (!targetBookingId) {
-        const latest = await query('SELECT * FROM bookings ORDER BY created_at DESC LIMIT 1');
-        targetBookingId = latest.rows[0]?.id || bookingId;
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
       }
 
-      // If items array is empty, default to standard labor tasks
-      let resolvedItems = items;
-      if (!resolvedItems || resolvedItems.length === 0) {
-        resolvedItems = [
-          { name: 'Doorstep Diagnostics & Inspection Labor', type: 'Labor', price: 150, qty: 1 },
-          { name: 'Service Repair & Fitting Work Charge', type: 'Labor', price: 250, qty: 1 }
-        ];
+      if (!items || items.length === 0) {
+        return reply.status(400).send({ success: false, error: 'Quote must include at least one item' });
       }
+
+      let resolvedItems = items;
 
       // Delete previous items for this booking to allow clean edits
       await query('DELETE FROM quote_items WHERE booking_id = $1', [targetBookingId]);
@@ -1006,7 +1019,7 @@ async function partnerRoutes(fastify, options) {
 
         return {
           id: row.id,
-          customerName: row.customer_name || 'Vimal Raj',
+          customerName: row.customer_name || 'Customer',
           locality: row.locality || 'Fairlands, Salem',
           serviceName: row.service_name || 'Home Services & Diagnostic',
           serviceNameTa: row.service_name_ta || 'வீட்டு சேவை',
@@ -1014,7 +1027,7 @@ async function partnerRoutes(fastify, options) {
           techPayout: parseFloat(techShare.toFixed(2)),
           platformCommission: parseFloat(platformCut.toFixed(2)),
           settlementStatus: row.status === 'completed' ? 'SETTLED_TO_BANK' : (row.status === 'cancelled' ? 'TRAVEL_FEE_DISBURSED' : 'ESCROW_HELD'),
-          settlementUpi: 'partner.pay@okaxis',
+          settlementUpi: row.tech_upi_vpa || 'Direct Bank Settlement',
           bankRef: `TXN-${row.id.replace('SLM-', '')}-NEON`,
           rating: row.customer_rating ? parseFloat(row.customer_rating) : 5.0,
           customerReview: row.customer_review,
@@ -1056,7 +1069,7 @@ async function partnerRoutes(fastify, options) {
         name: t.full_name,
         phone: t.phone,
         rawPhone: (t.phone || '').replace(/[\s\-]/g, ''),
-        email: `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@Shazu One.in`,
+        email: t.email || `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@shazuone.in`,
         trade: t.primary_trade,
         tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
         experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
@@ -1102,7 +1115,7 @@ async function partnerRoutes(fastify, options) {
         name: u.full_name,
         phone: u.phone,
         rawPhone: (u.phone || '').replace(/[\s\-]/g, ''),
-        email: u.email || `${u.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@Shazu One.in`,
+        email: u.email || `${u.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@shazuone.in`,
         locality: u.locality || 'Fairlands, Salem',
         address: u.default_address || `${u.locality || 'Fairlands'}, Salem`,
         walletBalance: parseFloat(u.wallet_balance || 0),
@@ -1155,7 +1168,7 @@ async function partnerRoutes(fastify, options) {
         const jobObj = {
           id: b.id,
           customerName: b.customer_name || 'Customer',
-          customerPhone: b.customer_phone || '+919842711234',
+          customerPhone: b.customer_phone || '',
           serviceAddress: b.service_address || 'Salem',
           locality: b.locality || 'Fairlands',
           serviceId: b.service_id || 'ac',

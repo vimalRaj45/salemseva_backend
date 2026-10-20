@@ -334,7 +334,7 @@ async function authRoutes(fastify, options) {
           role: 'technician',
           name: name || 'Salem Technician Partner',
           phone: formattedPhone,
-          email: email || `${(name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
+          email: email || `${(name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
           trade: trade || 'ac',
           tradeName: tradeNames[trade] || 'Home Services Specialist',
           isKycVerified: false,
@@ -373,7 +373,7 @@ async function authRoutes(fastify, options) {
           role: 'customer',
           name: name || 'Salem Customer',
           phone: formattedPhone,
-          email: email || `${(name || 'customer').toLowerCase().replace(/[^a-z]/g, '')}@Shazu One.in`,
+          email: email || `${(name || 'customer').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
           locality: locality || 'Fairlands, Salem',
           address: address || `${locality}, Salem - 636016`,
           walletBalance: 100, // ₹100 Welcome reward

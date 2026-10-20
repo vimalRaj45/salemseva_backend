@@ -128,7 +128,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 4. VoIP Signaling: Initiate Call
   fastify.post('/webrtc/call/initiate', async (req, reply) => {
-    const { bookingId = 'SLM-84920', caller = 'customer', callerName = 'Customer', calleeName = 'Technician' } = req.body || {};
+    const { bookingId, caller = 'customer', callerName = 'Customer', calleeName = 'Technician' } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required to initiate call' });
+    }
     const call = getOrCreateCall(bookingId);
     
     call.active = true;
@@ -149,7 +152,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 5. VoIP Signaling: Check Status (Polling)
   fastify.get('/webrtc/call/status', async (req, reply) => {
-    const { bookingId = 'SLM-84920' } = req.query || {};
+    const { bookingId } = req.query || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     return {
       success: true,
@@ -159,7 +165,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 6. VoIP Signaling: Accept Call
   fastify.post('/webrtc/call/accept', async (req, reply) => {
-    const { bookingId = 'SLM-84920' } = req.body || {};
+    const { bookingId } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     call.status = 'CONNECTED';
     call.connectedAt = Date.now();
@@ -171,7 +180,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 7. VoIP Signaling: End / Reject Call
   fastify.post('/webrtc/call/end', async (req, reply) => {
-    const { bookingId = 'SLM-84920' } = req.body || {};
+    const { bookingId } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     call.status = 'ENDED';
     call.active = false;
@@ -186,7 +198,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 8. SDP Offer: Caller sends SDP Offer
   fastify.post('/webrtc/call/offer', async (req, reply) => {
-    const { bookingId = 'SLM-84920', sdp } = req.body || {};
+    const { bookingId, sdp } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     call.offer = sdp;
     return { success: true };
@@ -194,14 +209,20 @@ async function webrtcRoutes(fastify, options) {
 
   // 9. SDP Offer: Callee retrieves SDP Offer
   fastify.get('/webrtc/call/offer', async (req, reply) => {
-    const { bookingId = 'SLM-84920' } = req.query || {};
+    const { bookingId } = req.query || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     return { success: true, offer: call.offer };
   });
 
   // 10. SDP Answer: Callee sends SDP Answer
   fastify.post('/webrtc/call/answer', async (req, reply) => {
-    const { bookingId = 'SLM-84920', sdp } = req.body || {};
+    const { bookingId, sdp } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     call.answer = sdp;
     call.status = 'CONNECTED';
@@ -210,14 +231,20 @@ async function webrtcRoutes(fastify, options) {
 
   // 11. SDP Answer: Caller retrieves SDP Answer
   fastify.get('/webrtc/call/answer', async (req, reply) => {
-    const { bookingId = 'SLM-84920' } = req.query || {};
+    const { bookingId } = req.query || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     return { success: true, answer: call.answer };
   });
 
   // 12. ICE Candidate: Send ICE Candidate
   fastify.post('/webrtc/call/candidate', async (req, reply) => {
-    const { bookingId = 'SLM-84920', candidate, senderRole = 'caller' } = req.body || {};
+    const { bookingId, candidate, senderRole = 'caller' } = req.body || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     if (candidate) {
       call.candidates.push({ candidate, senderRole, timestamp: Date.now() });
@@ -227,7 +254,10 @@ async function webrtcRoutes(fastify, options) {
 
   // 13. ICE Candidates: Retrieve pending ICE Candidates
   fastify.get('/webrtc/call/candidates', async (req, reply) => {
-    const { bookingId = 'SLM-84920', targetRole = 'callee' } = req.query || {};
+    const { bookingId, targetRole = 'callee' } = req.query || {};
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+    }
     const call = getOrCreateCall(bookingId);
     // targetRole 'callee' gets candidates sent by 'caller'; targetRole 'caller' gets candidates sent by 'callee'
     const matching = (call.candidates || []).filter(c => c.senderRole !== targetRole);

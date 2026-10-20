@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 async function reviewsRoutes(fastify, options) {
   // 1. Submit Customer Review with Dynamic Below 3-Star Escalation
@@ -16,11 +16,13 @@ async function reviewsRoutes(fastify, options) {
     const stars = parseFloat(rating) || 5.0;
     const isBelow3Star = stars <= 3.0;
 
-    if (bookingId) {
-      const bCheck = await query('SELECT id FROM bookings WHERE id = $1', [bookingId]);
-      if (bCheck.rows.length === 0) {
-        return reply.status(404).send({ success: false, error: 'Booking not found' });
-      }
+    if (!bookingId) {
+      return reply.status(400).send({ success: false, error: 'Booking ID is required to submit a review' });
+    }
+
+    const bCheck = await query('SELECT id FROM bookings WHERE id = $1', [bookingId]);
+    if (bCheck.rows.length === 0) {
+      return reply.status(404).send({ success: false, error: 'Booking not found' });
     }
 
     const insertSql = `
@@ -32,7 +34,7 @@ async function reviewsRoutes(fastify, options) {
     `;
 
     const result = await query(insertSql, [
-      bookingId || 'SLM-84920',
+      bookingId,
       stars,
       userComment,
       tags,

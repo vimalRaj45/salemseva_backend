@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -238,6 +238,16 @@ async function bookingsRoutes(fastify, options) {
       const customerOtp = String(Math.floor(1000 + Math.random() * 9000));
       const finalVoiceNote = voiceNoteAudio || voice_note_url || null;
 
+      if (!customerName || !customerName.trim()) {
+        return reply.status(400).send({ success: false, error: 'Customer name is required' });
+      }
+      if (!rawCustomerPhone || !rawCustomerPhone.trim()) {
+        return reply.status(400).send({ success: false, error: 'Customer mobile number is required' });
+      }
+      if (!address || !address.trim()) {
+        return reply.status(400).send({ success: false, error: 'Service address is required' });
+      }
+
       const insertSql = `
         INSERT INTO bookings (
           id, service_id, selected_issue_id, custom_issue_description,
@@ -255,9 +265,9 @@ async function bookingsRoutes(fastify, options) {
         serviceId || 'ac',
         issueId || 'ac_cooling',
         issueDescription || 'Doorstep Service & Diagnostic Inspection',
-        customerName || 'Vimal Raj',
-        rawCustomerPhone || '+919842711234',
-        address || 'Plot 42, 5th Cross, Fairlands, Salem - 636016',
+        customerName.trim(),
+        rawCustomerPhone.trim(),
+        address.trim(),
         locality || 'Fairlands',
         parseFloat(lat) || 11.6738,
         parseFloat(lng) || 78.1460,
@@ -279,7 +289,7 @@ async function bookingsRoutes(fastify, options) {
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'BOOKING_CREATED', $2, 'customer', $3)
-      `, [bookingId, rawCustomerPhone || '+919842711234', JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
+      `, [bookingId, rawCustomerPhone.trim(), JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
 
       return {
         success: true,
@@ -882,31 +892,14 @@ async function bookingsRoutes(fastify, options) {
 
       booking = res.rows[0] || booking;
 
-      // When transitioning to quote_presented, ensure quote items and quote_subtotal exist from DB
+      // When transitioning to quote_presented, verify real quote items exist
       if (status === 'quote_presented') {
         const qiRes = await query('SELECT * FROM quote_items WHERE booking_id = $1', [targetId]);
         if (qiRes.rows.length === 0) {
-          const fallbackLaborItems = [
-            { name: 'Doorstep Diagnostics & Inspection Labor', price: 150 },
-            { name: 'Service Repair & Fitting Work Charge', price: 250 }
-          ];
-          let dynamicSubtotal = 0;
-          for (const itm of fallbackLaborItems) {
-            dynamicSubtotal += itm.price;
-            await query(`
-              INSERT INTO quote_items (booking_id, item_name, item_type, price, qty, is_oem_part)
-              VALUES ($1, $2, 'Labor', $3, 1, false)
-            `, [targetId, itm.name, itm.price]);
-          }
-          if (dynamicSubtotal > 0) {
-            const upSub = await query(`
-              UPDATE bookings 
-              SET quote_subtotal = $1, quote_presented_at = NOW() 
-              WHERE id = $2 
-              RETURNING *
-            `, [dynamicSubtotal, targetId]);
-            if (upSub.rows.length > 0) booking = upSub.rows[0];
-          }
+          return reply.status(400).send({ 
+            success: false, 
+            error: 'Cannot present quote: no quote line items found. Technician must add real items first.' 
+          });
         }
       }
 
@@ -1101,12 +1094,6 @@ async function bookingsRoutes(fastify, options) {
       // Fetch current booking
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
       let booking = bRes.rows[0];
-
-      if (!booking) {
-        // Fallback to latest booking if demo ID
-        const fallback = await query('SELECT * FROM bookings ORDER BY created_at DESC LIMIT 1');
-        booking = fallback.rows[0];
-      }
 
       if (!booking) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });

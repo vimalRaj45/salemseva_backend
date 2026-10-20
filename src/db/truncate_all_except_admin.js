@@ -1,4 +1,4 @@
-﻿const { query, pool } = require('./db');
+const { query, pool } = require('./db');
 
 async function truncateAllExceptAdmin() {
   console.log('--- Shazu One: Starting full database purge (keeping Admin + config only) ---');
@@ -71,7 +71,7 @@ async function truncateAllExceptAdmin() {
         '00000000-0000-0000-0000-000000000001',
         '+919842099999',
         'Shazu One Central Ops Admin',
-        'ops.admin@Shazu One.in',
+        'ops.admin@shazuone.in',
         'admin',
         'Shazu One Central Operations HQ, Fairlands, Salem - 636016',
         'Fairlands',

@@ -1,4 +1,4 @@
-﻿const crypto = require('crypto');
+const crypto = require('crypto');
 const { query } = require('../db/db');
 
 async function paymentsRoutes(fastify, options) {
@@ -8,8 +8,14 @@ async function paymentsRoutes(fastify, options) {
   // 1. Create Real Razorpay Order for Escrow Deposit
   fastify.post('/payments/create-order', async (req, reply) => {
     try {
-      const { bookingId, amount, currency = 'INR', isDiagnosticOnly = false } = req.body;
-      const orderAmountInPaise = Math.round((parseFloat(amount) || 99.00) * 100);
+      const { bookingId, amount, currency = 'INR', isDiagnosticOnly = false } = req.body || {};
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required to create payment order' });
+      }
+      if (!amount || parseFloat(amount) <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid payment amount is required' });
+      }
+      const orderAmountInPaise = Math.round(parseFloat(amount) * 100);
 
       try {
         // Call Razorpay Orders API
@@ -23,9 +29,9 @@ async function paymentsRoutes(fastify, options) {
           body: JSON.stringify({
             amount: orderAmountInPaise,
             currency: currency,
-            receipt: `rcpt_${bookingId || Date.now()}`,
+            receipt: `rcpt_${bookingId}`,
             notes: {
-              bookingId: bookingId || 'SLM-84920',
+              bookingId: bookingId,
               type: isDiagnosticOnly ? 'DIAGNOSTIC_ESCROW' : 'FINAL_SETTLEMENT',
               platform: 'Shazu One Escrow'
             }
@@ -222,7 +228,7 @@ async function paymentsRoutes(fastify, options) {
       let dbRecord = null;
       try {
         const dbRes = await query(insertSql, [
-          bookingId || 'SLM-84920',
+          bookingId,
           paymentTxId,
           parsedAmount
         ]);
@@ -358,14 +364,14 @@ async function paymentsRoutes(fastify, options) {
       const completedBooking = upRes.rows[0] || booking;
 
       // 2. Fetch assigned technician for UPI details
-      let techUpi = 'ramesh.tech@oksbi';
-      let techPhone = '+919443288901';
+      let techUpi = '';
+      let techPhone = '';
       let techId = completedBooking.technician_id;
       if (techId) {
         const tRes = await query('SELECT phone, upi_vpa FROM technicians WHERE id = $1', [techId]);
         if (tRes.rows.length > 0) {
-          techUpi = tRes.rows[0].upi_vpa || techUpi;
-          techPhone = tRes.rows[0].phone || techPhone;
+          techUpi = tRes.rows[0].upi_vpa || '';
+          techPhone = tRes.rows[0].phone || '';
         }
       }
 

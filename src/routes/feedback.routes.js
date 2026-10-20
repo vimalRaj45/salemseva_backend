@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 async function feedbackRoutes(fastify, options) {
   // Ensure platform_feedback table exists
@@ -52,9 +52,9 @@ async function feedbackRoutes(fastify, options) {
       `;
 
       const result = await query(insertSql, [
-        userId || (role === 'technician' ? 'tech-ramesh' : 'usr-cust-001'),
-        userName || (role === 'technician' ? 'K. Ramesh (Partner)' : 'Vimal Raj'),
-        userPhone || '+91 98427 11234',
+        userId || null,
+        userName || (role === 'technician' ? 'Verified Partner' : 'Customer'),
+        userPhone || null,
         role,
         feedbackType,
         parseInt(rating, 10) || 5,
