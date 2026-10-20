@@ -1,7 +1,7 @@
 {
-  "name": "salemseva-backend",
+  "name": "shazu-one-backend",
   "version": "1.0.0",
-  "description": "SalemSeva Fastify Backend API with Neon PostgreSQL, Razorpay Route & Google Translate",
+  "description": "Shazu One Fastify Backend API with Neon PostgreSQL, Razorpay Route & Google Translate",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
