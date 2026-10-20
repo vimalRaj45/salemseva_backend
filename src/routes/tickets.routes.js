@@ -1,26 +1,25 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 
 async function ticketsRoutes(fastify, options) {
   // 1. Create a support ticket (authenticated or auth help guest)
   fastify.post('/tickets/create', async (req, reply) => {
     try {
       const body = req.body || {};
-      const {
-        creatorId = null,
-        creatorRole = 'customer',
-        creatorName = 'Citizen User',
-        creatorPhone,
-        bookingId = null,
-        category = 'general',
-        priority = 'normal',
-        subject,
-        description,
-        voiceNoteUrl = null,
-        attachmentUrl = null,
-        locality = 'Salem'
-      } = body;
+      const creatorId = body.creatorId || body.creator_id || null;
+      const creatorRole = body.creatorRole || body.creator_role || 'customer';
+      const creatorName = body.creatorName || body.creator_name || 'Citizen User';
+      const rawPhone = body.creatorPhone || body.creator_phone || body.phone || '';
+      const creatorPhone = String(rawPhone).trim();
+      const bookingId = body.bookingId || body.booking_id || null;
+      const category = body.category || 'general';
+      const priority = body.priority || 'normal';
+      const subject = body.subject;
+      const description = body.description;
+      const voiceNoteUrl = body.voiceNoteUrl || body.voice_note_url || null;
+      const attachmentUrl = body.attachmentUrl || body.attachment_url || null;
+      const locality = body.locality || 'Salem';
 
-      if (!creatorPhone || !String(creatorPhone).trim()) {
+      if (!creatorPhone) {
         return reply.status(400).send({ success: false, error: 'Mobile phone number is required to file a support ticket' });
       }
 
@@ -34,7 +33,7 @@ async function ticketsRoutes(fastify, options) {
 
       const ticketId = `TICK-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const randomDigits = Math.floor(1000 + Math.random() * 9000);
-      const ticketNumber = `#SS-${randomDigits}`;
+      const ticketNumber = `#SO-${randomDigits}`;
 
       const insertSql = `
         INSERT INTO support_tickets (
@@ -79,7 +78,7 @@ async function ticketsRoutes(fastify, options) {
 
       return {
         success: true,
-        message: `Support ticket ${ticketNumber} registered successfully with Salem Central Desk`,
+        message: `Support ticket ${ticketNumber} registered successfully with Shazu One Central Desk`,
         ticketNumber,
         ticket: createdTicket
       };
