@@ -16,6 +16,7 @@ async function adminRoutes(fastify, options) {
             t.rating_avg, t.rating_count, t.jobs_completed_count, t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
             t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
+            t.assigned_localities, t.created_at,
             t.is_blocked, t.block_reason, t.blocked_at,
             (
               SELECT count(*) 
@@ -24,7 +25,7 @@ async function adminRoutes(fastify, options) {
                 AND b.status IN ('accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented')
             ) as active_job_count
           FROM technicians t 
-          ORDER BY t.is_online DESC, t.rating_avg DESC
+          ORDER BY (CASE WHEN t.is_kyc_verified = FALSE THEN 0 ELSE 1 END), t.created_at DESC NULLS LAST, t.is_online DESC, t.rating_avg DESC
         `)
       ]);
 
@@ -88,7 +89,7 @@ async function adminRoutes(fastify, options) {
         sql += ` AND t.is_kyc_verified = FALSE`;
       }
 
-      sql += ` ORDER BY t.is_online DESC, t.rating_avg DESC`;
+      sql += ` ORDER BY (CASE WHEN t.is_kyc_verified = FALSE THEN 0 ELSE 1 END), t.created_at DESC NULLS LAST, t.is_online DESC, t.rating_avg DESC`;
 
       const result = await query(sql, params);
       return { success: true, count: result.rows.length, technicians: result.rows };
