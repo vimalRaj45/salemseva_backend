@@ -902,6 +902,9 @@ async function bookingsRoutes(fastify, options) {
           validTechId = tRes.rows[0]?.id || null;
         }
       }
+      if (!validTechId && booking?.technician_id) {
+        validTechId = booking.technician_id;
+      }
       if (!validTechId) {
         const tradeTech = await query(`
           SELECT id FROM technicians 
@@ -933,7 +936,8 @@ async function bookingsRoutes(fastify, options) {
         UPDATE bookings 
         SET status = $1,
             technician_id = COALESCE($3::uuid, technician_id),
-            parts_mode = COALESCE($4, parts_mode)
+            parts_mode = COALESCE($4, parts_mode),
+            matched_at = CASE WHEN $1 = 'accepted' AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END
         WHERE id = $2 
         RETURNING *
       `, [status, targetId, validTechId, partsMode || null]);

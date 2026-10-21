@@ -13,6 +13,7 @@ async function partnerRoutes(fastify, options) {
       }
 
       const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
+      let cleanPhone = phoneParam ? phoneParam.replace(/[\s\-\(\)]/g, '') : '';
 
       const techRes = await query(`
         SELECT * FROM technicians 
@@ -29,7 +30,11 @@ async function partnerRoutes(fastify, options) {
         return reply.status(404).send({ success: false, error: 'Technician partner not found in database. Please register or sign in.' });
       }
 
-      // Get latest active job for this partner from DB (prioritize incoming 'matching' requests)
+      if (!cleanPhone && tech.phone) {
+        cleanPhone = tech.phone.replace(/[\s\-\(\)]/g, '');
+      }
+
+      // Get latest active job for this partner from DB (prioritize technician's own assigned jobs over unassigned broadcast requests)
       // Filter strictly by the technician's chosen operational areas (assigned_localities)
       // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
       const jobRes = await query(`
@@ -72,9 +77,9 @@ async function partnerRoutes(fastify, options) {
         )
         ORDER BY 
           CASE 
-            WHEN status = 'matching' THEN 1 
-            WHEN status = 'accepted' THEN 2
-            WHEN status = 'en_route' THEN 3
+            WHEN technician_id = $1 AND status IN ('en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress') THEN 1 
+            WHEN technician_id = $1 AND status = 'accepted' THEN 2
+            WHEN status = 'matching' THEN 3 
             ELSE 4 
           END,
           created_at DESC 
@@ -241,6 +246,7 @@ async function partnerRoutes(fastify, options) {
           voiceNoteUrl: activeJob.voice_note_url || null,
           bookingType: activeJob.booking_type || 'instant',
           scheduledSlot: activeJob.scheduled_slot || null,
+          customerOtp: activeJob.customer_otp || null,
           createdAt: activeJob.created_at
         } : null
       };
