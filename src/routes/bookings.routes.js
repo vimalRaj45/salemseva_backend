@@ -224,14 +224,28 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      // Check for available active specialists in Salem for this trade
+      // Check for available active specialists in Salem for this trade and locality
       const onlineTechRes = await query(`
         SELECT id, full_name, phone FROM technicians 
         WHERE (primary_trade = $1 OR $1 IS NULL) 
           AND is_online = TRUE 
           AND is_blocked = FALSE 
+          AND (
+            assigned_localities IS NULL OR cardinality(assigned_localities) = 0 OR
+            EXISTS (
+              SELECT 1 FROM unnest(assigned_localities) loc
+              WHERE (
+                loc <> '' AND (
+                  LOWER(TRIM($2)) = LOWER(TRIM(loc))
+                  OR LOWER(TRIM($2)) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                  OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM($2)) || '%'
+                  OR ($3::text IS NOT NULL AND LOWER($3) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                )
+              )
+            )
+          )
         LIMIT 1
-      `, [serviceId || null]);
+      `, [serviceId || null, locality || '', address || '']);
       const onlineTech = assignedTechId ? { id: assignedTechId } : (onlineTechRes.rows[0] || null);
 
       const isEmergency = Boolean(isUrgentDispatch || (scheduledSlot && String(scheduledSlot).toLowerCase().includes('emergency')));
@@ -372,10 +386,27 @@ async function bookingsRoutes(fastify, options) {
 
       // Only for non-scheduled instant matching bookings, query online technician if not assigned
       if (!technician && !isScheduledBooking && booking.status !== 'cancelled' && booking.status !== 'completed') {
-        const anyOnlineTech = await query(
-          'SELECT * FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 LIMIT 1',
-          [booking.service_id || 'ac']
-        );
+        const anyOnlineTech = await query(`
+          SELECT * FROM technicians 
+          WHERE is_online = TRUE 
+            AND COALESCE(is_blocked, FALSE) = FALSE 
+            AND primary_trade = $1 
+            AND (
+              assigned_localities IS NULL OR cardinality(assigned_localities) = 0 OR
+              EXISTS (
+                SELECT 1 FROM unnest(assigned_localities) loc
+                WHERE (
+                  loc <> '' AND (
+                    LOWER(TRIM($2)) = LOWER(TRIM(loc))
+                    OR LOWER(TRIM($2)) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                    OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM($2)) || '%'
+                    OR ($3::text IS NOT NULL AND LOWER($3) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                  )
+                )
+              )
+            )
+          LIMIT 1
+        `, [booking.service_id || 'ac', booking.locality || '', booking.service_address || '']);
         if (anyOnlineTech.rows.length > 0) {
           const t = anyOnlineTech.rows[0];
           const techLat = parseFloat(t.current_lat) || 11.6780;
@@ -872,10 +903,27 @@ async function bookingsRoutes(fastify, options) {
         }
       }
       if (!validTechId) {
-        const tradeTech = await query(
-          'SELECT id FROM technicians WHERE is_online = TRUE AND COALESCE(is_blocked, FALSE) = FALSE AND primary_trade = $1 LIMIT 1',
-          [targetServiceId]
-        );
+        const tradeTech = await query(`
+          SELECT id FROM technicians 
+          WHERE is_online = TRUE 
+            AND COALESCE(is_blocked, FALSE) = FALSE 
+            AND primary_trade = $1 
+            AND (
+              assigned_localities IS NULL OR cardinality(assigned_localities) = 0 OR
+              EXISTS (
+                SELECT 1 FROM unnest(assigned_localities) loc
+                WHERE (
+                  loc <> '' AND (
+                    LOWER(TRIM($2)) = LOWER(TRIM(loc))
+                    OR LOWER(TRIM($2)) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                    OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM($2)) || '%'
+                    OR ($3::text IS NOT NULL AND LOWER($3) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                  )
+                )
+              )
+            )
+          LIMIT 1
+        `, [targetServiceId, booking?.locality || '', booking?.service_address || '']);
         validTechId = tradeTech.rows[0]?.id || null;
       }
 

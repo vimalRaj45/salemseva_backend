@@ -30,12 +30,30 @@ async function partnerRoutes(fastify, options) {
       }
 
       // Get latest active job for this partner from DB (prioritize incoming 'matching' requests)
+      // Filter strictly by the technician's chosen operational areas (assigned_localities)
       // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
       const jobRes = await query(`
         SELECT * FROM bookings 
         WHERE (
           technician_id = $1 
-          OR (technician_id IS NULL AND (service_id = $2 OR $2 IS NULL))
+          OR (
+            technician_id IS NULL 
+            AND (service_id = $2 OR $2 IS NULL)
+            AND (
+              $4::text[] IS NULL OR cardinality($4::text[]) = 0 OR
+              EXISTS (
+                SELECT 1 FROM unnest($4::text[]) loc
+                WHERE (
+                  loc <> '' AND (
+                    LOWER(TRIM(locality)) = LOWER(TRIM(loc))
+                    OR LOWER(locality) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                    OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM(locality)) || '%'
+                    OR (service_address IS NOT NULL AND LOWER(service_address) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                  )
+                )
+              )
+            )
+          )
         )
         AND status IN ('matching', 'accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress')
         AND id NOT IN (
@@ -61,7 +79,7 @@ async function partnerRoutes(fastify, options) {
           END,
           created_at DESC 
         LIMIT 1
-      `, [tech.id, tech.primary_trade, cleanPhone]);
+      `, [tech.id, tech.primary_trade, cleanPhone, tech.assigned_localities || null]);
 
       const activeJob = jobRes.rows[0] || null;
 
@@ -72,13 +90,30 @@ async function partnerRoutes(fastify, options) {
         LEFT JOIN audit_logs al ON b.id = al.booking_id AND al.event_type = 'BOOKING_CANCELLED'
         WHERE (
           b.technician_id = $1 
-          OR (b.technician_id IS NULL AND (b.service_id = $2 OR $2 IS NULL))
+          OR (
+            b.technician_id IS NULL 
+            AND (b.service_id = $2 OR $2 IS NULL)
+            AND (
+              $3::text[] IS NULL OR cardinality($3::text[]) = 0 OR
+              EXISTS (
+                SELECT 1 FROM unnest($3::text[]) loc
+                WHERE (
+                  loc <> '' AND (
+                    LOWER(TRIM(b.locality)) = LOWER(TRIM(loc))
+                    OR LOWER(b.locality) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                    OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM(b.locality)) || '%'
+                    OR (b.service_address IS NOT NULL AND LOWER(b.service_address) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                  )
+                )
+              )
+            )
+          )
         )
           AND b.status = 'cancelled'
           AND b.created_at >= NOW() - INTERVAL '12 hours'
         ORDER BY b.created_at DESC 
         LIMIT 1
-      `, [tech.id, tech.primary_trade]);
+      `, [tech.id, tech.primary_trade, tech.assigned_localities || null]);
 
       const cancelledJob = cancelledRes.rows[0] || null;
       let cancelNotice = null;
@@ -161,6 +196,8 @@ async function partnerRoutes(fastify, options) {
         success: true,
         technician: {
           ...tech,
+          assigned_localities: tech.assigned_localities || ['Fairlands'],
+          assignedLocalities: tech.assigned_localities || ['Fairlands'],
           is_kyc_verified: Boolean(tech.is_kyc_verified),
           isKycVerified: Boolean(tech.is_kyc_verified),
           status: tech.is_kyc_verified ? 'Verified' : 'Pending Verification',
@@ -221,22 +258,28 @@ async function partnerRoutes(fastify, options) {
 
       let techId = null;
       let cleanPhone = null;
+      let techAssignedLocalities = null;
       if (phoneParam) {
         cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
+        const cleanDigits = phoneParam.replace(/\D/g, '').slice(-10);
         const techRes = await query(`
-          SELECT id, primary_trade FROM technicians 
-          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 OR id::text = $1
+          SELECT id, primary_trade, assigned_localities FROM technicians 
+          WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 
+             OR id::text = $1
+             OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
           LIMIT 1
-        `, [cleanPhone]);
+        `, [cleanPhone, cleanDigits || '']);
         if (techRes.rows.length > 0) {
           techId = techRes.rows[0].id;
           if (!trade) {
             trade = techRes.rows[0].primary_trade;
           }
+          techAssignedLocalities = techRes.rows[0].assigned_localities || null;
         }
       }
 
       // Exclude customer bookings this technician rejected for the current day. Other requests remain unaffected!
+      // Strictly filter by technician's chosen assigned_localities (e.g. Fairlands, Junction)
       const scheduledRes = await query(`
         SELECT 
           id, service_id, selected_issue_id, custom_issue_description,
@@ -248,6 +291,20 @@ async function partnerRoutes(fastify, options) {
           AND (technician_id IS NULL)
           AND (status IN ('created', 'matching'))
           AND (booking_type = 'scheduled' OR scheduled_slot IS NOT NULL)
+          AND (
+            $4::text[] IS NULL OR cardinality($4::text[]) = 0 OR
+            EXISTS (
+              SELECT 1 FROM unnest($4::text[]) loc
+              WHERE (
+                loc <> '' AND (
+                  LOWER(TRIM(locality)) = LOWER(TRIM(loc))
+                  OR LOWER(locality) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                  OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM(locality)) || '%'
+                  OR (service_address IS NOT NULL AND LOWER(service_address) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                )
+              )
+            )
+          )
           AND (
             $2::text IS NULL OR id NOT IN (
               SELECT booking_id FROM technician_rejected_leads 
@@ -266,7 +323,7 @@ async function partnerRoutes(fastify, options) {
           )
         ORDER BY created_at DESC
         LIMIT 30;
-      `, [trade, techId ? String(techId) : null, cleanPhone]);
+      `, [trade, techId ? String(techId) : null, cleanPhone, techAssignedLocalities]);
 
       return {
         success: true,
@@ -329,6 +386,26 @@ async function partnerRoutes(fastify, options) {
           success: false,
           error: 'This scheduled slot was already claimed by another specialist in Salem.'
         });
+      }
+
+      // Check if technician's assigned localities include this booking's locality
+      if (tech.assigned_localities && Array.isArray(tech.assigned_localities) && tech.assigned_localities.length > 0) {
+        const leadLoc = (existing.locality || '').toLowerCase().trim();
+        const matchesLoc = tech.assigned_localities.some(loc => {
+          const l = (loc || '').toLowerCase().trim();
+          const parts = l.split(/[\/,]+/).map(p => p.trim()).filter(Boolean);
+          if (leadLoc && (leadLoc.includes(l) || l.includes(leadLoc))) return true;
+          for (const p of parts) {
+            if (leadLoc && (leadLoc.includes(p) || p.includes(leadLoc))) return true;
+          }
+          return false;
+        });
+        if (!matchesLoc) {
+          return reply.status(403).send({
+            success: false,
+            error: `This booking is in ${existing.locality || 'another zone'}, which is outside your chosen operational areas (${tech.assigned_localities.join(', ')}).`
+          });
+        }
       }
 
       // Update booking with technician_id and status = 'accepted'
@@ -603,6 +680,7 @@ async function partnerRoutes(fastify, options) {
         payoutPhone = '',
         yearsExperience = 0,
         serviceArea = 'Fairlands, Salem',
+        assignedLocalities,
         referralCode,
         aadhaarCardUrl
       } = req.body;
@@ -615,17 +693,28 @@ async function partnerRoutes(fastify, options) {
       const cleanPayoutDigits = payoutPhone ? String(payoutPhone).replace(/[^0-9]/g, '').slice(-10) : '';
       const resolvedUpi = upiId?.trim() || (cleanPayoutDigits ? `${cleanPayoutDigits}@ybl` : null);
 
+      let resolvedLocalities = [];
+      if (Array.isArray(assignedLocalities) && assignedLocalities.length > 0) {
+        resolvedLocalities = assignedLocalities;
+      } else if (serviceArea) {
+        resolvedLocalities = String(serviceArea).split(',').map(s => s.trim()).filter(Boolean);
+      }
+      if (resolvedLocalities.length === 0) {
+        resolvedLocalities = ['Fairlands'];
+      }
+
       const insertSql = `
         INSERT INTO technicians (
           full_name, phone, primary_trade, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
           rating_avg, rating_count, jobs_completed_count
-        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, ARRAY[$7], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, 0.00, 0, 0)
+        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, $7::text[], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, 0.00, 0, 0)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
           years_experience = COALESCE(EXCLUDED.years_experience, technicians.years_experience),
+          assigned_localities = COALESCE(EXCLUDED.assigned_localities, technicians.assigned_localities),
           aadhaar_number = COALESCE(EXCLUDED.aadhaar_number, technicians.aadhaar_number),
           upi_vpa = COALESCE(EXCLUDED.upi_vpa, technicians.upi_vpa),
           aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
@@ -641,7 +730,7 @@ async function partnerRoutes(fastify, options) {
         cleanAadhaar,
         resolvedUpi || null,
         parseInt(yearsExperience, 10) || 0,
-        serviceArea || 'Fairlands',
+        resolvedLocalities,
         aadhaarCardUrl || null,
         partnerPwdHash
       ]);
@@ -748,8 +837,16 @@ async function partnerRoutes(fastify, options) {
         payoutPhone = '',
         trade,
         aadhaarCardUrl,
-        serviceArea
+        serviceArea,
+        assignedLocalities
       } = req.body || {};
+
+      let resolvedLocs = null;
+      if (Array.isArray(assignedLocalities) && assignedLocalities.length > 0) {
+        resolvedLocs = assignedLocalities;
+      } else if (serviceArea) {
+        resolvedLocs = String(serviceArea).split(',').map(s => s.trim()).filter(Boolean);
+      }
 
       const cleanDigits = (phone || '').replace(/[^0-9]/g, '').slice(-10);
       if (!cleanDigits && !technicianId) {
@@ -767,7 +864,7 @@ async function partnerRoutes(fastify, options) {
           primary_trade = COALESCE($3, primary_trade),
           aadhaar_card_url = COALESCE($4, aadhaar_card_url),
           aadhaar_uploaded_at = CASE WHEN $4::text IS NOT NULL THEN NOW() ELSE aadhaar_uploaded_at END,
-          assigned_localities = CASE WHEN $5::text IS NOT NULL THEN ARRAY[$5::text] ELSE assigned_localities END
+          assigned_localities = COALESCE($5::text[], assigned_localities)
         WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $6
            OR id::text = $7
         RETURNING *;
@@ -776,7 +873,7 @@ async function partnerRoutes(fastify, options) {
         resolvedUpi2 || null,
         trade || null,
         aadhaarCardUrl || null,
-        serviceArea || null,
+        resolvedLocs || null,
         cleanDigits || 'NOMATCH',
         technicianId || 'NOMATCH'
       ]);
@@ -1147,8 +1244,35 @@ async function partnerRoutes(fastify, options) {
       `;
       const params = [];
       if (technicianId) {
-        sql += ` AND (b.technician_id = $1 OR b.technician_id IS NULL)`;
-        params.push(technicianId);
+        const tRes = await query('SELECT primary_trade, assigned_localities FROM technicians WHERE id::text = $1', [technicianId]);
+        const techInfo = tRes.rows[0];
+        if (techInfo) {
+          sql += ` AND (
+            b.technician_id = $1 
+            OR (
+              b.technician_id IS NULL 
+              AND (b.service_id = $2 OR $2 IS NULL)
+              AND (
+                $3::text[] IS NULL OR cardinality($3::text[]) = 0 OR
+                EXISTS (
+                  SELECT 1 FROM unnest($3::text[]) loc
+                  WHERE (
+                    loc <> '' AND (
+                      LOWER(TRIM(b.locality)) = LOWER(TRIM(loc))
+                      OR LOWER(b.locality) LIKE '%' || LOWER(TRIM(loc)) || '%'
+                      OR LOWER(TRIM(loc)) LIKE '%' || LOWER(TRIM(b.locality)) || '%'
+                      OR (b.service_address IS NOT NULL AND LOWER(b.service_address) LIKE '%' || LOWER(TRIM(loc)) || '%')
+                    )
+                  )
+                )
+              )
+            )
+          )`;
+          params.push(technicianId, techInfo.primary_trade, techInfo.assigned_localities || null);
+        } else {
+          sql += ` AND b.technician_id = $1`;
+          params.push(technicianId);
+        }
       }
       sql += ` ORDER BY b.created_at DESC`;
 
