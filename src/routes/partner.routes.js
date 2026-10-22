@@ -174,6 +174,8 @@ async function partnerRoutes(fastify, options) {
         voiceNoteUrl: directJob.voice_note_url || null,
         bookingType: directJob.booking_type || 'instant',
         scheduledSlot: directJob.scheduled_slot || null,
+        customerOtp: directJob.customer_otp || null,
+        customer_otp: directJob.customer_otp || null,
         createdAt: directJob.created_at,
         adminRequested: true
       } : null;
@@ -231,6 +233,8 @@ async function partnerRoutes(fastify, options) {
           rescheduleReason: b.reschedule_reason || null,
           proposedRescheduledBy: b.proposed_rescheduled_by || null,
           voiceNoteUrl: b.voice_note_url || null,
+          customerOtp: b.customer_otp || null,
+          customer_otp: b.customer_otp || null,
           createdAt: b.created_at
         })),
         activeJob: activeJob ? {
@@ -251,6 +255,7 @@ async function partnerRoutes(fastify, options) {
           bookingType: activeJob.booking_type || 'instant',
           scheduledSlot: activeJob.scheduled_slot || null,
           customerOtp: activeJob.customer_otp || null,
+          customer_otp: activeJob.customer_otp || null,
           createdAt: activeJob.created_at
         } : null
       };

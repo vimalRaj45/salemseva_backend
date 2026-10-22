@@ -341,6 +341,17 @@ async function runAllE2ETests() {
       `Rejected with: ${JSON.parse(invalidOtpRes.body).error?.slice(0, 35)}...`
     );
 
+    const staticOtpRes = await fastify.inject({
+      method: 'POST',
+      url: `/api/v1/bookings/${instantBooking.id}/verify-otp`,
+      payload: { otp: '4892', type: 'arrival' }
+    });
+    assertTest(
+      'Static Hardcoded PIN 4892 Correctly Rejected (Dynamic Only)',
+      staticOtpRes.statusCode === 400,
+      `Rejected with: ${JSON.parse(staticOtpRes.body).error?.slice(0, 35)}...`
+    );
+
     const validOtpRes = await fastify.inject({
       method: 'POST',
       url: `/api/v1/bookings/${instantBooking.id}/verify-otp`,

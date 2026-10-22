@@ -1048,11 +1048,16 @@ async function bookingsRoutes(fastify, options) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });
       }
 
-      const expectedOtp = String(booking.customer_otp || '4892').trim();
+      let expectedOtp = String(booking.customer_otp || '').trim();
+      if (!expectedOtp || expectedOtp.length !== 4) {
+        expectedOtp = String(Math.floor(1000 + Math.random() * 9000));
+        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [expectedOtp, booking.id]);
+        booking.customer_otp = expectedOtp;
+      }
       const enteredOtp = String(otp || '').trim();
 
-      // Validate matching OTP
-      const isValid = enteredOtp === expectedOtp || enteredOtp === '4892' || enteredOtp === '1234';
+      // Validate matching OTP strictly against dynamic database record
+      const isValid = enteredOtp.length === 4 && enteredOtp === expectedOtp;
 
       if (!isValid) {
         return reply.status(400).send({
