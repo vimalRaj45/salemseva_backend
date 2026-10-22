@@ -745,6 +745,19 @@ async function adminRoutes(fastify, options) {
         RETURNING *
       `, [fullReason, fullDetails, bookingId]);
 
+      // Release advance payment and mark refunded to customer wallet
+      try {
+        await query(`
+          UPDATE payments
+          SET status = 'refunded',
+              refund_amount = COALESCE(amount, amount_total, 49.00),
+              settled_at = NOW()
+          WHERE booking_id = $1 AND status != 'refunded'
+        `, [bookingId]);
+      } catch (refundErr) {
+        fastify.log.warn('Release technician customer refund note: ' + refundErr.message);
+      }
+
       // Record immutable audit log
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
@@ -853,6 +866,19 @@ async function adminRoutes(fastify, options) {
         WHERE id = $4
         RETURNING *
       `, [reason, fullDetails, adminId, bookingId]);
+
+      // Release advance payment and mark refunded to customer wallet
+      try {
+        await query(`
+          UPDATE payments
+          SET status = 'refunded',
+              refund_amount = COALESCE(amount, amount_total, 49.00),
+              settled_at = NOW()
+          WHERE booking_id = $1 AND status != 'refunded'
+        `, [bookingId]);
+      } catch (refundErr) {
+        fastify.log.warn('Admin cancel customer refund note: ' + refundErr.message);
+      }
 
       // 3. Audit log
       await query(`

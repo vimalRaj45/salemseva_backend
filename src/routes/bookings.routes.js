@@ -523,9 +523,23 @@ async function bookingsRoutes(fastify, options) {
         };
       }
 
+      const isCancelled = booking.status === 'cancelled';
+
       return {
         success: true,
-        booking,
+        booking: {
+          ...booking,
+          isCancelled,
+          cancellationReason: booking.cancellation_reason || (isCancelled ? 'Cancelled by Central Operations' : null),
+          cancellationDetails: booking.cancellation_details || (isCancelled ? 'Order closed by Shazu One Central Ops' : null),
+          cancelledBy: booking.cancelled_by || null,
+          cancelledAt: booking.cancelled_at || null
+        },
+        isCancelled,
+        cancellationReason: booking.cancellation_reason || (isCancelled ? 'Cancelled by Central Operations' : null),
+        cancellationDetails: booking.cancellation_details || (isCancelled ? 'Order closed by Shazu One Central Ops' : null),
+        cancelledBy: booking.cancelled_by || null,
+        cancelledAt: booking.cancelled_at || null,
         opsWorkflow,
         isScheduled: isScheduledBooking,
         isRideStarted,
