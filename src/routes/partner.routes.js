@@ -77,7 +77,7 @@ async function partnerRoutes(fastify, options) {
         )
         ORDER BY 
           CASE 
-            WHEN technician_id = $1 AND status IN ('en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress') THEN 1 
+            WHEN technician_id = $1 AND status IN ('en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress', 'preparing') THEN 1 
             WHEN technician_id = $1 AND status = 'accepted' THEN 2
             WHEN status = 'matching' THEN 3 
             ELSE 4 
@@ -226,6 +226,10 @@ async function partnerRoutes(fastify, options) {
           isUrgent: Boolean(b.is_urgent_dispatch),
           scheduledSlot: b.scheduled_slot || (b.booking_type === 'instant' ? 'Instant Today' : null),
           bookingType: b.booking_type || (b.scheduled_slot ? 'scheduled' : 'instant'),
+          rescheduleStatus: b.reschedule_status || 'none',
+          proposedRescheduledSlot: b.proposed_rescheduled_slot || null,
+          rescheduleReason: b.reschedule_reason || null,
+          proposedRescheduledBy: b.proposed_rescheduled_by || null,
           voiceNoteUrl: b.voice_note_url || null,
           createdAt: b.created_at
         })),

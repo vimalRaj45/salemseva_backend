@@ -4,6 +4,9 @@ async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
   try {
     await query(`
+      ALTER TYPE booking_status ADD VALUE IF NOT EXISTS 'preparing';
+      ALTER TABLE bookings ALTER COLUMN scheduled_slot TYPE TEXT;
+      ALTER TABLE bookings ALTER COLUMN reschedule_slot TYPE TEXT;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_count INTEGER DEFAULT 0;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS last_rescheduled_by TEXT;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS last_rescheduled_at TIMESTAMPTZ;
@@ -653,6 +656,33 @@ async function bookingsRoutes(fastify, options) {
           message: 'Revised appointment slot confirmed with your technician',
           booking: updateRes.rows[0]
         };
+      } else if (action === 'decline_keep_original' || (action === 'reject' && !requestHandover && !alternativeSlot)) {
+        // Customer declined early arrival / proposal and chose to keep original allotted slot
+        const updateRes = await query(
+          `UPDATE bookings
+           SET proposed_rescheduled_slot = NULL,
+               proposed_rescheduled_by = NULL,
+               reschedule_status = 'none',
+               last_rescheduled_by = 'customer_kept_original_slot',
+               last_rescheduled_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+           RETURNING *`,
+          [id]
+        );
+
+        try {
+          await query(
+            `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, b.scheduled_slot, b.scheduled_slot, 'customer_kept_original_slot', reason || 'Customer declined early arrival and kept original scheduled appointment slot']
+          );
+        } catch (_) {}
+
+        return {
+          success: true,
+          message: 'Original appointment slot retained as scheduled',
+          booking: updateRes.rows[0]
+        };
       } else {
         // Customer rejected technician proposal
         if (requestHandover) {
@@ -880,7 +910,11 @@ async function bookingsRoutes(fastify, options) {
       if (technicianId) {
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(technicianId);
         if (isUuid) {
-          validTechId = technicianId;
+          const tRes = await query(
+            'SELECT id FROM technicians WHERE id = $1 OR user_id = $1 LIMIT 1',
+            [technicianId]
+          );
+          validTechId = tRes.rows[0]?.id || technicianId;
         } else {
           const clean = String(technicianId).replace(/[^0-9]/g, '').slice(-10);
           if (clean) {
@@ -934,10 +968,10 @@ async function bookingsRoutes(fastify, options) {
 
       let res = await query(`
         UPDATE bookings 
-        SET status = $1,
+        SET status = $1::booking_status,
             technician_id = COALESCE($3::uuid, technician_id),
-            parts_mode = COALESCE($4, parts_mode),
-            matched_at = CASE WHEN $1 = 'accepted' AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END
+            parts_mode = COALESCE($4::parts_mode, parts_mode),
+            matched_at = CASE WHEN ($1::text = 'accepted' OR $1::text = 'en_route' OR $1::text = 'preparing') AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END
         WHERE id = $2 
         RETURNING *
       `, [status, targetId, validTechId, partsMode || null]);

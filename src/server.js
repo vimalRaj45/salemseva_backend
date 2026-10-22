@@ -1,4 +1,4 @@
-﻿const fastify = require('fastify')({ logger: true });
+const fastify = require('fastify')({ logger: true });
 const cors = require('@fastify/cors');
 require('dotenv').config();
 require('./db/db');
@@ -52,4 +52,8 @@ const start = async () => {
   }
 };
 
-start();
+if (require.main === module) {
+  start();
+}
+
+module.exports = fastify;
