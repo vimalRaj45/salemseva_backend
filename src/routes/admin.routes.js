@@ -9,7 +9,18 @@ async function adminRoutes(fastify, options) {
         query(`SELECT count(*) as count FROM technicians WHERE is_online = TRUE`),
         query(`SELECT COALESCE(SUM(amount_total), 0) as total_revenue, COALESCE(SUM(tech_payout_amount), 0) as total_payouts, COALESCE(SUM(platform_commission), 0) as total_commission FROM payments`),
         query(`SELECT count(*) as count FROM reviews WHERE is_below_3_star = TRUE`),
-        query(`SELECT * FROM bookings ORDER BY created_at DESC LIMIT 30`),
+        query(`
+          SELECT 
+            b.*,
+            t.full_name as technician_name,
+            t.phone as technician_phone,
+            t.rating_avg as technician_rating,
+            t.primary_trade as technician_trade
+          FROM bookings b
+          LEFT JOIN technicians t ON b.technician_id = t.id
+          ORDER BY b.created_at DESC
+          LIMIT 250
+        `),
         query(`
           SELECT 
             t.id, t.full_name, t.phone, t.primary_trade, t.years_experience,
