@@ -15,6 +15,8 @@ class WhatsAppGatewayService {
     this.connectionStatus = 'disconnected'; // 'disconnected' | 'connecting' | 'qr_ready' | 'connected'
     this.qrRaw = null;
     this.qrDataUrl = null;
+    this.connectedPhone = null;
+    this.connectedName = null;
     this.authFolder = path.join(__dirname, '..', '..', 'baileys_auth_info');
     this.isInitializing = false;
     this.reconnectTimer = null;
@@ -42,7 +44,7 @@ class WhatsAppGatewayService {
         auth: state,
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
-        browser: ['Shazu One Gateway', 'Chrome', '1.0.0'],
+        browser: ['Shazu One Admin Hub', 'Chrome', '1.0.0'],
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
         syncFullHistory: false
@@ -61,8 +63,8 @@ class WhatsAppGatewayService {
           this.qrRaw = qr;
           this.connectionStatus = 'qr_ready';
           try {
-            this.qrDataUrl = await QRCode.toDataURL(qr);
-            console.log('[WhatsApp Gateway] New QR code generated for pairing.');
+            this.qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 7 });
+            console.log('[WhatsApp Gateway] New pairing QR generated for admin.');
           } catch (qrErr) {
             console.warn('[WhatsApp Gateway] Failed to generate QR data URL:', qrErr.message);
           }
@@ -72,12 +74,16 @@ class WhatsAppGatewayService {
           this.connectionStatus = 'connected';
           this.qrRaw = null;
           this.qrDataUrl = null;
-          console.log('[WhatsApp Gateway] Connection established successfully.');
+          this.connectedPhone = sock.user?.id ? sock.user.id.split(':')[0] : 'Linked Number';
+          this.connectedName = sock.user?.name || 'Shazu One Business';
+          console.log(`[WhatsApp Gateway] Connected to WhatsApp Business account: ${this.connectedPhone}`);
         } else if (connection === 'close') {
           const statusCode = lastDisconnect?.error?.output?.statusCode;
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           this.connectionStatus = 'disconnected';
-          console.log(`[WhatsApp Gateway] Connection closed. Reason code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+          this.connectedPhone = null;
+          this.connectedName = null;
+          console.log(`[WhatsApp Gateway] Connection closed (code: ${statusCode}). Reconnect: ${shouldReconnect}`);
 
           if (shouldReconnect) {
             if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -86,7 +92,7 @@ class WhatsAppGatewayService {
               this.initialize();
             }, 6000);
           } else {
-            console.log('[WhatsApp Gateway] Session logged out. Manual re-pairing needed.');
+            console.log('[WhatsApp Gateway] Device logged out. Admin scan or pairing code needed.');
           }
         }
       });
@@ -107,7 +113,7 @@ class WhatsAppGatewayService {
 
       // 2. Ignore all incoming messages to prevent spam loops
       sock.ev.on('messages.upsert', async () => {
-        // Explicitly ignore incoming messages
+        // Intentionally ignore incoming messages
         return;
       });
 
@@ -123,9 +129,65 @@ class WhatsAppGatewayService {
     return {
       status: this.connectionStatus,
       isConnected: this.connectionStatus === 'connected',
+      connectedPhone: this.connectedPhone,
+      connectedName: this.connectedName,
       qrCodeDataUrl: this.qrDataUrl,
       qrRaw: this.qrRaw
     };
+  }
+
+  async requestPairingCode(rawPhone) {
+    if (!this.sock) {
+      await this.initialize();
+    }
+    const cleanDigits = (rawPhone || '').replace(/\D/g, '');
+    const cleanPhone = cleanDigits.length === 10 ? `91${cleanDigits}` : cleanDigits;
+
+    if (!cleanPhone || cleanPhone.length < 10) {
+      throw new Error('Valid phone number with country code is required (e.g. 919842099999)');
+    }
+
+    if (this.sock?.authState?.creds?.registered) {
+      throw new Error('A WhatsApp number is already paired. Please disconnect first before linking a new number.');
+    }
+
+    const code = await this.sock.requestPairingCode(cleanPhone);
+    return {
+      success: true,
+      phone: cleanPhone,
+      pairingCode: code
+    };
+  }
+
+  async logoutAndReset() {
+    try {
+      if (this.sock) {
+        await this.sock.logout().catch(() => {});
+        this.sock.end(undefined);
+      }
+    } catch (e) {}
+
+    try {
+      if (fs.existsSync(this.authFolder)) {
+        fs.rmSync(this.authFolder, { recursive: true, force: true });
+      }
+    } catch (err) {
+      console.warn('[WhatsApp Gateway] Auth folder cleanup note:', err.message);
+    }
+
+    this.connectionStatus = 'disconnected';
+    this.sock = null;
+    this.qrRaw = null;
+    this.qrDataUrl = null;
+    this.connectedPhone = null;
+    this.connectedName = null;
+
+    setTimeout(() => {
+      this.isInitializing = false;
+      this.initialize();
+    }, 1500);
+
+    return { success: true, message: 'WhatsApp session reset. Generating fresh QR code...' };
   }
 
   async sendOtpMessage(rawPhone, otpCode, purpose = 'verification') {
@@ -164,7 +226,7 @@ class WhatsAppGatewayService {
       }
     }
 
-    // Fallback/Simulated mode when WhatsApp client is waiting for pairing
+    // Fallback / Pending QR scan notification
     console.log(`[WhatsApp Gateway Notice] WhatsApp not connected (${this.connectionStatus}). Simulated OTP for ${intlPhone}: ${otpCode}`);
     return {
       success: true,

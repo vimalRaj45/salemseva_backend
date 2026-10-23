@@ -575,6 +575,56 @@ async function authRoutes(fastify, options) {
     }
   });
 
+  // 5b. Request 8-character Pairing Code (for linking without camera / phone-based)
+  fastify.post('/auth/whatsapp/pairing-code', async (req, reply) => {
+    try {
+      const { phone = '' } = req.body || {};
+      const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
+      if (!cleanPhone || cleanPhone.length < 10) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Please enter a valid business phone number with country code'
+        });
+      }
+      const result = await whatsAppGateway.requestPairingCode(cleanPhone);
+      return result;
+    } catch (e) {
+      return reply.status(400).send({ success: false, error: e.message });
+    }
+  });
+
+  // 5c. Disconnect / Reset WhatsApp Gateway Session
+  fastify.post('/auth/whatsapp/disconnect', async (req, reply) => {
+    try {
+      const result = await whatsAppGateway.logoutAndReset();
+      return result;
+    } catch (e) {
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // 5d. Send Test WhatsApp OTP to verify delivery
+  fastify.post('/auth/whatsapp/test-send', async (req, reply) => {
+    try {
+      const { phone = '' } = req.body || {};
+      const cleanPhone = (phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (!cleanPhone || cleanPhone.length !== 10) {
+        return reply.status(400).send({ success: false, error: 'Valid 10-digit mobile number required' });
+      }
+      const testOtp = Math.floor(100000 + crypto.randomInt(900000)).toString();
+      const sendResult = await whatsAppGateway.sendOtpMessage(cleanPhone, testOtp, 'verification');
+      return {
+        success: true,
+        message: `Test OTP sent to +91 ${cleanPhone}`,
+        delivered: sendResult.delivered,
+        simulated: sendResult.simulated,
+        otpCode: testOtp
+      };
+    } catch (e) {
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
   // 6. Request 6-digit WhatsApp OTP (with 60-second cooldown & 5-minute expiry)
   fastify.post('/auth/otp/request', async (req, reply) => {
     try {
