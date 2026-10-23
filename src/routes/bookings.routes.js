@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const pushService = require('../services/pushNotification.service');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -1009,6 +1010,44 @@ async function bookingsRoutes(fastify, options) {
           INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
           VALUES ($1, $2, 'system_engine', 'system', $3)
         `, [booking.id, `STATUS_${status.toUpperCase()}`, JSON.stringify({ newStatus: status, timestamp: new Date().toISOString() })]);
+
+        // Deliver background push notifications to customer for key status transitions
+        let pushTitle = null;
+        let pushBody = null;
+
+        if (status === 'accepted') {
+          pushTitle = 'Specialist Assigned';
+          pushBody = 'A service specialist has accepted your booking and is preparing.';
+        } else if (status === 'en_route') {
+          pushTitle = 'Order is on its way!';
+          pushBody = 'Our delivery partner has picked up your order and is heading your way.';
+        } else if (status === 'arrived') {
+          pushTitle = 'Partner Arrived at Doorstep!';
+          pushBody = 'Your service specialist has arrived for doorstep inspection.';
+        } else if (status === 'quote_presented') {
+          pushTitle = 'Digital Estimate Ready';
+          pushBody = 'The technician has uploaded the digital diagnostic estimate for your review.';
+        } else if (status === 'completed') {
+          pushTitle = 'Service Completed Successfully';
+          pushBody = 'Your service job has been finished. Thank you for choosing Shazu One.';
+        }
+
+        if (pushTitle) {
+          pushService.sendPushToBookingParty({
+            bookingId: booking.id,
+            targetRole: 'customer',
+            payload: {
+              title: pushTitle,
+              body: pushBody,
+              tag: `order-${booking.id}-${status}`,
+              type: 'order_status',
+              status,
+              bookingId: booking.id,
+              url: `/track?bookingId=${booking.id}`
+            },
+            options: { urgency: 'high', TTL: 3600 }
+          }).catch(e => console.warn('Order status push notice:', e.message));
+        }
       }
 
       return {

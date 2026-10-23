@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const pushService = require('../services/pushNotification.service');
 
 // In-memory real-time WebRTC Signaling Store for Active Calls
 const callSignals = {};
@@ -116,9 +117,35 @@ async function webrtcRoutes(fastify, options) {
           EXTRACT(EPOCH FROM created_at) * 1000 as timestamp
       `, [id, sender, text]);
 
+      const savedMsg = res.rows[0];
+
+      // Dispatch background push notification to recipient party if app is closed/cleared
+      const targetRole = sender === 'customer' ? 'technician' : 'customer';
+      const targetUrl = targetRole === 'customer'
+        ? `/track?bookingId=${id}&openChat=true`
+        : `/partner?bookingId=${id}&openChat=true`;
+
+      pushService.sendPushToBookingParty({
+        bookingId: id,
+        targetRole,
+        payload: {
+          title: savedMsg.senderName || (sender === 'customer' ? 'Customer' : 'Salem Specialist'),
+          body: text || 'New message received',
+          tag: `msg-${id}`,
+          type: 'chat',
+          role: targetRole,
+          bookingId: id,
+          url: targetUrl
+        },
+        options: {
+          urgency: 'high',
+          TTL: 1800
+        }
+      }).catch(err => console.warn('Chat message push notice:', err.message));
+
       return {
         success: true,
-        message: res.rows[0]
+        message: savedMsg
       };
     } catch (e) {
       fastify.log.error(e);
@@ -143,6 +170,30 @@ async function webrtcRoutes(fastify, options) {
     call.offer = null;
     call.answer = null;
     call.candidates = [];
+
+    // Asynchronously dispatch high-priority wake-up push notification to callee (works even when app is closed)
+    const targetRole = caller === 'customer' ? 'technician' : 'customer';
+    const targetUrl = targetRole === 'customer'
+      ? `/track?bookingId=${bookingId}&autoAnswer=true`
+      : `/partner?bookingId=${bookingId}&autoAnswer=true`;
+
+    pushService.sendPushToBookingParty({
+      bookingId,
+      targetRole,
+      payload: {
+        title: `Incoming Call: ${callerName || 'Salem Specialist'}`,
+        body: `Doorstep service call for Booking #${bookingId}. Tap to answer.`,
+        tag: `call-${bookingId}`,
+        type: 'call',
+        role: targetRole,
+        bookingId,
+        url: targetUrl
+      },
+      options: {
+        urgency: 'high',
+        TTL: 45
+      }
+    }).catch(err => console.warn('Background push call wake-up notice:', err.message));
 
     return {
       success: true,
