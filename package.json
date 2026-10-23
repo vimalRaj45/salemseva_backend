@@ -8,7 +8,8 @@
     "dev": "nodemon src/server.js",
     "test": "node --test tests/e2e_full_suite.test.js",
     "seed": "node src/db/seed.js",
-    "truncate": "node src/db/truncate.js"
+    "truncate": "node src/db/truncate.js",
+    "migrate:10": "node src/db/migrate_schema_to_10_out_of_10.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1149.0",
