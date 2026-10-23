@@ -309,6 +309,31 @@ async function bookingsRoutes(fastify, options) {
         VALUES ($1, 'BOOKING_CREATED', $2, 'customer', $3)
       `, [bookingId, rawCustomerPhone.trim(), JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
 
+      // Dispatch high-priority background push to assigned technician (wakes up phone if app is closed)
+      if (assignedTechId) {
+        try {
+          const tRes = await query('SELECT phone, full_name FROM technicians WHERE id = $1', [assignedTechId]);
+          if (tRes.rows.length > 0) {
+            pushService.sendPushToPhone({
+              phone: tRes.rows[0].phone,
+              role: 'technician',
+              payload: {
+                title: `New Service Assigned: ${serviceId ? serviceId.toUpperCase() : 'Home Service'}`,
+                body: `New booking #${bookingId} in ${locality || 'Salem'}. Inspection fee: ₹${visitFee}. Tap to review.`,
+                tag: `job-${bookingId}`,
+                type: 'new_job',
+                bookingId: bookingId,
+                role: 'technician',
+                url: '/partner'
+              },
+              options: { urgency: 'high', TTL: 1800 }
+            }).catch(e => console.warn('New booking tech push note:', e.message));
+          }
+        } catch (pushErr) {
+          console.warn('Booking tech push err:', pushErr);
+        }
+      }
+
       return {
         success: true,
         message: onlineTech 

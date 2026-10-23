@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const pushService = require('../services/pushNotification.service');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -675,6 +676,44 @@ async function adminRoutes(fastify, options) {
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'MANUAL_DISPATCH', 'admin_salem_central', 'admin', $2)
       `, [bookingId, JSON.stringify({ technicianId, timestamp: new Date().toISOString() })]);
+
+      // Dispatch real-time background push notifications to both parties
+      try {
+        const tRes = await query('SELECT phone, full_name FROM technicians WHERE id = $1', [technicianId]);
+        if (tRes.rows.length > 0) {
+          pushService.sendPushToPhone({
+            phone: tRes.rows[0].phone,
+            role: 'technician',
+            payload: {
+              title: 'New Service Dispatch Assigned',
+              body: `Booking #${bookingId} has been assigned to you by Central Dispatch. Tap to view details.`,
+              tag: `job-${bookingId}`,
+              type: 'new_job',
+              bookingId,
+              role: 'technician',
+              url: '/partner'
+            },
+            options: { urgency: 'high', TTL: 1800 }
+          }).catch(e => console.warn('Dispatch tech push note:', e.message));
+        }
+
+        pushService.sendPushToBookingParty({
+          bookingId,
+          targetRole: 'customer',
+          payload: {
+            title: 'Specialist Dispatched!',
+            body: `A verified technician has been allocated to Booking #${bookingId}. Tap to track live status.`,
+            tag: `order-${bookingId}-matched`,
+            type: 'order_status',
+            bookingId,
+            role: 'customer',
+            url: `/track?bookingId=${bookingId}`
+          },
+          options: { urgency: 'high', TTL: 1800 }
+        }).catch(e => console.warn('Dispatch cust push note:', e.message));
+      } catch (pushErr) {
+        console.warn('Admin dispatch push error:', pushErr.message);
+      }
 
       return {
         success: true,

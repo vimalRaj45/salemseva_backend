@@ -25,7 +25,10 @@ class PushNotificationService {
       VALUES ($1, $2, $3, $4, $5, $6, NOW())
       ON CONFLICT (endpoint) 
       DO UPDATE SET 
-        user_phone = COALESCE(NULLIF(EXCLUDED.user_phone, ''), push_subscriptions.user_phone),
+        user_phone = CASE 
+          WHEN EXCLUDED.user_phone IS NOT NULL AND EXCLUDED.user_phone != '' THEN EXCLUDED.user_phone 
+          ELSE push_subscriptions.user_phone 
+        END,
         user_role = COALESCE(EXCLUDED.user_role, push_subscriptions.user_role),
         booking_id = COALESCE(EXCLUDED.booking_id, push_subscriptions.booking_id),
         p256dh = EXCLUDED.p256dh,
@@ -55,7 +58,7 @@ class PushNotificationService {
     };
 
     const pushOptions = {
-      TTL: options.TTL || (payload.type === 'call' ? 45 : 3600), // 45s for urgent calls, 1hr for updates
+      TTL: options.TTL || (payload.type === 'call' ? 60 : 3600), // 60s for calls, 1hr for updates
       urgency: options.urgency || (payload.type === 'call' ? 'high' : 'normal'),
       ...options
     };
@@ -64,7 +67,6 @@ class PushNotificationService {
       await webpush.sendNotification(pushSubscription, JSON.stringify(payload), pushOptions);
       return { success: true, endpoint: subRecord.endpoint };
     } catch (err) {
-      // 404 or 410 means subscription expired or uninstalled -> clean up
       if (err.statusCode === 404 || err.statusCode === 410) {
         console.log(`Pruning expired push subscription [${err.statusCode}]: ${subRecord.endpoint.slice(0, 30)}...`);
         await this.removeSubscription(subRecord.endpoint);
@@ -80,11 +82,14 @@ class PushNotificationService {
     const normalizedPhone = cleanPhone(phone);
     if (!normalizedPhone) return [];
 
-    let sql = 'SELECT * FROM push_subscriptions WHERE user_phone = $1';
+    let sql = `
+      SELECT * FROM push_subscriptions 
+      WHERE (user_phone = $1 OR user_phone LIKE '%' || $1)
+    `;
     const params = [normalizedPhone];
 
     if (role) {
-      sql += ' AND user_role = $2';
+      sql += ' AND (user_role = $2 OR user_role IS NULL)';
       params.push(role);
     }
 
@@ -97,7 +102,7 @@ class PushNotificationService {
     return Promise.all(promises);
   }
 
-  // 5. Send push to booking parties (Customer or Technician)
+  // 5. Send push to booking parties (Customer or Technician) with automatic booking_id fallback
   async sendPushToBookingParty({ bookingId, targetRole, payload, options = {} }) {
     if (!bookingId || !targetRole) return [];
 
@@ -116,8 +121,9 @@ class PushNotificationService {
         }
       }
 
+      let results = [];
       if (targetPhone) {
-        return this.sendPushToPhone({
+        results = await this.sendPushToPhone({
           phone: targetPhone,
           role: targetRole,
           payload: {
@@ -127,10 +133,37 @@ class PushNotificationService {
           options
         });
       }
+
+      // If no phone match was found, fallback to match by bookingId & targetRole
+      if (!results || results.length === 0) {
+        const fallbackRes = await query(
+          'SELECT * FROM push_subscriptions WHERE booking_id = $1 AND (user_role = $2 OR user_role IS NULL)',
+          [bookingId, targetRole]
+        );
+        if (fallbackRes.rows && fallbackRes.rows.length > 0) {
+          const promises = fallbackRes.rows.map(sub => this.sendToSubscription(sub, { bookingId, ...payload }, options));
+          results = await Promise.all(promises);
+        }
+      }
+
+      return results;
     } catch (e) {
       console.warn('Error sending push to booking party:', e.message);
     }
     return [];
+  }
+
+  // 6. Broadcast push to all active technicians
+  async sendPushToRole({ role, payload, options = {} }) {
+    try {
+      const res = await query('SELECT * FROM push_subscriptions WHERE user_role = $1', [role]);
+      if (!res.rows || res.rows.length === 0) return [];
+      const promises = res.rows.map(sub => this.sendToSubscription(sub, payload, options));
+      return Promise.all(promises);
+    } catch (e) {
+      console.warn('Error broadcasting push to role:', e.message);
+      return [];
+    }
   }
 }
 
