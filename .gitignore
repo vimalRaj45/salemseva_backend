@@ -2,6 +2,7 @@ node_modules/
 .env
 .env.local
 .env.*.local
+baileys_auth_info/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
