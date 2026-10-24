@@ -944,13 +944,48 @@ async function authRoutes(fastify, options) {
       const { credential } = verification.registrationInfo;
       const publicKeyB64 = Buffer.from(credential.publicKey).toString('base64');
 
+      // Look up user UUID in database to satisfy foreign key fk_passkey_user
+      let userRes = await query(`
+        SELECT id, full_name, role FROM users 
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+        LIMIT 1
+      `, [cleanPhone]);
+
+      let userId;
+      if (userRes.rows.length > 0) {
+        userId = userRes.rows[0].id;
+      } else {
+        // Check if user is a registered technician
+        const techRes = await query(`
+          SELECT id, full_name FROM technicians 
+          WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+          LIMIT 1
+        `, [cleanPhone]);
+
+        const techName = techRes.rows[0]?.full_name || `Member ${cleanPhone.slice(-4)}`;
+        const role = techRes.rows.length > 0 ? 'partner' : 'customer';
+
+        const newUserRes = await query(`
+          INSERT INTO users (phone, full_name, role)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name
+          RETURNING id
+        `, [`+91${cleanPhone}`, techName, role]);
+
+        userId = newUserRes.rows[0].id;
+
+        if (techRes.rows.length > 0) {
+          await query(`UPDATE technicians SET user_id = $1 WHERE id = $2 AND user_id IS NULL`, [userId, techRes.rows[0].id]);
+        }
+      }
+
       await query(`
         INSERT INTO passkey_credentials (user_id, phone, credential_id, public_key, counter, transports)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (credential_id) DO UPDATE 
-        SET public_key = $4, counter = $5, transports = $6
+        SET user_id = $1, public_key = $4, counter = $5, transports = $6
       `, [
-        `user_${cleanPhone}`,
+        userId,
         cleanPhone,
         credential.id,
         publicKeyB64,
@@ -1086,7 +1121,10 @@ async function authRoutes(fastify, options) {
       let userRecord = null;
       let userRole = 'customer';
 
-      if (custRes.rows.length > 0) {
+      if (techRes.rows.length > 0 && (!custRes.rows[0] || custRes.rows[0].role === 'partner' || custRes.rows[0].role === 'technician')) {
+        userRecord = formatTechnicianUser(techRes.rows[0], credentialPhone);
+        userRole = 'technician';
+      } else if (custRes.rows.length > 0) {
         userRecord = formatCustomerUser(custRes.rows[0], credentialPhone);
         userRole = userRecord.role || 'customer';
       } else if (techRes.rows.length > 0) {
@@ -1112,6 +1150,62 @@ async function authRoutes(fastify, options) {
         user: userRecord,
         sessionToken,
         message: 'Passkey authentication successful'
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // 13. Passkey Status Endpoint (for Customers & Technicians)
+  fastify.get('/auth/passkey/status/:phone', async (req, reply) => {
+    try {
+      const { phone = '' } = req.params;
+      const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+
+      if (!cleanPhone || cleanPhone.length !== 10) {
+        return reply.status(400).send({ success: false, error: 'Valid 10-digit mobile number required' });
+      }
+
+      const res = await query(`
+        SELECT count(*)::int as count, max(created_at) as last_linked 
+        FROM passkey_credentials 
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+      `, [cleanPhone]);
+
+      const count = res.rows[0]?.count || 0;
+      const lastLinked = res.rows[0]?.last_linked || null;
+
+      return {
+        success: true,
+        hasPasskey: count > 0,
+        count,
+        lastLinked
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // 14. Unlink / Delete Passkey for User or Technician
+  fastify.post('/auth/passkey/delete', async (req, reply) => {
+    try {
+      const { phone = '' } = req.body || {};
+      const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+
+      if (!cleanPhone || cleanPhone.length !== 10) {
+        return reply.status(400).send({ success: false, error: 'Valid 10-digit mobile number required' });
+      }
+
+      await query(`
+        DELETE FROM passkey_credentials 
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+      `, [cleanPhone]);
+
+      return {
+        success: true,
+        message: 'Passkey credentials unlinked successfully.'
       };
     } catch (e) {
       fastify.log.error(e);
