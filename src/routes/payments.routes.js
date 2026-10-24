@@ -159,7 +159,8 @@ async function paymentsRoutes(fastify, options) {
       const pRes = await query('SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [bookingId]);
       const payment = pRes.rows[0] || null;
 
-      const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status) || (payment && payment.status === 'HELD_IN_ESCROW');
+      const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status)
+        || (payment && (payment.status === 'HELD_IN_ESCROW' || payment.status === 'settled' || payment.status === 'escrow_held' || payment.status === 'tech_compensated'));
 
       return {
         success: true,

@@ -34,6 +34,11 @@ async function partnerRoutes(fastify, options) {
         cleanPhone = tech.phone.replace(/[\s\-\(\)]/g, '');
       }
 
+      const allTechTrades = [
+        tech.primary_trade,
+        ...(Array.isArray(tech.secondary_trades) ? tech.secondary_trades : [])
+      ].filter(Boolean);
+
       // Get latest active job for this partner from DB (prioritize technician's own assigned jobs over unassigned broadcast requests)
       // Filter strictly by the technician's chosen operational areas (assigned_localities)
       // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
@@ -43,7 +48,7 @@ async function partnerRoutes(fastify, options) {
           technician_id = $1 
           OR (
             technician_id IS NULL 
-            AND (service_id = $2 OR $2 IS NULL)
+            AND (service_id = ANY($2::text[]) OR $2::text[] IS NULL)
             AND (
               $4::text[] IS NULL OR cardinality($4::text[]) = 0 OR
               EXISTS (
@@ -84,7 +89,7 @@ async function partnerRoutes(fastify, options) {
           END,
           created_at DESC 
         LIMIT 1
-      `, [tech.id, tech.primary_trade, cleanPhone, tech.assigned_localities || null]);
+      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null]);
 
       const activeJob = jobRes.rows[0] || null;
 
@@ -97,7 +102,7 @@ async function partnerRoutes(fastify, options) {
           b.technician_id = $1 
           OR (
             b.technician_id IS NULL 
-            AND (b.service_id = $2 OR $2 IS NULL)
+            AND (b.service_id = ANY($2::text[]) OR $2::text[] IS NULL)
             AND (
               $3::text[] IS NULL OR cardinality($3::text[]) = 0 OR
               EXISTS (
@@ -118,7 +123,7 @@ async function partnerRoutes(fastify, options) {
           AND b.created_at >= NOW() - INTERVAL '12 hours'
         ORDER BY b.created_at DESC 
         LIMIT 1
-      `, [tech.id, tech.primary_trade, tech.assigned_localities || null]);
+      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], tech.assigned_localities || null]);
 
       const cancelledJob = cancelledRes.rows[0] || null;
       let cancelNotice = null;
@@ -208,6 +213,8 @@ async function partnerRoutes(fastify, options) {
           ...tech,
           assigned_localities: tech.assigned_localities || ['Fairlands'],
           assignedLocalities: tech.assigned_localities || ['Fairlands'],
+          secondary_trades: tech.secondary_trades || [],
+          secondaryTrades: tech.secondary_trades || [],
           is_kyc_verified: Boolean(tech.is_kyc_verified),
           isKycVerified: Boolean(tech.is_kyc_verified),
           status: tech.is_kyc_verified ? 'Verified' : 'Pending Verification',
@@ -287,16 +294,20 @@ async function partnerRoutes(fastify, options) {
         cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
         const cleanDigits = phoneParam.replace(/\D/g, '').slice(-10);
         const techRes = await query(`
-          SELECT id, primary_trade, assigned_localities FROM technicians 
+          SELECT id, primary_trade, secondary_trades, assigned_localities FROM technicians 
           WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 
              OR id::text = $1
              OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
           LIMIT 1
         `, [cleanPhone, cleanDigits || '']);
+        let allTrades = trade ? [trade] : null;
         if (techRes.rows.length > 0) {
           techId = techRes.rows[0].id;
+          const pTrade = techRes.rows[0].primary_trade;
+          const sTrades = Array.isArray(techRes.rows[0].secondary_trades) ? techRes.rows[0].secondary_trades : [];
+          allTrades = [pTrade, ...sTrades].filter(Boolean);
           if (!trade) {
-            trade = techRes.rows[0].primary_trade;
+            trade = pTrade;
           }
           techAssignedLocalities = techRes.rows[0].assigned_localities || null;
         }
@@ -312,7 +323,7 @@ async function partnerRoutes(fastify, options) {
           visit_fee, is_urgent_dispatch, scheduled_slot, booking_type,
           voice_note_url, created_at
         FROM bookings
-        WHERE (service_id = $1 OR $1 IS NULL)
+        WHERE (service_id = ANY($1::text[]) OR $1::text[] IS NULL)
           AND (technician_id IS NULL)
           AND (status IN ('created', 'matching'))
           AND (booking_type = 'scheduled' OR scheduled_slot IS NOT NULL)
@@ -348,7 +359,7 @@ async function partnerRoutes(fastify, options) {
           )
         ORDER BY created_at DESC
         LIMIT 30;
-      `, [trade, techId ? String(techId) : null, cleanPhone, techAssignedLocalities]);
+      `, [allTrades || (trade ? [trade] : null), techId ? String(techId) : null, cleanPhone, techAssignedLocalities]);
 
       return {
         success: true,
@@ -706,6 +717,7 @@ async function partnerRoutes(fastify, options) {
         phone,
         password,
         trade = 'ac',
+        secondaryTrades = [],
         aadhaar = '',
         upiId = '',
         payoutPhone = '',
@@ -734,16 +746,21 @@ async function partnerRoutes(fastify, options) {
         resolvedLocalities = ['Fairlands'];
       }
 
+      const sanitizedSecondary = Array.isArray(secondaryTrades)
+        ? secondaryTrades.filter(t => t && t !== trade)
+        : [];
+
       const insertSql = `
         INSERT INTO technicians (
-          full_name, phone, primary_trade, aadhaar_number, 
+          full_name, phone, primary_trade, secondary_trades, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
           rating_avg, rating_count, jobs_completed_count
-        ) VALUES ($1, $2, $3, $4, $5, $6, FALSE, NULL, FALSE, $7::text[], $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, 0.00, 0, 0)
+        ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0)
         ON CONFLICT (phone) DO UPDATE SET
           full_name = EXCLUDED.full_name,
           primary_trade = EXCLUDED.primary_trade,
+          secondary_trades = COALESCE(EXCLUDED.secondary_trades, technicians.secondary_trades),
           years_experience = COALESCE(EXCLUDED.years_experience, technicians.years_experience),
           assigned_localities = COALESCE(EXCLUDED.assigned_localities, technicians.assigned_localities),
           aadhaar_number = COALESCE(EXCLUDED.aadhaar_number, technicians.aadhaar_number),
@@ -758,6 +775,7 @@ async function partnerRoutes(fastify, options) {
         fullName || 'Salem Partner',
         cleanPhone,
         trade,
+        sanitizedSecondary,
         cleanAadhaar,
         resolvedUpi || null,
         parseInt(yearsExperience, 10) || 0,
@@ -827,6 +845,8 @@ async function partnerRoutes(fastify, options) {
         email: createdTech.email || `${(createdTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
         trade: createdTech.primary_trade,
         tradeName: tradeNames[createdTech.primary_trade] || 'Home Services Specialist',
+        secondary_trades: createdTech.secondary_trades || [],
+        secondaryTrades: createdTech.secondary_trades || [],
         payoutPhone: cleanPayoutDigits || (createdTech.upi_vpa?.replace(/@.*$/, '') || ''),
         upi_vpa: createdTech.upi_vpa,
         aadhaarCardUrl: createdTech.aadhaar_card_url,
@@ -867,6 +887,8 @@ async function partnerRoutes(fastify, options) {
         upiId,
         payoutPhone = '',
         trade,
+        secondaryTrades,
+        secondary_trades,
         aadhaarCardUrl,
         serviceArea,
         assignedLocalities
@@ -878,6 +900,11 @@ async function partnerRoutes(fastify, options) {
       } else if (serviceArea) {
         resolvedLocs = String(serviceArea).split(',').map(s => s.trim()).filter(Boolean);
       }
+
+      const inputSec = secondaryTrades !== undefined ? secondaryTrades : secondary_trades;
+      const sanitizedSec = inputSec !== undefined 
+        ? (Array.isArray(inputSec) ? inputSec.filter(t => t && t !== trade) : [])
+        : null;
 
       const cleanDigits = (phone || '').replace(/[^0-9]/g, '').slice(-10);
       if (!cleanDigits && !technicianId) {
@@ -893,16 +920,18 @@ async function partnerRoutes(fastify, options) {
           full_name = COALESCE($1, full_name),
           upi_vpa = COALESCE($2, upi_vpa),
           primary_trade = COALESCE($3, primary_trade),
-          aadhaar_card_url = COALESCE($4, aadhaar_card_url),
-          aadhaar_uploaded_at = CASE WHEN $4::text IS NOT NULL THEN NOW() ELSE aadhaar_uploaded_at END,
-          assigned_localities = COALESCE($5::text[], assigned_localities)
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $6
-           OR id::text = $7
+          secondary_trades = CASE WHEN $4::text[] IS NOT NULL THEN $4::text[] ELSE secondary_trades END,
+          aadhaar_card_url = COALESCE($5, aadhaar_card_url),
+          aadhaar_uploaded_at = CASE WHEN $5::text IS NOT NULL THEN NOW() ELSE aadhaar_uploaded_at END,
+          assigned_localities = COALESCE($6::text[], assigned_localities)
+        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $7
+           OR id::text = $8
         RETURNING *;
       `, [
         fullName || null,
         resolvedUpi2 || null,
         trade || null,
+        sanitizedSec,
         aadhaarCardUrl || null,
         resolvedLocs || null,
         cleanDigits || 'NOMATCH',
@@ -942,6 +971,8 @@ async function partnerRoutes(fastify, options) {
         email: updatedTech.email || `${(updatedTech.full_name || 'partner').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
         trade: updatedTech.primary_trade,
         tradeName: tradeNames[updatedTech.primary_trade] || 'Home Services Specialist',
+        secondary_trades: updatedTech.secondary_trades || [],
+        secondaryTrades: updatedTech.secondary_trades || [],
         payoutPhone: cleanPayoutDigits2 || (updatedTech.upi_vpa?.replace(/@.*$/, '') || ''),
         upi_vpa: updatedTech.upi_vpa,
         aadhaarCardUrl: updatedTech.aadhaar_card_url,
@@ -1275,14 +1306,15 @@ async function partnerRoutes(fastify, options) {
       `;
       const params = [];
       if (technicianId) {
-        const tRes = await query('SELECT primary_trade, assigned_localities FROM technicians WHERE id::text = $1', [technicianId]);
+        const tRes = await query('SELECT primary_trade, secondary_trades, assigned_localities FROM technicians WHERE id::text = $1', [technicianId]);
         const techInfo = tRes.rows[0];
         if (techInfo) {
+          const allTrades = [techInfo.primary_trade, ...(Array.isArray(techInfo.secondary_trades) ? techInfo.secondary_trades : [])].filter(Boolean);
           sql += ` AND (
             b.technician_id = $1 
             OR (
               b.technician_id IS NULL 
-              AND (b.service_id = $2 OR $2 IS NULL)
+              AND (b.service_id = ANY($2::text[]) OR $2::text[] IS NULL)
               AND (
                 $3::text[] IS NULL OR cardinality($3::text[]) = 0 OR
                 EXISTS (
@@ -1299,7 +1331,7 @@ async function partnerRoutes(fastify, options) {
               )
             )
           )`;
-          params.push(technicianId, techInfo.primary_trade, techInfo.assigned_localities || null);
+          params.push(technicianId, allTrades.length > 0 ? allTrades : null, techInfo.assigned_localities || null);
         } else {
           sql += ` AND b.technician_id = $1`;
           params.push(technicianId);

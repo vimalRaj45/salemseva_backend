@@ -24,7 +24,7 @@ async function adminRoutes(fastify, options) {
         `),
         query(`
           SELECT 
-            t.id, t.full_name, t.phone, t.primary_trade, t.years_experience,
+            t.id, t.full_name, t.phone, t.primary_trade, t.secondary_trades, t.years_experience,
             t.rating_avg, t.rating_count, t.jobs_completed_count, t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
             t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
@@ -88,7 +88,7 @@ async function adminRoutes(fastify, options) {
 
       if (trade && trade !== 'all') {
         params.push(trade);
-        sql += ` AND t.primary_trade = $${params.length}`;
+        sql += ` AND (t.primary_trade = $${params.length} OR (t.secondary_trades IS NOT NULL AND $${params.length} = ANY(t.secondary_trades)))`;
       }
       if (status === 'online') {
         sql += ` AND t.is_online = TRUE`;
@@ -954,6 +954,184 @@ async function adminRoutes(fastify, options) {
         booking: updateRes.rows[0],
         techReleased: hasTech,
         compensated: compensateTech && hasTech
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 10b. Emergency Admin Payment Override ("Mark as Paid")
+  fastify.post('/admin/bookings/:id/payment-override', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const {
+        paymentStage = 'advance', // 'advance', 'final_settlement', 'full'
+        amountPaid,
+        paymentMethod = 'direct_upi', // 'direct_upi', 'cash_technician', 'cash_central_desk', 'bank_neft_imps'
+        transactionRef,
+        reason = 'razorpay_gateway_down',
+        notes = '',
+        adminId = 'admin_central_ops'
+      } = req.body || {};
+
+      // 1. Fetch booking
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: `Booking #${id} not found` });
+      }
+
+      const booking = bRes.rows[0];
+      const visitFee = parseFloat(booking.visit_fee) || 99.00;
+      const quoteSubtotal = parseFloat(booking.quote_subtotal) || 0.00;
+      const parsedAmount = amountPaid !== undefined && amountPaid !== null && !isNaN(parseFloat(amountPaid))
+        ? parseFloat(amountPaid)
+        : (paymentStage === 'advance' ? visitFee : (paymentStage === 'final_settlement' ? quoteSubtotal : visitFee + quoteSubtotal));
+
+      if (parsedAmount <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid payment amount is required' });
+      }
+
+      // 2. Financial calculation
+      let techPayoutAmount = 0.00;
+      let platformCommission = 0.00;
+      let targetStatus = booking.status;
+      let targetPaymentStatus = 'settled';
+
+      const methodNames = {
+        direct_upi: 'Direct UPI (Company QR)',
+        cash_technician: 'Cash Collected by Partner',
+        cash_central_desk: 'Cash Received at Central Desk',
+        bank_neft_imps: 'Bank Transfer (NEFT/IMPS)'
+      };
+      const resolvedMethodName = methodNames[paymentMethod] || paymentMethod || 'MANUAL_ADMIN_OVERRIDE';
+
+      const utrRef = transactionRef?.trim() || `MANUAL-${id.substring(0, 8)}-${Date.now()}`;
+      const fakeOrderId = `manual_ord_${id}_${Date.now()}`;
+      const fakePaymentId = `manual_pay_${id}_${Date.now()}`;
+
+      if (paymentStage === 'advance') {
+        // 100% of Advance / Travel fee goes to technician
+        techPayoutAmount = parsedAmount;
+        platformCommission = 0.00;
+        targetPaymentStatus = 'escrow_held';
+        
+        // If booking is waiting for payment in created or matching, advance to en_route (if tech assigned) or matching/accepted
+        if (booking.status === 'created' || booking.status === 'matching') {
+          targetStatus = booking.technician_id ? 'en_route' : 'matching';
+        } else if (booking.status === 'accepted') {
+          targetStatus = 'en_route';
+        }
+      } else {
+        // Final quote settlement or full payment
+        // Strictly 2% SalemSeva platform commission, 98% technician payout
+        platformCommission = parseFloat((parsedAmount * 0.02).toFixed(2));
+        techPayoutAmount = parseFloat((parsedAmount - platformCommission).toFixed(2));
+        targetPaymentStatus = 'settled';
+        targetStatus = 'completed';
+      }
+
+      // 3. Upsert into payments ledger
+      const paymentRes = await query(`
+        INSERT INTO payments (
+          booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
+          tech_payout_amount, platform_commission, status, payment_method, payout_utr,
+          settled_at, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7::payment_status, $8, $9, CASE WHEN $7 = 'settled' THEN NOW() ELSE NULL END, NOW())
+        RETURNING *;
+      `, [
+        id,
+        fakeOrderId,
+        fakePaymentId,
+        parsedAmount,
+        techPayoutAmount,
+        platformCommission,
+        targetPaymentStatus,
+        resolvedMethodName,
+        utrRef
+      ]);
+
+      // 4. Update bookings table
+      const updatedBookingRes = await query(`
+        UPDATE bookings
+        SET
+          status = $1,
+          final_amount = CASE WHEN $2::numeric > 0 THEN $2::numeric ELSE final_amount END,
+          completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END
+        WHERE id = $3
+        RETURNING *;
+      `, [targetStatus, parsedAmount, id]);
+
+      // 5. If completed or settlement, record technician payout disbursal
+      if (targetStatus === 'completed' && booking.technician_id) {
+        try {
+          const tRes = await query('SELECT phone, upi_vpa, full_name FROM technicians WHERE id = $1', [booking.technician_id]);
+          const tech = tRes.rows[0];
+          await query(`
+            INSERT INTO technician_payouts (
+              technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at
+            ) VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+          `, [
+            tech?.phone || 'PARTNER',
+            booking.technician_id,
+            techPayoutAmount,
+            tech?.upi_vpa || null,
+            utrRef,
+            `Admin manual payment override settlement for Booking #${id} (${resolvedMethodName})`
+          ]);
+        } catch (pErr) {
+          fastify.log.warn('Could not record tech payout on override:', pErr.message);
+        }
+      }
+
+      // 6. Write to audit_logs
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'ADMIN_MANUAL_PAYMENT_OVERRIDE', $2, 'admin', $3)
+      `, [
+        id,
+        adminId,
+        JSON.stringify({
+          amountPaid: parsedAmount,
+          paymentStage,
+          paymentMethod: resolvedMethodName,
+          transactionRef: utrRef,
+          reason,
+          notes,
+          previousStatus: booking.status,
+          newStatus: targetStatus,
+          techPayoutAmount,
+          platformCommission,
+          timestamp: new Date().toISOString()
+        })
+      ]);
+
+      // 7. Push notification to Technician (if assigned)
+      if (booking.technician_id) {
+        try {
+          const pushService = require('../services/pushNotification.service');
+          await pushService.sendPushNotification({
+            userId: booking.technician_id,
+            role: 'technician',
+            payload: {
+              title: 'Payment Confirmed by Central Ops',
+              body: `Payment of INR ${parsedAmount} for Booking #${id} has been verified (${resolvedMethodName}). Continue service.`,
+              tag: `pay-override-${id}`,
+              type: 'payment_verified',
+              bookingId: id
+            }
+          });
+        } catch (pushErr) {}
+      }
+
+      return {
+        success: true,
+        message: `Booking #${id} successfully marked as PAID (INR ${parsedAmount.toFixed(2)} via ${resolvedMethodName}). Status advanced to '${targetStatus}'.`,
+        payment: paymentRes.rows[0],
+        booking: updatedBookingRes.rows[0],
+        stage: paymentStage,
+        amount: parsedAmount,
+        status: targetStatus
       };
     } catch (err) {
       fastify.log.error(err);

@@ -231,7 +231,7 @@ async function bookingsRoutes(fastify, options) {
       // Check for available active specialists in Salem for this trade and locality
       const onlineTechRes = await query(`
         SELECT id, full_name, phone FROM technicians 
-        WHERE (primary_trade = $1 OR $1 IS NULL) 
+        WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)) OR $1 IS NULL) 
           AND is_online = TRUE 
           AND is_blocked = FALSE 
           AND (
@@ -419,7 +419,7 @@ async function bookingsRoutes(fastify, options) {
           SELECT * FROM technicians 
           WHERE is_online = TRUE 
             AND COALESCE(is_blocked, FALSE) = FALSE 
-            AND primary_trade = $1 
+            AND (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades))) 
             AND (
               assigned_localities IS NULL OR cardinality(assigned_localities) = 0 OR
               EXISTS (
@@ -984,7 +984,7 @@ async function bookingsRoutes(fastify, options) {
           SELECT id FROM technicians 
           WHERE is_online = TRUE 
             AND COALESCE(is_blocked, FALSE) = FALSE 
-            AND primary_trade = $1 
+            AND (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades))) 
             AND (
               assigned_localities IS NULL OR cardinality(assigned_localities) = 0 OR
               EXISTS (
