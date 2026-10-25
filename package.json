@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test tests/e2e_full_suite.test.js",
+    "test": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs",
+    "test:unit": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs",
+    "test:e2e": "node tests/e2e_full_suite.test.js",
+    "test:stress": "node tests/stress_test_suite.js",
     "seed": "node src/db/seed.js",
     "truncate": "node src/db/truncate.js",
     "migrate:10": "node src/db/migrate_schema_to_10_out_of_10.js"

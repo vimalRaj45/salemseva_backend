@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
+const { calculateDualCommissionInvoice } = require('../services/commission.service');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -1237,6 +1238,13 @@ async function bookingsRoutes(fastify, options) {
 
       const calculatedSubtotal = items.reduce((s, i) => s + i.price * (i.qty || 1), 0);
       const subtotal = booking && parseFloat(booking.quote_subtotal) > 0 ? parseFloat(booking.quote_subtotal) : calculatedSubtotal;
+      const upfrontVisitFee = booking ? parseFloat(booking.visit_fee || 99) : 99;
+
+      // Compute dynamic dual-commission invoice breakdown from .env / settings
+      const invoice = calculateDualCommissionInvoice({
+        totalJobAmount: subtotal,
+        upfrontFeePaid: upfrontVisitFee
+      });
 
       return {
         success: true,
@@ -1245,6 +1253,7 @@ async function bookingsRoutes(fastify, options) {
         itemsCount: items.length,
         items,
         subtotal,
+        invoice,
         partsMode: booking?.parts_mode || 'tech_buys'
       };
     } catch (err) {

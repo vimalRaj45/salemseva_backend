@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const { getEnvCommissionPercent, invalidateCommissionCache } = require('../services/commission.service');
 
 async function settingsRoutes(fastify, options) {
   // Ensure platform_settings table exists and seed default configuration if empty
@@ -13,9 +14,11 @@ async function settingsRoutes(fastify, options) {
         feedback_rewards_enabled BOOLEAN DEFAULT TRUE,
         partner_referral_incentive NUMERIC(10,2) DEFAULT 100.00,
         partner_welcome_bonus NUMERIC(10,2) DEFAULT 50.00,
+        platform_commission_percent NUMERIC(5,2) DEFAULT 2.00,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_by VARCHAR(100) DEFAULT 'admin'
       );
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS platform_commission_percent NUMERIC(5,2) DEFAULT 2.00;
     `);
 
     // Seed initial row if table is empty
@@ -25,9 +28,9 @@ async function settingsRoutes(fastify, options) {
         INSERT INTO platform_settings (
           id, customer_referral_credits, referee_discount_amount,
           review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
-          partner_referral_incentive, partner_welcome_bonus, updated_by
+          partner_referral_incentive, partner_welcome_bonus, platform_commission_percent, updated_by
         ) VALUES (
-          'reward_settings', 50.00, 50.00, 25.00, 15.00, TRUE, 100.00, 50.00, 'system_init'
+          'reward_settings', 50.00, 50.00, 25.00, 15.00, TRUE, 100.00, 50.00, 2.00, 'system_init'
         )
       `);
     }
@@ -99,6 +102,7 @@ async function settingsRoutes(fastify, options) {
         feedback_rewards_enabled: Boolean(row.feedback_rewards_enabled),
         partner_referral_incentive: parseFloat(row.partner_referral_incentive || 100),
         partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 50),
+        platform_commission_percent: parseFloat(row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? row.platform_commission_percent : getEnvCommissionPercent()),
         inspection_visit_fee: parseFloat(row.inspection_visit_fee || 99),
         updated_by: row.updated_by,
         updated_at: row.updated_at
@@ -129,6 +133,7 @@ async function settingsRoutes(fastify, options) {
         feedback_rewards_enabled,
         partner_referral_incentive,
         partner_welcome_bonus,
+        platform_commission_percent,
         updated_by = 'admin_salem_central'
       } = req.body || {};
 
@@ -142,14 +147,17 @@ async function settingsRoutes(fastify, options) {
       const newFbEnabled = feedback_rewards_enabled !== undefined ? Boolean(feedback_rewards_enabled) : Boolean(current.feedback_rewards_enabled ?? true);
       const newPartnerIncentive = partner_referral_incentive !== undefined ? Math.max(0, parseFloat(partner_referral_incentive)) : parseFloat(current.partner_referral_incentive || 100);
       const newPartnerBonus = partner_welcome_bonus !== undefined ? Math.max(0, parseFloat(partner_welcome_bonus)) : parseFloat(current.partner_welcome_bonus || 50);
+      const newCommission = platform_commission_percent !== undefined
+        ? Math.max(0, Math.min(100, parseFloat(platform_commission_percent)))
+        : parseFloat(current.platform_commission_percent !== null && current.platform_commission_percent !== undefined ? current.platform_commission_percent : getEnvCommissionPercent());
 
       const updateSql = `
         INSERT INTO platform_settings (
           id, customer_referral_credits, referee_discount_amount,
           review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
-          partner_referral_incentive, partner_welcome_bonus, updated_at, updated_by
+          partner_referral_incentive, partner_welcome_bonus, platform_commission_percent, updated_at, updated_by
         ) VALUES (
-          'reward_settings', $1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, $8
+          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, $9
         )
         ON CONFLICT (id) DO UPDATE SET
           customer_referral_credits = EXCLUDED.customer_referral_credits,
@@ -159,6 +167,7 @@ async function settingsRoutes(fastify, options) {
           feedback_rewards_enabled = EXCLUDED.feedback_rewards_enabled,
           partner_referral_incentive = EXCLUDED.partner_referral_incentive,
           partner_welcome_bonus = EXCLUDED.partner_welcome_bonus,
+          platform_commission_percent = EXCLUDED.platform_commission_percent,
           updated_at = CURRENT_TIMESTAMP,
           updated_by = EXCLUDED.updated_by
         RETURNING *;
@@ -172,8 +181,11 @@ async function settingsRoutes(fastify, options) {
         newFbEnabled,
         newPartnerIncentive,
         newPartnerBonus,
+        newCommission,
         updated_by
       ]);
+
+      invalidateCommissionCache();
 
       // Record in audit log
       try {

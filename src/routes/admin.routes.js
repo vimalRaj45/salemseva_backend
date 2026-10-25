@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
+const { getPlatformCommissionPercent, calculateCommissionSplit } = require('../services/commission.service');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -1024,9 +1025,11 @@ async function adminRoutes(fastify, options) {
         }
       } else {
         // Final quote settlement or full payment
-        // Strictly 2% SalemSeva platform commission, 98% technician payout
-        platformCommission = parseFloat((parsedAmount * 0.02).toFixed(2));
-        techPayoutAmount = parseFloat((parsedAmount - platformCommission).toFixed(2));
+        // Dynamic Shazu One platform commission and technician payout
+        const commissionPercent = await getPlatformCommissionPercent();
+        const split = calculateCommissionSplit(parsedAmount, commissionPercent);
+        platformCommission = split.platformCommission;
+        techPayoutAmount = split.techPayout;
         targetPaymentStatus = 'settled';
         targetStatus = 'completed';
       }

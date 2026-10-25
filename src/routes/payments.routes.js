@@ -1,5 +1,13 @@
 const crypto = require('crypto');
 const { query } = require('../db/db');
+const {
+  getCustomerPlatformFeePercent,
+  getPaymentGatewayFeePercent,
+  getPartnerCommissionPercent,
+  getLiveFeeSettings,
+  calculateDualCommissionInvoice,
+  calculateCommissionSplit
+} = require('../services/commission.service');
 
 async function paymentsRoutes(fastify, options) {
   const KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_Tjo8HdYyapYlnO';
@@ -238,29 +246,89 @@ async function paymentsRoutes(fastify, options) {
         fastify.log.warn('DB recording note:', dbErr.message);
       }
 
-      // Automatically advance booking to 'en_route' upon Part 1 payment
-      try {
-        await query(`
-          UPDATE bookings 
-          SET status = 'en_route'
-          WHERE id = $1 AND status IN ('accepted', 'matching')
-        `, [bookingId]);
+      // Automatically advance booking to 'en_route' upon Part 1 payment or 'quote_approved' upon Part 2 payment
+      let dualInvoice = null;
+      let routeTransferResult = null;
 
-        await query(`
-          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
-          VALUES ($1, 'PART1_PAYMENT_VERIFIED', 'customer', 'customer', $2)
-        `, [
-          bookingId,
-          JSON.stringify({
-            amount: parsedAmount,
-            paymentId: paymentTxId,
-            orderId: orderTxId,
-            gateway: 'Razorpay',
-            disbursal: '100% to Technician (Fuel & Travel)',
-            platformCommission: 0.00,
-            timestamp: new Date().toISOString()
-          })
-        ]);
+      try {
+        const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+        const currentB = bRes.rows[0];
+
+        if (currentB) {
+          const isQuoteApproval = currentB.status === 'quote_presented' || parsedAmount > 100;
+          const nextStatus = isQuoteApproval ? 'quote_approved' : 'en_route';
+
+          await query(`
+            UPDATE bookings 
+            SET status = $1
+            WHERE id = $2 AND status IN ('accepted', 'matching', 'quote_presented')
+          `, [nextStatus, bookingId]);
+
+          const quoteSub = parseFloat(currentB.quote_subtotal) || parsedAmount;
+          const visit = parseFloat(currentB.visit_fee) || 99.00;
+          const settings = await getLiveFeeSettings();
+
+          dualInvoice = calculateDualCommissionInvoice({
+            totalJobAmount: quoteSub,
+            upfrontFeePaid: visit,
+            customerFeePercent: settings.customerFeePercent,
+            gatewayFeePercent: settings.gatewayFeePercent,
+            partnerCommPercent: settings.partnerCommPercent
+          });
+
+          // Razorpay Route Automated Split to Partner Account
+          const routeEnabled = process.env.RAZORPAY_ROUTE_ENABLED === 'true' || process.env.RAZORPAY_ROUTE_ENABLED === '1';
+          if (routeEnabled && currentB.technician_id && dualInvoice.partnerDirectRouteTransfer > 0) {
+            const techRes = await query('SELECT razorpay_account_id, name FROM technicians WHERE id = $1', [currentB.technician_id]);
+            const techObj = techRes.rows[0];
+            if (techObj?.razorpay_account_id && !paymentTxId.startsWith('pay_dummy')) {
+              try {
+                const authHeader = 'Basic ' + Buffer.from(`${KEY_ID}:${KEY_SECRET}`).toString('base64');
+                const rzpRouteRes = await fetch(`https://api.razorpay.com/v1/payments/${paymentTxId}/transfers`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': authHeader
+                  },
+                  body: JSON.stringify({
+                    transfers: [
+                      {
+                        account: techObj.razorpay_account_id,
+                        amount: Math.round(dualInvoice.partnerDirectRouteTransfer * 100),
+                        currency: 'INR',
+                        notes: {
+                          booking_id: bookingId,
+                          partner_name: techObj.name,
+                          payout_type: 'partner_share'
+                        },
+                        on_hold: 0
+                      }
+                    ]
+                  })
+                });
+                routeTransferResult = await rzpRouteRes.json();
+              } catch (rErr) {
+                fastify.log.warn('Razorpay Route Transfer dispatch note:', rErr.message);
+              }
+            }
+          }
+
+          await query(`
+            INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+            VALUES ($1, 'PAYMENT_VERIFIED_SPLIT_RECORDED', 'customer', 'customer', $2)
+          `, [
+            bookingId,
+            JSON.stringify({
+              amount: parsedAmount,
+              paymentId: paymentTxId,
+              orderId: orderTxId,
+              gateway: 'Razorpay',
+              dualInvoice,
+              routeTransferResult,
+              timestamp: new Date().toISOString()
+            })
+          ]);
+        }
       } catch (statusErr) {
         fastify.log.warn('Booking status update on payment note:', statusErr.message);
       }
@@ -272,11 +340,13 @@ async function paymentsRoutes(fastify, options) {
         orderId: orderTxId,
         escrowStatus: 'HELD_IN_ESCROW',
         guarantee: '100% Protected under Shazu One Escrow Policy',
+        invoice: dualInvoice,
+        routeTransfer: routeTransferResult,
         disbursalSummary: {
           part1Fee: parsedAmount,
-          technicianShare: parsedAmount,
-          platformCut: 0.00,
-          notice: '100% of ₹99 inspection fee allocated for technician travel & fuel. Technician en route unlocked.'
+          technicianShare: dualInvoice ? dualInvoice.partnerDirectRouteTransfer : parsedAmount,
+          platformCut: dualInvoice ? (dualInvoice.customerPlatformFee + dualInvoice.partnerCommissionAmount) : 0.00,
+          notice: 'Dual-commission processed transparently per .env configuration.'
         },
         dbRecord
       };
@@ -286,43 +356,48 @@ async function paymentsRoutes(fastify, options) {
     }
   });
 
-  // 3. Calculate Razorpay Escrow & Route Split (95% tech, 5% platform)
+  // 3. Dynamic Dual-Commission & Razorpay Route Split Calculation
   fastify.post('/payments/calculate-split', async (req, reply) => {
-    const { grossAmount, visitFee = 99.00, isUrgent = false } = req.body;
-    const total = parseFloat(grossAmount) || 899.00;
+    const { grossAmount, visitFee = 99.00 } = req.body || {};
+    const total = parseFloat(grossAmount) || 1000.00;
+    const upfront = parseFloat(visitFee) || 99.00;
+    const settings = await getLiveFeeSettings();
 
-    // Commission Formula:
-    // Tech receives 100% of Visit Fee (₹99) + 95% of Labor/Parts + ₹40 transit bump (if urgent)
-    // Platform receives 5% of Labor/Parts + ₹10 desk coordination fee (if urgent)
-    const laborAndParts = Math.max(0, total - visitFee);
-    const techLaborShare = laborAndParts * 0.95;
-    const platformLaborShare = laborAndParts * 0.05;
-    const transitBump = isUrgent ? 40.00 : 0.00;
-    const deskFee = isUrgent ? 10.00 : 0.00;
-
-    const techTotalPayout = visitFee + techLaborShare + transitBump;
-    const platformTotalCommission = platformLaborShare + deskFee;
-
-    const pgFee = total * 0.02 * 1.18; // 2% + 18% GST
+    const invoice = calculateDualCommissionInvoice({
+      totalJobAmount: total,
+      upfrontFeePaid: upfront,
+      customerFeePercent: settings.customerFeePercent,
+      gatewayFeePercent: settings.gatewayFeePercent,
+      partnerCommPercent: settings.partnerCommPercent
+    });
 
     return {
       success: true,
       keyId: KEY_ID,
       breakdown: {
         totalGrossBill: total,
-        visitFee: parseFloat(visitFee),
-        laborAndParts: parseFloat(laborAndParts.toFixed(2)),
+        visitFee: upfront,
+        remainingWorkAmount: invoice.remainingWorkAmount,
+        customerFeePercent: invoice.customerFeePercent,
+        customerPlatformFee: invoice.customerPlatformFee,
+        gatewayFeePercent: invoice.gatewayFeePercent,
+        paymentGatewayFee: invoice.paymentGatewayFee,
+        customerFinalPayable: invoice.customerFinalPayable,
+        partnerCommPercent: invoice.partnerCommPercent,
+        partnerCommissionAmount: invoice.partnerCommissionAmount,
+        partnerNetEarnings: invoice.partnerNetEarnings,
+        partnerDirectRouteTransfer: invoice.partnerDirectRouteTransfer,
+        platformTotalRetained: invoice.platformTotalRetained,
+        // Backward-compatibility keys
         techPayout: {
-          percentage: '95% + 100% Visit Fee',
-          amount: parseFloat(techTotalPayout.toFixed(2)),
-          transitBump: transitBump
+          percentage: `${100 - invoice.partnerCommPercent}%`,
+          amount: invoice.partnerDirectRouteTransfer
         },
         platformRevenue: {
-          percentage: '5%',
-          amount: parseFloat(platformTotalCommission.toFixed(2)),
-          deskFee: deskFee
+          percentage: `${invoice.customerFeePercent + invoice.partnerCommPercent}%`,
+          amount: invoice.platformTotalRetained
         },
-        pgFee: parseFloat(pgFee.toFixed(2)),
+        pgFee: invoice.paymentGatewayFee,
         escrowNodalAccount: 'acc_RazorpayEscrow_Shazu One'
       }
     };
@@ -347,9 +422,18 @@ async function paymentsRoutes(fastify, options) {
       const targetId = booking.id;
       const quoteSubtotal = parseFloat(booking.quote_subtotal) || 250.00;
       const visitFee = parseFloat(booking.visit_fee) || 99.00;
-      const totalBookingAmount = visitFee + quoteSubtotal;
-      const platformCut = parseFloat((totalBookingAmount * 0.02).toFixed(2)); // Strictly 2% Shazu One platform commission
-      const totalTechPayout = parseFloat((totalBookingAmount - platformCut).toFixed(2)); // 98% technician payout
+      const settings = await getLiveFeeSettings();
+
+      const invoice = calculateDualCommissionInvoice({
+        totalJobAmount: quoteSubtotal,
+        upfrontFeePaid: visitFee,
+        customerFeePercent: settings.customerFeePercent,
+        gatewayFeePercent: settings.gatewayFeePercent,
+        partnerCommPercent: settings.partnerCommPercent
+      });
+
+      const totalTechPayout = invoice.partnerDirectRouteTransfer;
+      const platformCut = invoice.partnerCommissionAmount + invoice.customerPlatformFee;
       const utrNumber = 'UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS';
 
       // 1. Update booking status to completed
@@ -360,7 +444,7 @@ async function paymentsRoutes(fastify, options) {
             final_amount = $1
         WHERE id = $2
         RETURNING *
-      `, [visitFee + quoteSubtotal, targetId]);
+      `, [invoice.totalJobAmount, targetId]);
 
       const completedBooking = upRes.rows[0] || booking;
 
@@ -386,14 +470,14 @@ async function paymentsRoutes(fastify, options) {
         totalTechPayout,
         techUpi,
         utrNumber,
-        `Instant cashless escrow release for #${targetId} (₹${visitFee} travel + ₹${techLaborShare.toFixed(2)} repair)`
+        `Instant cashless escrow release for #${targetId} (₹${invoice.totalJobAmount} total - ₹${invoice.partnerCommissionAmount} partner comm - ₹${invoice.upfrontFeePaid} advance = ₹${totalTechPayout})`
       ]);
 
       // 4. Record Settled Payments in payments table
       await query(`
         INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
         VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant Escrow Released)', $5, NOW())
-      `, [targetId, visitFee + quoteSubtotal, totalTechPayout, platformCut, utrNumber]);
+      `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut, utrNumber]);
 
       // 5. Record Review if provided
       if (rating) {
@@ -414,7 +498,7 @@ async function paymentsRoutes(fastify, options) {
         message: 'Customer confirmed work completion. Instant settlement disbursed to technician UPI!',
         booking: completedBooking,
         settlement: {
-          totalAmount: visitFee + quoteSubtotal,
+          totalAmount: invoice.totalJobAmount,
           technicianPayout: totalTechPayout,
           platformCommission: platformCut,
           techUpi,
