@@ -314,7 +314,7 @@ async function adminRoutes(fastify, options) {
           MAX(u.blocked_at) as blocked_at
         FROM bookings b
         FULL OUTER JOIN users u ON b.customer_phone = u.phone
-        WHERE b.customer_phone IS NOT NULL OR u.phone IS NOT NULL
+        WHERE (b.customer_phone IS NOT NULL OR (u.phone IS NOT NULL AND u.role != 'admin'))
         GROUP BY COALESCE(b.customer_phone, u.phone)
         ORDER BY total_orders DESC, last_order_date DESC
       `);

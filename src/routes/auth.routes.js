@@ -675,7 +675,9 @@ async function authRoutes(fastify, options) {
         expiresInSeconds: 300,
         delivered: sendResult.delivered,
         simulated: Boolean(sendResult.simulated),
-        simulatedOtp: sendResult.otp
+        simulatedOtp: otpCode,
+        demoOtp: otpCode,
+        otp: otpCode
       };
     } catch (e) {
       fastify.log.error(e);
