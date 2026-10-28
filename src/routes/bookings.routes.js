@@ -1087,6 +1087,20 @@ async function bookingsRoutes(fastify, options) {
         } else if (status === 'completed') {
           pushTitle = 'Service Completed Successfully';
           pushBody = 'Your service job has been finished. Thank you for choosing Shazu One.';
+
+          if (booking.technician_id) {
+            try {
+              await query(`
+                UPDATE technicians 
+                SET jobs_completed_count = (
+                  SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+                )
+                WHERE id = $1
+              `, [booking.technician_id]);
+            } catch (syncErr) {
+              console.warn('Could not update tech jobs_completed_count:', syncErr.message);
+            }
+          }
         }
 
         if (pushTitle) {
@@ -1207,6 +1221,20 @@ async function bookingsRoutes(fastify, options) {
           safetyProtocol: 'Customer Doorstep Authentication'
         })
       ]);
+
+      if (nextStatus === 'completed' && updatedBooking?.technician_id) {
+        try {
+          await query(`
+            UPDATE technicians 
+            SET jobs_completed_count = (
+              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+            )
+            WHERE id = $1
+          `, [updatedBooking.technician_id]);
+        } catch (syncErr) {
+          console.warn('Could not update tech jobs_completed_count on completion OTP:', syncErr.message);
+        }
+      }
 
       return {
         success: true,

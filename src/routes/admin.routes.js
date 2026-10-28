@@ -26,7 +26,20 @@ async function adminRoutes(fastify, options) {
         query(`
           SELECT 
             t.id, t.full_name, t.phone, t.primary_trade, t.secondary_trades, t.years_experience,
-            t.rating_avg, t.rating_count, t.jobs_completed_count, t.is_online, 
+            COALESCE(
+              NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
+              NULLIF(t.rating_avg, 0),
+              CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+            ) as rating_avg,
+            GREATEST(
+              COALESCE(t.rating_count, 0),
+              (SELECT count(*)::int FROM reviews r WHERE r.technician_id = t.id)
+            ) as rating_count,
+            GREATEST(
+              COALESCE(t.jobs_completed_count, 0),
+              (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
+            ) as jobs_completed_count,
+            t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
             t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
             t.assigned_localities, t.created_at,
@@ -76,6 +89,19 @@ async function adminRoutes(fastify, options) {
       let sql = `
         SELECT 
           t.*,
+          COALESCE(
+            NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
+            NULLIF(t.rating_avg, 0),
+            CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+          ) as rating_avg,
+          GREATEST(
+            COALESCE(t.rating_count, 0),
+            (SELECT count(*)::int FROM reviews r WHERE r.technician_id = t.id)
+          ) as rating_count,
+          GREATEST(
+            COALESCE(t.jobs_completed_count, 0),
+            (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
+          ) as jobs_completed_count,
           (
             SELECT count(*) 
             FROM bookings b 
@@ -482,7 +508,7 @@ async function adminRoutes(fastify, options) {
       let params = [];
 
       if (locality && locality !== 'all') {
-        params.push(locality);
+        params.push(`%${locality}%`);
         whereConditions.push(`(b.locality ILIKE $${params.length} OR b.service_address ILIKE $${params.length})`);
       }
 
@@ -665,8 +691,7 @@ async function adminRoutes(fastify, options) {
         platformCut: parseFloat(dm.platformCut.toFixed(2))
       })).sort((a, b) => a.date.localeCompare(b.date));
 
-      return {
-        success: true,
+      const responsePayload = {
         summary: {
           totalGross: parseFloat(totalGross.toFixed(2)),
           totalRazorpayFee: parseFloat(totalRazorpayFee.toFixed(2)),
@@ -680,6 +705,12 @@ async function adminRoutes(fastify, options) {
         regionBreakdown,
         dailyBreakdown,
         transactions
+      };
+
+      return {
+        success: true,
+        data: responsePayload,
+        ...responsePayload
       };
     } catch (err) {
       fastify.log.error(err);
@@ -1106,6 +1137,14 @@ async function adminRoutes(fastify, options) {
             utrRef,
             `Admin manual payment override settlement for Booking #${id} (${resolvedMethodName})`
           ]);
+          // Sync technician completed jobs count
+          await query(`
+            UPDATE technicians 
+            SET jobs_completed_count = (
+              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+            )
+            WHERE id = $1
+          `, [booking.technician_id]);
         } catch (pErr) {
           fastify.log.warn('Could not record tech payout on override:', pErr.message);
         }

@@ -543,6 +543,20 @@ async function paymentsRoutes(fastify, options) {
         `Instant cashless escrow release for #${targetId} (₹${invoice.totalJobAmount} total - ₹${invoice.partnerCommissionAmount} partner comm - ₹${invoice.upfrontFeePaid} advance = ₹${totalTechPayout})`
       ]);
 
+      if (techId) {
+        try {
+          await query(`
+            UPDATE technicians 
+            SET jobs_completed_count = (
+              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+            )
+            WHERE id = $1
+          `, [techId]);
+        } catch (syncErr) {
+          console.warn('Could not update tech jobs_completed_count in settle-payout:', syncErr.message);
+        }
+      }
+
       // 4. Record Settled Payments in payments table
       // This is the same money as the escrow row taken at payment time, so it is updated in
       // place instead of duplicated. A booking that never had an escrow row still gets one.
