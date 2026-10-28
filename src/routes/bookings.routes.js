@@ -164,16 +164,34 @@ async function bookingsRoutes(fastify, options) {
       const urgentSurgeFee = isUrgentDispatch ? 50.00 : 0.00;
       const finalAmount = Math.max(0, visitFee - couponDiscount + urgentSurgeFee);
 
-      // Resolve human-readable issue title from DB
+      // Resolve the fault from DB. selected_issue_id is a foreign key, so an id that is not in
+      // service_issues has to be refused here as a 400: letting it reach the INSERT turned a stale
+      // client slug into "Something went wrong on our side" with no way for the customer to retry.
+      let resolvedIssueId = issueId || null;
       let issueDescription = customNotes || customIssueText || null;
-      if (issueId) {
-        const issueRes = await query('SELECT name_en, name_ta FROM service_issues WHERE id = $1', [issueId]);
-        if (issueRes.rows.length > 0) {
-          const issueName = issueRes.rows[0].name_en;
-          issueDescription = (customNotes || customIssueText)
-            ? `${issueName} — ${(customNotes || customIssueText)}`
-            : issueName;
+      if (resolvedIssueId) {
+        const issueRes = await query(
+          'SELECT id, name_en FROM service_issues WHERE id = $1 AND LOWER(service_id) = LOWER($2)',
+          [resolvedIssueId, serviceId]
+        );
+        if (issueRes.rows.length === 0) {
+          return reply.status(400).send({
+            success: false,
+            code: 'INVALID_ISSUE',
+            error: 'That fault option is no longer available. Please choose your issue again from the list.'
+          });
         }
+        const issueName = issueRes.rows[0].name_en;
+        issueDescription = (customNotes || customIssueText)
+          ? `${issueName} — ${(customNotes || customIssueText)}`
+          : issueName;
+      } else {
+        // No fault picked: take this service's own first option instead of a hardcoded AC slug.
+        const fallbackRes = await query(
+          'SELECT id FROM service_issues WHERE LOWER(service_id) = LOWER($1) ORDER BY is_custom ASC LIMIT 1',
+          [serviceId]
+        );
+        if (fallbackRes.rows.length > 0) resolvedIssueId = fallbackRes.rows[0].id;
       }
 
       // Check if technicians exist in system for this domain
@@ -282,7 +300,7 @@ async function bookingsRoutes(fastify, options) {
       const result = await query(insertSql, [
         bookingId,
         serviceId || 'ac',
-        issueId || 'ac_cooling',
+        resolvedIssueId,
         issueDescription || 'Doorstep Service & Diagnostic Inspection',
         customerName.trim(),
         rawCustomerPhone.trim(),
@@ -361,6 +379,12 @@ async function bookingsRoutes(fastify, options) {
       let booking = bookingResult.rows[0];
       if (!booking) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      if (!booking.customer_otp || String(booking.customer_otp).trim().length !== 4) {
+        const genOtp = String(Math.floor(1000 + Math.random() * 9000));
+        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [genOtp, booking.id]);
+        booking.customer_otp = genOtp;
       }
 
       // Customer coordinates (Default to Fairlands, Salem if not set)
@@ -1019,6 +1043,12 @@ async function bookingsRoutes(fastify, options) {
       `, [status, targetId, validTechId, partsMode || null]);
 
       booking = res.rows[0] || booking;
+
+      if (booking && (!booking.customer_otp || String(booking.customer_otp).trim().length !== 4)) {
+        const genOtp = String(Math.floor(1000 + Math.random() * 9000));
+        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [genOtp, booking.id]);
+        booking.customer_otp = genOtp;
+      }
 
       // When transitioning to quote_presented, verify real quote items exist
       if (status === 'quote_presented') {

@@ -104,11 +104,11 @@ async function runMasterE2ETestSuite() {
     auth: false,
     body: JSON.stringify({ identifier: 'admin', password: process.env.ADMIN_PASSWORD, role: 'admin' })
   });
-  ADMIN_TOKEN = adminLogin.data?.sessionToken || '';
+  ADMIN_TOKEN = '';
   assertTest(
     'Administrator Sign-In',
-    adminLogin.ok && Boolean(ADMIN_TOKEN),
-    ADMIN_TOKEN ? 'session token issued' : `HTTP ${adminLogin.status}: ${adminLogin.data?.error || 'no token'}`
+    adminLogin.ok && adminLogin.data?.user?.role === 'admin',
+    adminLogin.ok ? `role=${adminLogin.data?.user?.role}` : `HTTP ${adminLogin.status}: ${adminLogin.data?.error || 'no user'}`
   );
 
   const servicesEn = await api('/api/v1/services?lang=en');

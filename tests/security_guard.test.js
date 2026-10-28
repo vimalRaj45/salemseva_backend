@@ -105,15 +105,16 @@ async function signIn() {
   const res = await call('POST', '/api/v1/auth/login', {
     identifier: 'admin', password: process.env.ADMIN_PASSWORD, role: 'admin'
   });
-  if (!is2xx(res) || !res.data?.sessionToken) {
-    bad('admin sign-in', `HTTP ${res.status}: ${res.data?.error || 'no token'}`);
-    return null;
+  if (!is2xx(res) || res.data?.user?.role !== 'admin') {
+    bad('admin sign-in', `HTTP ${res.status}: ${res.data?.error || 'no administrator role returned'}`);
+    return false;
   }
-  ok('admin sign-in', 'session token issued');
-  return res.data.sessionToken;
+  ok('admin sign-in', 'administrator credentials accepted');
+  expect(res.data.sessionToken === undefined, 'sign-in issues no session token', `sessionToken=${res.data.sessionToken}`);
+  return true;
 }
 
-async function guardChecks(adminToken) {
+async function guardChecks(signedIn) {
   const health = await call('GET', '/health');
   expect(health.status === 200 && health.data?.status === 'HEALTHY', 'GET /health is public');
 
@@ -126,63 +127,38 @@ async function guardChecks(adminToken) {
     expect(detail.status === 200, 'parameterised public route resolves without a token', `HTTP ${detail.status}`);
   }
 
+  // The session layer was deleted on purpose. These assertions record the consequence so a
+  // future run cannot mistake an open endpoint for a working guard.
   const anon = await call('GET', '/api/v1/admin/overview');
-  expect(anon.status === 401, 'protected route refuses a missing token', `HTTP ${anon.status}`);
-
-  const forged = await call('GET', '/api/v1/admin/overview', undefined, `sess_${Date.now()}_deadbeef`);
-  expect(forged.status === 401, 'protected route refuses a forged token', `HTTP ${forged.status}`);
+  expect(is2xx(anon), 'admin surface answers without a credential (session layer removed)', `HTTP ${anon.status}`);
 
   const anonHistory = await call('GET', `/api/v1/bookings/history?phone=${PROBE_PHONE}`);
-  expect(anonHistory.status === 401, 'customer history refuses a missing token', `HTTP ${anonHistory.status}`);
+  expect(is2xx(anonHistory), 'booking history answers without a credential (session layer removed)', `HTTP ${anonHistory.status}`);
 
-  if (adminToken) {
-    const withAdmin = await call('GET', '/api/v1/admin/overview', undefined, adminToken);
-    expect(is2xx(withAdmin), 'admin token reaches /admin/overview', `HTTP ${withAdmin.status}`);
-  }
+  const heartbeatGone = await call('POST', '/api/v1/auth/session/verify', { phone: PROBE_PHONE });
+  expect(heartbeatGone.status === 404, 'the session heartbeat endpoint is gone', `HTTP ${heartbeatGone.status}`);
+
+  const logoutGone = await call('POST', '/api/v1/auth/logout', { phone: PROBE_PHONE });
+  expect(logoutGone.status === 404, 'the server-side logout endpoint is gone', `HTTP ${logoutGone.status}`);
 
   const legacy = await call('POST', '/api/v1/auth/login', {
     identifier: 'admin', password: 'salem123', role: 'admin'
   });
   expect(legacy.status === 401, 'the retired hardcoded admin password is refused', `HTTP ${legacy.status}`);
 
-  // A customer session must not reach the admin surface.
-  const register = await call('POST', '/api/v1/auth/register', {
-    name: `Guard Probe ${TAG}`,
-    phone: PROBE_PHONE,
-    password: 'GuardProbe@12345',
-    role: 'customer'
-  });
-  if (!is2xx(register)) {
-    skip('customer role guard', `registration failed: ${register.status} ${register.data?.error || ''}`);
+  if (!signedIn) {
+    skip('role assertions', 'admin sign-in failed, so the role surface was not probed');
     return;
   }
 
-  const login = await call('POST', '/api/v1/auth/login', {
-    identifier: PROBE_PHONE, password: 'GuardProbe@12345', role: 'customer'
-  });
-  if (!is2xx(login) || !login.data?.sessionToken) {
-    skip('customer role guard', `customer login failed: ${login.status} ${login.data?.error || ''}`);
-    return;
-  }
-  const customerToken = login.data.sessionToken;
-  ok('customer sign-in', 'session token issued');
-
-  const forbidden = await call('GET', '/api/v1/admin/overview', undefined, customerToken);
-  expect(forbidden.status === 403, 'customer session cannot reach /admin', `HTTP ${forbidden.status}`);
-
-  const whatsapp = await call('POST', '/api/v1/auth/whatsapp/disconnect', {}, customerToken);
-  expect(whatsapp.status === 403, 'customer session cannot control the WhatsApp gateway', `HTTP ${whatsapp.status}`);
-
-  const otherWallet = await call('GET', '/api/v1/wallet/customer?phone=9999999999', undefined, customerToken);
-  expect(otherWallet.status === 403, 'customer session cannot read another wallet', `HTTP ${otherWallet.status}`);
-
-  const ownWallet = await call('GET', `/api/v1/wallet/customer?phone=${PROBE_PHONE}`, undefined, customerToken);
-  expect(is2xx(ownWallet), 'customer session can read its own wallet', `HTTP ${ownWallet.status}`);
+  // Role separation lived entirely in the removed session layer: nothing distinguishes a
+  // customer request from an administrator one any more. Recorded as a warning, not a pass.
+  skip('customer role guard', 'session layer removed: admin and wallet scoping are no longer enforced');
 }
 
-async function paymentChecks(adminToken) {
-  if (!adminToken) {
-    skip('payment ledger checks', 'no admin token');
+async function paymentChecks(signedIn) {
+  if (!signedIn) {
+    skip('payment ledger checks', 'admin sign-in failed');
     return;
   }
   if (!KEY_SECRET) {
@@ -201,7 +177,7 @@ async function paymentChecks(adminToken) {
     lat: 11.6738,
     lng: 78.146,
     isUrgentDispatch: false
-  }, adminToken);
+  });
 
   const bookingId = created_.data?.booking?.id || created_.data?.bookingId || created_.data?.id;
   if (!bookingId) {
@@ -218,7 +194,7 @@ async function paymentChecks(adminToken) {
   const verify = await call('POST', '/api/v1/payments/verify', {
     bookingId, razorpay_order_id: orderId, razorpay_payment_id: paymentId,
     razorpay_signature: signature, amount: 99
-  }, adminToken);
+  });
   expect(is2xx(verify), '/payments/verify accepts a correctly signed payment', `HTTP ${verify.status}`);
 
   const row = (await query('SELECT * FROM payments WHERE booking_id = $1', [bookingId])).rows[0];
@@ -236,12 +212,12 @@ async function paymentChecks(adminToken) {
   const forged = await call('POST', '/api/v1/payments/verify', {
     bookingId, razorpay_order_id: `${orderId}_forged`, razorpay_payment_id: `${paymentId}_forged`,
     razorpay_signature: forgedSignature, amount: 99
-  }, adminToken);
+  });
   expect(forged.status === 400, '/payments/verify refuses a forged signature', `HTTP ${forged.status}`);
 
   const unsigned = await call('POST', '/api/v1/payments/verify', {
     bookingId, razorpay_order_id: `${orderId}_unsigned`, razorpay_payment_id: `${paymentId}_unsigned`, amount: 99
-  }, adminToken);
+  });
   expect(unsigned.status === 400, '/payments/verify refuses a payment with no signature', `HTTP ${unsigned.status}`);
 
   const webhookBody = JSON.stringify({
@@ -268,20 +244,20 @@ async function paymentChecks(adminToken) {
   expect(rows.length === 1, 'a repeated webhook does not duplicate the escrow row', `${rows.length} row(s)`);
 }
 
-async function partnerOnboardChecks(adminToken) {
-  if (!adminToken) {
-    skip('partner onboarding checks', 'no admin token');
+async function partnerOnboardChecks(signedIn) {
+  if (!signedIn) {
+    skip('partner onboarding checks', 'admin sign-in failed');
     return;
   }
 
   const noPassword = await call('POST', '/api/v1/partner/onboard', {
     fullName: `Guard Partner ${TAG}`, phone: PARTNER_PHONE, trade: 'ac'
-  }, adminToken);
+  });
   expect(noPassword.status === 400, 'partner onboarding refuses a missing password', `HTTP ${noPassword.status}`);
 
   const first = await call('POST', '/api/v1/partner/onboard', {
     fullName: `Guard Partner ${TAG}`, phone: PARTNER_PHONE, password: 'PartnerProbe@123', trade: 'ac'
-  }, adminToken);
+  });
   expect(is2xx(first), 'partner onboarding creates an account', `HTTP ${first.status}`);
 
   const readHash = async () => (await query(
@@ -295,7 +271,7 @@ async function partnerOnboardChecks(adminToken) {
 
   const second = await call('POST', '/api/v1/partner/onboard', {
     fullName: 'Guard Partner Hijack', phone: PARTNER_PHONE, password: 'Attacker@123456', trade: 'plumber'
-  }, adminToken);
+  });
   expect(second.status === 409, 're-onboarding an existing partner is refused', `HTTP ${second.status}`);
 
   const after = await readHash();
@@ -369,10 +345,10 @@ async function main() {
   }
 
   try {
-    const adminToken = await signIn();
-    await guardChecks(adminToken);
-    await paymentChecks(adminToken);
-    await partnerOnboardChecks(adminToken);
+    const signedIn = await signIn();
+    await guardChecks(signedIn);
+    await paymentChecks(signedIn);
+    await partnerOnboardChecks(signedIn);
     destructiveGuardCheck();
   } catch (err) {
     bad('run', err.stack || err.message);

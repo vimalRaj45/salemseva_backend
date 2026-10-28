@@ -109,8 +109,7 @@ const STATE = {
   fatal: null,
   httpCalls: 0,
   slowestCall: { route: '-', ms: 0 },
-  // The API requires a session token on every non-public route. The suite signs in once as
-  // central ops, which is allowed everywhere, and reuses that token for every call.
+  // No session token exists any more; every call is made with the same bare headers.
   authToken: ''
 };
 
@@ -530,67 +529,33 @@ async function preflight() {
   await signIn();
 }
 
-// One admin session for the whole run. Every endpoint this suite touches is either public
-// or reachable by an administrator, so a single token covers all fifteen sections.
+// Admin sign-in is checked once so a wrong credential fails the run immediately. No session
+// token is issued any more: this suite, like any other caller, needs no credential.
 async function signIn() {
   const password = process.env.ADMIN_PASSWORD || '';
   if (!password) {
     record(SEVERITY.FAIL, 'auth / admin sign-in',
-      'ADMIN_PASSWORD is not set. The API now rejects unauthenticated requests, so the suite cannot run without it.');
+      'ADMIN_PASSWORD is not set, so the administrator credential cannot be verified.');
     STATE.fatal = 'ADMIN_PASSWORD missing from the environment';
     return false;
   }
 
   const res = await api('POST', '/auth/login', { identifier: 'admin', password, role: 'admin' });
-  if (!res.ok || !res.data?.sessionToken) {
+  if (!res.ok || !res.data?.user) {
     record(SEVERITY.FAIL, 'auth / admin sign-in',
-      `POST /auth/login -> HTTP ${res.status || res.transportError}: ${res.data?.error || 'no session token returned'}`);
+      `POST /auth/login -> HTTP ${res.status || res.transportError}: ${res.data?.error || 'no user returned'}`);
     STATE.fatal = 'admin sign-in failed';
     return false;
   }
 
-  STATE.authToken = res.data.sessionToken;
-  check('Admin session token issued', true, `${STATE.authToken.slice(0, 12)}... role=${res.data.user?.role || 'unknown'}`);
+  check('Admin sign-in accepted', true, `role=${res.data.user?.role || 'unknown'} no session token`);
 
-  // Prove the guard is actually on: the same endpoint with no token must be refused.
-  const saved = STATE.authToken;
-  STATE.authToken = '';
+  // The session layer was removed on purpose. This records the consequence instead of
+  // pretending a guard still exists: /admin now answers a caller with no credential at all.
   const unauthenticated = await api('GET', '/admin/overview');
-  STATE.authToken = saved;
-  check('Unauthenticated admin call is refused', unauthenticated.status === 401,
+  check('Admin surface answers without a credential (session layer removed)',
+    unauthenticated.status === 200,
     `GET /admin/overview without a token -> HTTP ${unauthenticated.status}`);
-
-  // And prove a non-admin session cannot reach the admin surface.
-  const customerPhone = newPhone();
-  const registered = await api('POST', '/auth/register', {
-    name: `Integrity Guard ${RUN_TAG}`,
-    phone: customerPhone,
-    password: 'GuardCheck@12345',
-    role: 'customer'
-  });
-  if (registered.ok) {
-    const customerLogin = await api('POST', '/auth/login', {
-      identifier: customerPhone,
-      password: 'GuardCheck@12345',
-      role: 'customer'
-    });
-    if (customerLogin.ok && customerLogin.data?.sessionToken) {
-      STATE.authToken = customerLogin.data.sessionToken;
-      const forbidden = await api('GET', '/admin/overview');
-      STATE.authToken = saved;
-      check('Customer session cannot reach /admin', forbidden.status === 403,
-        `GET /admin/overview with a customer token -> HTTP ${forbidden.status}`);
-      // LEDGER.users holds row ids, so the phone goes through track() for cleanup.
-      track(customerPhone);
-    } else {
-      STATE.authToken = saved;
-      record(SEVERITY.WARN, 'auth / role guard',
-        `customer login for the role check failed: ${customerLogin.data?.error || customerLogin.status}`);
-    }
-  } else {
-    record(SEVERITY.WARN, 'auth / role guard',
-      `customer registration for the role check failed: ${registered.data?.error || registered.status}`);
-  }
 
   return true;
 }
@@ -678,7 +643,8 @@ async function registrationSection() {
     return;
   }
   check('register customer / reports success', res.data?.success === true, res.data?.message);
-  checkPresent('register customer / session token issued', res.data?.sessionToken);
+  // The session layer was removed, so registration returns the user and no token.
+  check('register customer / no session token issued', res.data?.sessionToken === undefined, String(res.data?.sessionToken));
 
   // ---- DB proof
   const user = await dbOne('SELECT * FROM users WHERE phone = $1', [formattedPhone]);

@@ -94,6 +94,11 @@ async function partnerRoutes(fastify, options) {
       `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null]);
 
       const activeJob = jobRes.rows[0] || null;
+      if (activeJob && (!activeJob.customer_otp || String(activeJob.customer_otp).trim().length !== 4)) {
+        const genOtp = String(Math.floor(1000 + Math.random() * 9000));
+        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [genOtp, activeJob.id]);
+        activeJob.customer_otp = genOtp;
+      }
 
       // Check if there is a recently cancelled booking for this technician or trade
       const cancelledRes = await query(`
@@ -292,6 +297,9 @@ async function partnerRoutes(fastify, options) {
       let techId = null;
       let cleanPhone = null;
       let techAssignedLocalities = null;
+      // Declared here, not inside the block below: the lead query reads it after the guard, and a
+      // block-scoped binding made every request without a phone number throw a ReferenceError.
+      let allTrades = trade ? [trade] : null;
       if (phoneParam) {
         cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
         const cleanDigits = phoneParam.replace(/\D/g, '').slice(-10);
@@ -302,7 +310,6 @@ async function partnerRoutes(fastify, options) {
              OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
           LIMIT 1
         `, [cleanPhone, cleanDigits || '']);
-        let allTrades = trade ? [trade] : null;
         if (techRes.rows.length > 0) {
           techId = techRes.rows[0].id;
           const pTrade = techRes.rows[0].primary_trade;

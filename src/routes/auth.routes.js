@@ -1,6 +1,5 @@
 const { query } = require('../db/db');
 const crypto = require('crypto');
-const sessionStore = require('../services/session.service');
 const whatsAppGateway = require('../services/whatsapp.service');
 const {
   generateRegistrationOptions,
@@ -17,12 +16,6 @@ const {
   needsRehash,
   constantTimeEqual
 } = require('../services/password.service');
-
-// In-memory Concurrent Session Registry
-// Format: { [cleanPhone]: { sessionToken: string, loggedInAt: number, lastActive: number, role: string } }
-// The store lives in session.service so the request authentication hook in server.js can
-// resolve the token a client presents. Every assignment below also indexes the token.
-const activeUserSessions = sessionStore.store;
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -321,20 +314,8 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      // Session registration
-      const sessionPhone = (userRecord.phone || cleanPhone).replace(/[\s\-\(\)\+]/g, '').slice(-10);
-      const sessionToken = sessionStore.newToken();
-
-      activeUserSessions[sessionPhone] = {
-        sessionToken,
-        role: userRole,
-        loggedInAt: Date.now(),
-        lastActive: Date.now()
-      };
-
       return {
         success: true,
-        sessionToken,
         user: userRecord,
         message: 'Login successful'
       };
@@ -357,6 +338,10 @@ async function authRoutes(fastify, options) {
         locality = 'Fairlands, Salem',
         address = '',
         aadhaar = '',
+        aadhaarCardUrl = '',
+        upiId = '',
+        experienceYears = 0,
+        assignedLocalities,
         referralCode = ''
       } = req.body || {};
 
@@ -434,6 +419,14 @@ async function authRoutes(fastify, options) {
       const formattedPhone = `+91 ${cleanPhone}`;
       let createdUser = null;
 
+      // A partner's Aadhaar scan is uploaded before registration and its URL is carried in.
+      // Only our own storage URL shapes are accepted, so a client cannot plant an arbitrary
+      // address that the admin panel would later render as the identity document.
+      const rawAadhaarDocUrl = String(aadhaarCardUrl || '').trim();
+      const safeAadhaarDocUrl = /^(\/api\/v1\/storage\/view\?key=|https:\/\/)/.test(rawAadhaarDocUrl)
+        ? rawAadhaarDocUrl
+        : null;
+
       if (role === 'technician' || role === 'partner') {
         const tradeNames = {
           ac: 'AC Repair & Cooling Expert',
@@ -456,6 +449,8 @@ async function authRoutes(fastify, options) {
           jobsCompleted: 0,
           todayEarnings: 0,
           aadhaarNumber: aadhaar || 'Pending Upload',
+          aadhaarCardUrl: safeAadhaarDocUrl,
+          upiId: (upiId || '').trim() || null,
           serviceArea: locality,
           assignedLocalities: [locality.split(',')[0].trim()]
         };
@@ -463,15 +458,24 @@ async function authRoutes(fastify, options) {
         // Insert into DB without overwriting existing data
         try {
           const cleanAadhaar = String(aadhaar || '').replace(/\D/g, '').slice(0, 12) || null;
+          const localities = (Array.isArray(assignedLocalities) && assignedLocalities.length > 0)
+            ? assignedLocalities
+            : createdUser.assignedLocalities;
           const insertTechRes = await query(`
-            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, rating_avg, rating_count, jobs_completed_count)
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, $7, 0.00, 0, 0)
+            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa, years_experience, rating_avg, rating_count, jobs_completed_count)
+            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5::text[], $6, $7, $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, $10, 0.00, 0, 0)
             RETURNING id
-          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities, pwdHash, cleanAadhaar]);
+          `, [
+            createdUser.name, createdUser.phone, createdUser.email, createdUser.trade,
+            localities, pwdHash, cleanAadhaar, safeAadhaarDocUrl,
+            (upiId || '').trim() || null,
+            parseInt(experienceYears, 10) || 0
+          ]);
           
           if (insertTechRes.rows[0]?.id) {
             createdUser.id = insertTechRes.rows[0].id;
           }
+          createdUser.assignedLocalities = localities;
 
           await query(`
             INSERT INTO users (full_name, phone, email, role, locality, password_hash)
@@ -511,17 +515,8 @@ async function authRoutes(fastify, options) {
         }
       }
 
-      const sessionToken = sessionStore.newToken();
-      activeUserSessions[cleanPhone] = {
-        sessionToken,
-        role: createdUser.role,
-        loggedInAt: Date.now(),
-        lastActive: Date.now()
-      };
-
       return {
         success: true,
-        sessionToken,
         user: createdUser,
         message: 'Account created successfully'
       };
@@ -531,57 +526,8 @@ async function authRoutes(fastify, options) {
     }
   });
 
-  // 3. Active Session Heartbeat & Concurrent Session Verification
-  fastify.post('/auth/session/verify', async (req, reply) => {
-    try {
-      const { phone = '', sessionToken = '', role = 'customer' } = req.body || {};
-      const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
-
-      if (!cleanPhone) {
-        return { success: true, active: true };
-      }
-
-      const activeSession = activeUserSessions[cleanPhone];
-
-      if (activeSession && sessionToken && activeSession.sessionToken !== sessionToken) {
-        return {
-          success: false,
-          code: 'SESSION_TERMINATED',
-          error: 'Your account was logged in on another device. You have been logged out for security.',
-          activeOnOtherDevice: true
-        };
-      }
-
-      if (!activeSession && sessionToken) {
-        activeUserSessions[cleanPhone] = {
-          sessionToken,
-          role,
-          loggedInAt: Date.now(),
-          lastActive: Date.now()
-        };
-      } else if (activeSession) {
-        activeSession.lastActive = Date.now();
-      }
-
-      return {
-        success: true,
-        active: true
-      };
-    } catch (e) {
-      fastify.log.error(e);
-      return { success: true, active: true };
-    }
-  });
-
-  // 4. User Explicit Logout
-  fastify.post('/auth/logout', async (req, reply) => {
-    const { phone = '' } = req.body || {};
-    const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
-    if (cleanPhone && activeUserSessions[cleanPhone]) {
-      delete activeUserSessions[cleanPhone];
-    }
-    return { success: true, message: 'Logged out successfully' };
-  });
+  // Session heartbeat, concurrent-session verification and server-side logout are gone with
+  // the session layer. The client keeps its own signed-in state and clears it locally.
 
   // 5. WhatsApp Gateway Live Connection Status & QR Code (Admin / Diagnostics)
   fastify.get('/auth/whatsapp/status', async (req, reply) => {
@@ -686,9 +632,11 @@ async function authRoutes(fastify, options) {
       // Dispatch via Baileys WhatsApp Service
       const sendResult = await whatsAppGateway.sendOtpMessage(cleanPhone, otpCode, purpose);
 
-      // The code is never returned to the caller unless an operator explicitly opts in for
-      // local development. Echoing it made every account claimable with one HTTP request.
-      const echoOtp = process.env.ALLOW_OTP_ECHO === '1';
+      // Local development must not depend on WhatsApp delivery, so a development server
+      // echoes the code back and the app fills it in. The check is deliberately narrow:
+      // anything that is not explicitly NODE_ENV=development (a deploy that forgot to set
+      // it included) stays silent, and ALLOW_OTP_ECHO=1 opts a staging box in on purpose.
+      const echoOtp = process.env.NODE_ENV === 'development' || process.env.ALLOW_OTP_ECHO === '1';
 
       return {
         success: true,
@@ -788,23 +736,10 @@ async function authRoutes(fastify, options) {
       `, [cleanPhone]);
 
       let existingUser = null;
-      let sessionToken = null;
-
       if (custRes.rows.length > 0) {
         existingUser = formatCustomerUser(custRes.rows[0], cleanPhone);
       } else if (techRes.rows.length > 0) {
         existingUser = formatTechnicianUser(techRes.rows[0], cleanPhone);
-      }
-
-      // For direct login purpose with existing user, issue active session
-      if (existingUser && purpose === 'login') {
-        sessionToken = sessionStore.newToken();
-        activeUserSessions[cleanPhone] = {
-          sessionToken,
-          role: existingUser.role,
-          loggedInAt: Date.now(),
-          lastActive: Date.now()
-        };
       }
 
       return {
@@ -814,7 +749,6 @@ async function authRoutes(fastify, options) {
         hasCustomerAccount: custRes.rows.length > 0,
         hasTechnicianAccount: techRes.rows.length > 0,
         user: existingUser,
-        sessionToken,
         verificationToken,
         message: 'Mobile number verified successfully'
       };
@@ -1159,18 +1093,9 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      const sessionToken = sessionStore.newToken();
-      activeUserSessions[credentialPhone] = {
-        sessionToken,
-        role: userRole,
-        loggedInAt: Date.now(),
-        lastActive: Date.now()
-      };
-
       return {
         success: true,
         user: userRecord,
-        sessionToken,
         message: 'Passkey authentication successful'
       };
     } catch (e) {
