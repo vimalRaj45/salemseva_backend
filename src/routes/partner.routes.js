@@ -70,14 +70,14 @@ async function partnerRoutes(fastify, options) {
         AND status IN ('matching', 'accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress')
         AND id NOT IN (
           SELECT booking_id FROM technician_rejected_leads 
-          WHERE (technician_id = $1::text OR technician_id = $3)
+          WHERE (technician_id = $1::text OR technician_id = $3::text)
             AND rejected_at >= CURRENT_DATE
         )
         AND (
           customer_phone IS NULL OR RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) NOT IN (
             SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\D', '', 'g'), 10) 
             FROM technician_rejected_leads 
-            WHERE (technician_id = $1::text OR technician_id = $3)
+            WHERE (technician_id = $1::text OR technician_id = $3::text)
               AND rejected_at >= CURRENT_DATE
               AND customer_phone IS NOT NULL
           )
