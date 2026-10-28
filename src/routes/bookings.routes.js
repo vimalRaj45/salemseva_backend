@@ -1012,7 +1012,8 @@ async function bookingsRoutes(fastify, options) {
         SET status = $1::booking_status,
             technician_id = COALESCE($3::uuid, technician_id),
             parts_mode = COALESCE($4::parts_mode, parts_mode),
-            matched_at = CASE WHEN ($1::text = 'accepted' OR $1::text = 'en_route' OR $1::text = 'preparing') AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END
+            matched_at = CASE WHEN ($1::text = 'accepted' OR $1::text = 'en_route' OR $1::text = 'preparing') AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END,
+            arrived_at = CASE WHEN ($1::text = 'arrived' OR $1::text = 'in_progress') AND arrived_at IS NULL THEN CURRENT_TIMESTAMP ELSE arrived_at END
         WHERE id = $2 
         RETURNING *
       `, [status, targetId, validTechId, partsMode || null]);
@@ -1350,7 +1351,12 @@ async function bookingsRoutes(fastify, options) {
           INSERT INTO payments (booking_id, amount_total, pg_fee, platform_commission, tech_payout_amount, status, payment_method, settled_at)
           VALUES ($1, $2, $3, $4, 0.00, 'refunded', 'Razorpay Gateway Refund', NOW())
         `, [booking.id, originalAmount, gatewayChargeDeduction, platformFeeDeduction]);
-      } catch (payErr) {}
+      } catch (payErr) {
+        // An empty catch here meant a cancelled booking could be reported as refunded with no
+        // ledger row behind it. The booking update has already happened, so the only correct
+        // behaviour left is to surface it loudly for reconciliation.
+        fastify.log.error('Refund ledger write failed for booking ' + booking.id + ': ' + payErr.message);
+      }
 
       // Audit Log
       await query(`

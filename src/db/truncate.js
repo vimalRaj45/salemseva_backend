@@ -1,6 +1,8 @@
 ﻿const { query, pool } = require('./db');
+const { requireDestructive } = require('./destructive.guard');
 
 async function truncateTransactionalData() {
+  requireDestructive('truncate.js');
   console.log('Shazu One: Truncating all transactional test data...');
   try {
     // 1. Fetch all existing tables in public schema

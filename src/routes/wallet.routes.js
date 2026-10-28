@@ -9,6 +9,10 @@ async function walletRoutes(fastify, options) {
   // Helper to normalize phone numbers for consistent SQL lookup
   const sanitizePhone = (phone) => (phone || '').replace(/[\s\-\(\)]/g, '');
 
+  // Stored format for a brand-new identity. Registration writes "+91 9876543210", so
+  // anything created here must match it or one person ends up with two user rows.
+  const canonicalPhone = (phone) => `+91 ${String(phone || '').replace(/\D/g, '').slice(-10)}`;
+
   // ==========================================
   // 1. CUSTOMER WALLET & REWARDS ENDPOINTS
   // ==========================================
@@ -26,7 +30,7 @@ async function walletRoutes(fastify, options) {
       let userRes = await query(`
         SELECT id, full_name, phone, wallet_balance, referral_code, referred_by 
         FROM users 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         LIMIT 1
       `, [cleanPhone]);
 
@@ -35,19 +39,20 @@ async function walletRoutes(fastify, options) {
       // If user doesn't exist, create persistent record in PostgreSQL
       if (!user) {
         const genCode = `SALEM${Math.floor(100 + Math.random() * 900)}`;
+        const storePhone = canonicalPhone(cleanPhone);
         const createRes = await query(`
           INSERT INTO users (phone, full_name, role, wallet_balance, referral_code, locality, preferred_lang)
           VALUES ($1, 'Customer', 'customer', 50.00, $2, 'Fairlands', 'ta')
           ON CONFLICT (phone) DO UPDATE SET wallet_balance = users.wallet_balance
           RETURNING id, full_name, phone, wallet_balance, referral_code, referred_by
-        `, [cleanPhone, genCode]);
+        `, [storePhone, genCode]);
         user = createRes.rows[0];
 
         // Seed initial signup bonus transaction in DB
         await query(`
           INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
           VALUES ($1, $2, 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on Shazu One')
-        `, [user.id, cleanPhone]);
+        `, [user.id, user.phone]);
       }
 
       // 2. Fetch all wallet transactions for this user from DB
@@ -61,7 +66,7 @@ async function walletRoutes(fastify, options) {
           description, 
           created_at as timestamp
         FROM wallet_transactions 
-        WHERE REPLACE(REPLACE(user_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         ORDER BY created_at DESC
       `, [cleanPhone]);
 
@@ -71,7 +76,7 @@ async function walletRoutes(fastify, options) {
           COUNT(*) FILTER (WHERE category = 'REFERRAL_REWARD') as friends_completed,
           COALESCE(SUM(amount) FILTER (WHERE category = 'REFERRAL_REWARD'), 0) as credits_from_referrals
         FROM wallet_transactions
-        WHERE REPLACE(REPLACE(user_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
       `, [cleanPhone]);
 
       const friendsCompleted = parseInt(refCountRes.rows[0]?.friends_completed || 0, 10);
@@ -113,6 +118,15 @@ async function walletRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Customer phone number is required' });
       }
 
+      // Wallet top-ups are an internal operation. This endpoint used to let any caller mint
+      // credits for any number, so it now requires the internal key whenever one is
+      // configured, and always refuses the request in production if none is set.
+      const internalKey = process.env.INTERNAL_API_KEY;
+      const keyRequired = Boolean(internalKey) || process.env.NODE_ENV === 'production';
+      if (keyRequired && req.headers['x-internal-key'] !== internalKey) {
+        return reply.status(403).send({ success: false, error: 'Wallet credit requires the internal API key.' });
+      }
+
       const cleanPhone = sanitizePhone(phone);
       const creditAmt = parseFloat(amount) || 50;
 
@@ -121,7 +135,7 @@ async function walletRoutes(fastify, options) {
         UPDATE users 
         SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
             updated_at = CURRENT_TIMESTAMP
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
         RETURNING id, phone, wallet_balance
       `, [creditAmt, cleanPhone]);
 
@@ -132,7 +146,7 @@ async function walletRoutes(fastify, options) {
           INSERT INTO users (phone, full_name, role, wallet_balance, referral_code)
           VALUES ($1, 'Customer', 'customer', $2, 'SALEM' || FLOOR(100 + RANDOM()*900)::text)
           RETURNING id, phone, wallet_balance
-        `, [cleanPhone, creditAmt]);
+        `, [canonicalPhone(cleanPhone), creditAmt]);
         user = insertUser.rows[0];
       }
 
@@ -141,7 +155,7 @@ async function walletRoutes(fastify, options) {
         INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
         VALUES ($1, $2, $3, $4, 'CREDIT', $5, $6)
         RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
-      `, [user.id, cleanPhone, title, creditAmt, category, description]);
+      `, [user.id, user.phone, title, creditAmt, category, description]);
 
       return {
         success: true,
@@ -170,8 +184,8 @@ async function walletRoutes(fastify, options) {
 
       // Check current balance
       const userRes = await query(`
-        SELECT id, wallet_balance FROM users 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+        SELECT id, phone, wallet_balance FROM users 
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
       `, [cleanPhone]);
 
       if (!userRes.rows.length) {
@@ -207,7 +221,7 @@ async function walletRoutes(fastify, options) {
         RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
       `, [
         user.id, 
-        cleanPhone, 
+        user.phone, 
         `Redeemed on Booking #${bookingId}`, 
         actualDebit, 
         `20% Burn Cap Applied for Service #${bookingId}`
@@ -255,8 +269,8 @@ async function walletRoutes(fastify, options) {
         UPDATE users 
         SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
             updated_at = CURRENT_TIMESTAMP
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
-        RETURNING id, wallet_balance
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
+        RETURNING id, phone, wallet_balance
       `, [rewardAmt, cleanPhone]);
 
       let user = updateRes.rows[0];
@@ -264,8 +278,8 @@ async function walletRoutes(fastify, options) {
         const insertRes = await query(`
           INSERT INTO users (phone, full_name, role, wallet_balance, referral_code)
           VALUES ($1, 'Customer', 'customer', $2, 'SALEM100')
-          RETURNING id, wallet_balance
-        `, [cleanPhone, rewardAmt]);
+          RETURNING id, phone, wallet_balance
+        `, [canonicalPhone(cleanPhone), rewardAmt]);
         user = insertRes.rows[0];
       }
 
@@ -276,7 +290,7 @@ async function walletRoutes(fastify, options) {
         RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
       `, [
         user.id,
-        cleanPhone,
+        user.phone,
         `Referral Completed: ${friendName}`,
         rewardAmt,
         `Friend ${friendName} completed their 1st service in ${locality}. +${rewardAmt} Seva Credits unlocked!`
@@ -316,7 +330,7 @@ async function walletRoutes(fastify, options) {
       let techRes = await query(`
         SELECT id, full_name, phone, star_points, star_tier, zero_comm_unlocked, primary_trade 
         FROM technicians 
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         LIMIT 1
       `, [cleanPhone]);
 
@@ -340,7 +354,7 @@ async function walletRoutes(fastify, options) {
           payout_status as "payoutStatus",
           upi_ref as "upiRef"
         FROM technician_referrals
-        WHERE REPLACE(REPLACE(referrer_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(referrer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         ORDER BY created_at DESC
       `, [cleanPhone]);
 
@@ -355,7 +369,7 @@ async function walletRoutes(fastify, options) {
           description,
           TO_CHAR(created_at, 'Mon DD, YYYY') as date
         FROM technician_payouts
-        WHERE REPLACE(REPLACE(technician_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(technician_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         ORDER BY created_at DESC
       `, [cleanPhone]);
 
@@ -475,7 +489,7 @@ async function walletRoutes(fastify, options) {
         SET 
           star_points = LEAST(30, COALESCE(star_points, 0) + 3),
           zero_comm_unlocked = CASE WHEN COALESCE(star_points, 0) + 3 >= 30 THEN TRUE ELSE zero_comm_unlocked END
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         RETURNING star_points, zero_comm_unlocked
       `, [cleanReferrer]);
 
@@ -503,7 +517,7 @@ async function walletRoutes(fastify, options) {
           COALESCE(SUM(incentive_amount), 0)::numeric as total_earned,
           COALESCE(SUM(incentive_amount) FILTER (WHERE payout_status = 'AVAILABLE_FOR_PAYOUT'), 0)::numeric as available_payout
         FROM technician_referrals
-        WHERE REPLACE(REPLACE(referrer_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(referrer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
       `, [cleanReferrer]);
 
       return {
@@ -547,7 +561,7 @@ async function walletRoutes(fastify, options) {
       const availRes = await query(`
         SELECT COALESCE(SUM(incentive_amount), 0)::numeric as available_sum
         FROM technician_referrals
-        WHERE REPLACE(REPLACE(referrer_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(referrer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
           AND payout_status = 'AVAILABLE_FOR_PAYOUT'
       `, [cleanPhone]);
 
@@ -564,7 +578,7 @@ async function walletRoutes(fastify, options) {
         UPDATE technician_referrals
         SET payout_status = 'SETTLED_TO_UPI',
             upi_ref = $1
-        WHERE REPLACE(REPLACE(referrer_phone, ' ', ''), '-', '') = $2
+        WHERE RIGHT(REGEXP_REPLACE(referrer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
           AND payout_status = 'AVAILABLE_FOR_PAYOUT'
       `, [utrRef, cleanPhone]);
 
@@ -594,7 +608,7 @@ async function walletRoutes(fastify, options) {
       const settledRes = await query(`
         SELECT COALESCE(SUM(amount), 0)::numeric as settled_sum
         FROM technician_payouts
-        WHERE REPLACE(REPLACE(technician_phone, ' ', ''), '-', '') = $1
+        WHERE RIGHT(REGEXP_REPLACE(technician_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
       `, [cleanPhone]);
 
       return {

@@ -1,5 +1,7 @@
 const { query } = require('../db/db');
-const crypto = require('crypto');
+// Password hashing lives in one place so onboarding and sign-in agree on the format.
+// See services/password.service.js.
+const { hashPassword } = require('../services/password.service');
 
 async function partnerRoutes(fastify, options) {
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
@@ -728,10 +730,19 @@ async function partnerRoutes(fastify, options) {
         aadhaarCardUrl
       } = req.body;
 
-      const cleanPhone = (phone.startsWith('+91') ? phone : `+91${phone}`).replace(/[\s\-]/g, '');
+      const phoneDigits = String(phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (phoneDigits.length !== 10) {
+        return reply.status(400).send({ success: false, error: 'A valid 10-digit mobile number is required' });
+      }
+      const cleanPhone = `+91${phoneDigits}`;
       const cleanAadhaar = aadhaar ? aadhaar.replace(/[^0-9]/g, '').padEnd(12, '0').slice(0, 12) : null;
-      const partnerPwd = (password && password.trim()) || 'salem123';
-      const partnerPwdHash = crypto.createHash('sha256').update(partnerPwd).digest('hex');
+      // There used to be a 'salem123' default here, so every partner who left the field blank
+      // shared one publicly known password. A password is now mandatory, and it is hashed the
+      // same way sign-in expects it.
+      if (!password || String(password).trim().length < 6) {
+        return reply.status(400).send({ success: false, error: 'Password is required and must be at least 6 characters' });
+      }
+      const partnerPwdHash = hashPassword(password);
       // Derive phone-linked UPI if explicit UPI not given
       const cleanPayoutDigits = payoutPhone ? String(payoutPhone).replace(/[^0-9]/g, '').slice(-10) : '';
       const resolvedUpi = upiId?.trim() || (cleanPayoutDigits ? `${cleanPayoutDigits}@ybl` : null);
@@ -757,17 +768,7 @@ async function partnerRoutes(fastify, options) {
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
           rating_avg, rating_count, jobs_completed_count
         ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0)
-        ON CONFLICT (phone) DO UPDATE SET
-          full_name = EXCLUDED.full_name,
-          primary_trade = EXCLUDED.primary_trade,
-          secondary_trades = COALESCE(EXCLUDED.secondary_trades, technicians.secondary_trades),
-          years_experience = COALESCE(EXCLUDED.years_experience, technicians.years_experience),
-          assigned_localities = COALESCE(EXCLUDED.assigned_localities, technicians.assigned_localities),
-          aadhaar_number = COALESCE(EXCLUDED.aadhaar_number, technicians.aadhaar_number),
-          upi_vpa = COALESCE(EXCLUDED.upi_vpa, technicians.upi_vpa),
-          aadhaar_card_url = COALESCE(EXCLUDED.aadhaar_card_url, technicians.aadhaar_card_url),
-          aadhaar_uploaded_at = COALESCE(EXCLUDED.aadhaar_uploaded_at, technicians.aadhaar_uploaded_at),
-          password_hash = EXCLUDED.password_hash
+        ON CONFLICT (phone) DO NOTHING
         RETURNING *;
       `;
 
@@ -783,6 +784,16 @@ async function partnerRoutes(fastify, options) {
         aadhaarCardUrl || null,
         partnerPwdHash
       ]);
+
+      // Onboarding creates an account; it never rewrites one. The upsert that used to sit here
+      // let anyone who knew a partner's phone number replace that partner's password, payout UPI
+      // and KYC details from an anonymous request.
+      if (res.rows.length === 0) {
+        return reply.status(409).send({
+          success: false,
+          error: 'A partner account already exists for this mobile number. Sign in instead of onboarding again.'
+        });
+      }
 
       try {
         await query(`

@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db/db');
+// The same length-safe comparison the password service uses, so there is one implementation.
+const { constantTimeEqual: secureEqual } = require('../services/password.service');
 const {
   getCustomerPlatformFeePercent,
   getPaymentGatewayFeePercent,
@@ -10,8 +12,15 @@ const {
 } = require('../services/commission.service');
 
 async function paymentsRoutes(fastify, options) {
-  const KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_Tjo8HdYyapYlnO';
-  const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || 'gZnr5zqX1bsZwg926t3rZfFu';
+  // No hardcoded key material: the pair that used to sit here as a fallback is in source
+  // control and must be treated as compromised. Missing keys now fail loudly.
+  const KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+  const KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+  const PAYMENTS_CONFIGURED = Boolean(KEY_ID && KEY_SECRET);
+
+  // Unsigned payments are only tolerated when an operator explicitly opts in for local
+  // testing. A missing signature used to be treated as a valid payment.
+  const ALLOW_UNSIGNED = process.env.PAYMENTS_ALLOW_UNSIGNED === '1';
 
   // 1. Create Real Razorpay Order for Escrow Deposit
   fastify.post('/payments/create-order', async (req, reply) => {
@@ -24,6 +33,13 @@ async function paymentsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Valid payment amount is required' });
       }
       const orderAmountInPaise = Math.round(parseFloat(amount) * 100);
+
+      if (!PAYMENTS_CONFIGURED) {
+        return reply.status(503).send({
+          success: false,
+          error: 'Razorpay is not configured on this server (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing).'
+        });
+      }
 
       try {
         // Call Razorpay Orders API
@@ -91,18 +107,25 @@ async function paymentsRoutes(fastify, options) {
       const signature = req.headers['x-razorpay-signature'];
       const payload = req.body;
 
-      // In production, verify signature if secret configured
-      if (signature && webhookSecret) {
-        const expectedSignature = crypto
-          .createHmac('sha256', webhookSecret)
-          .update(typeof req.body === 'string' ? req.body : JSON.stringify(req.body))
-          .digest('hex');
-
-        // Log if mismatch in dev mode but continue processing safely
-        if (expectedSignature !== signature && process.env.NODE_ENV === 'production') {
-          fastify.log.warn('Razorpay webhook signature mismatch');
+      // Fail closed. Previously a request that simply omitted the signature header was
+      // processed, so anyone could post a fake payment.captured and advance a booking.
+      if (!ALLOW_UNSIGNED) {
+        if (!signature) {
+          fastify.log.warn('[Razorpay Webhook] Rejected: missing x-razorpay-signature header');
+          return reply.status(400).send({ error: 'Missing webhook signature' });
+        }
+        if (!webhookSecret) {
+          fastify.log.error('[Razorpay Webhook] Rejected: no webhook secret configured');
+          return reply.status(503).send({ error: 'Webhook verification is not configured' });
+        }
+        const signedBody = req.rawBody || (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+        const expectedSignature = crypto.createHmac('sha256', webhookSecret).update(signedBody).digest('hex');
+        if (!secureEqual(expectedSignature, signature)) {
+          fastify.log.warn('[Razorpay Webhook] Rejected: signature mismatch');
           return reply.status(400).send({ error: 'Invalid webhook signature' });
         }
+      } else {
+        fastify.log.warn('[Razorpay Webhook] Signature check bypassed because PAYMENTS_ALLOW_UNSIGNED=1');
       }
 
       const event = payload?.event;
@@ -118,15 +141,23 @@ async function paymentsRoutes(fastify, options) {
         if (bookingId) {
           const parsedAmount = (parseFloat(amountPaise) || 9900) / 100;
           
-          // Upsert into payments ledger
+          // Record the escrow deposit against the columns that actually exist. The previous
+          // statement named transaction_id and a status label that is not in the payment_status
+          // enum, and the error was swallowed, so no payment was ever recorded here.
+          // tech_payout_amount and platform_commission are NOT NULL with no default, so both
+          // have to be supplied even though the split is only decided at settlement.
+          // Keep the order id exactly as Razorpay sent it. It used to be prefixed with
+          // `order_`, which never matched the id stored by /payments/verify, so the conflict
+          // target missed and every webhook added a second escrow row for the same money.
+          const ledgerOrderId = orderId || `order_${paymentId || Date.now()}`;
           await query(`
-            INSERT INTO payments (
-              booking_id, transaction_id, amount, status, payment_method, escrow_held, created_at
-            ) VALUES ($1, $2, $3, 'HELD_IN_ESCROW', 'RAZORPAY_ESCROW', true, NOW())
-            ON CONFLICT (transaction_id) DO UPDATE SET status = 'HELD_IN_ESCROW';
-          `, [bookingId, paymentId || `pay_${Date.now()}`, parsedAmount]).catch(err => {
-            fastify.log.warn('Webhook DB insert note:', err.message);
-          });
+            INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
+            VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+            ON CONFLICT (razorpay_order_id) DO UPDATE
+              SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
+                  amount_total = EXCLUDED.amount_total,
+                  status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
+          `, [bookingId, ledgerOrderId, paymentId || `pay_${Date.now()}`, parsedAmount]);
 
           // Check if this was a diagnostic advance or quote approval
           const isQuoteApproval = paymentEntity.notes?.type === 'FINAL_SETTLEMENT';
@@ -168,7 +199,7 @@ async function paymentsRoutes(fastify, options) {
       const payment = pRes.rows[0] || null;
 
       const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status)
-        || (payment && (payment.status === 'HELD_IN_ESCROW' || payment.status === 'settled' || payment.status === 'escrow_held' || payment.status === 'tech_compensated'));
+        || (payment && (payment.status === 'escrow_held' || payment.status === 'captured' || payment.status === 'settled'));
 
       return {
         success: true,
@@ -210,10 +241,21 @@ async function paymentsRoutes(fastify, options) {
           .createHmac('sha256', KEY_SECRET)
           .update(body.toString())
           .digest('hex');
-        isSignatureValid = (expectedSignature === razorpay_signature);
-      } else {
-        // Fallback for demo instant UPI / sandbox payment mode
+        isSignatureValid = secureEqual(expectedSignature, razorpay_signature);
+      } else if (ALLOW_UNSIGNED) {
+        // Local testing only, and always logged.
         isSignatureValid = true;
+        fastify.log.warn('[payments/verify] accepting an unsigned payment because PAYMENTS_ALLOW_UNSIGNED=1');
+      } else {
+        return reply.status(400).send({
+          success: false,
+          error: 'Razorpay signature is required to confirm a payment.'
+        });
+      }
+
+      if (!isSignatureValid) {
+        fastify.log.warn('[payments/verify] signature mismatch for payment ' + (razorpay_payment_id || 'unknown'));
+        return reply.status(400).send({ success: false, error: 'Invalid Razorpay payment signature.' });
       }
 
       const paymentTxId = razorpay_payment_id || `pay_${Date.now()}`;
@@ -222,28 +264,32 @@ async function paymentsRoutes(fastify, options) {
 
       // Record in Neon DB Payments Escrow Ledger
       const insertSql = `
-        INSERT INTO payments (
-          booking_id, 
-          transaction_id, 
-          amount, 
-          status, 
-          payment_method, 
-          escrow_held, 
-          created_at
-        ) VALUES ($1, $2, $3, 'HELD_IN_ESCROW', 'RAZORPAY_ESCROW', true, NOW())
+        INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
+        VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+        ON CONFLICT (razorpay_order_id) DO UPDATE
+          SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
+              amount_total = EXCLUDED.amount_total,
+              status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
         RETURNING *;
       `;
 
+      // A failed ledger write must stop the flow. This used to be caught and logged, then
+      // the booking was advanced anyway, leaving a paid booking with no payment row.
       let dbRecord = null;
       try {
         const dbRes = await query(insertSql, [
           bookingId,
+          orderTxId,
           paymentTxId,
           parsedAmount
         ]);
         dbRecord = dbRes.rows[0];
       } catch (dbErr) {
-        fastify.log.warn('DB recording note:', dbErr.message);
+        fastify.log.error('[payments/verify] could not record the payment ledger row: ' + dbErr.message);
+        return reply.status(500).send({
+          success: false,
+          error: 'Payment was received but could not be recorded. Please contact support with your payment id.'
+        });
       }
 
       // Automatically advance booking to 'en_route' upon Part 1 payment or 'quote_approved' upon Part 2 payment
@@ -407,16 +453,40 @@ async function paymentsRoutes(fastify, options) {
   fastify.post('/payments/escrow/release', async (req, reply) => {
     try {
       const { bookingId, customerOtp, rating = 5, reviewComment } = req.body;
-      
-      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
-      let booking = bRes.rows[0];
-      if (!booking) {
-        const latest = await query('SELECT * FROM bookings ORDER BY created_at DESC LIMIT 1');
-        booking = latest.rows[0];
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required to release escrow.' });
       }
+
+      // Releasing escrow moves money to the partner, so it must be tied to one booking that
+      // the customer has actually accepted. The old version released the newest booking when
+      // the supplied id did not match, and never checked the completion OTP.
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+      const booking = bRes.rows[0];
 
       if (!booking) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      if (!booking.customer_otp) {
+        return reply.status(409).send({
+          success: false,
+          error: 'This booking has no completion OTP on file, so escrow cannot be released.'
+        });
+      }
+
+      if (!customerOtp || !secureEqual(String(customerOtp).trim(), String(booking.customer_otp).trim())) {
+        return reply.status(403).send({
+          success: false,
+          error: 'A valid completion OTP is required to release escrow.'
+        });
+      }
+
+      const alreadySettled = await query(`
+        SELECT 1 FROM payments WHERE booking_id = $1 AND status = 'settled' LIMIT 1
+      `, [booking.id]);
+      if (alreadySettled.rows.length > 0) {
+        return reply.status(409).send({ success: false, error: 'Escrow for this booking has already been released.' });
       }
 
       const targetId = booking.id;
@@ -474,10 +544,29 @@ async function paymentsRoutes(fastify, options) {
       ]);
 
       // 4. Record Settled Payments in payments table
-      await query(`
-        INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-        VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant Escrow Released)', $5, NOW())
+      // This is the same money as the escrow row taken at payment time, so it is updated in
+      // place instead of duplicated. A booking that never had an escrow row still gets one.
+      const settledRes = await query(`
+        UPDATE payments
+        SET status = 'settled',
+            amount_total = $2,
+            tech_payout_amount = $3,
+            platform_commission = $4,
+            payment_method = 'UPI (Instant Escrow Released)',
+            payout_utr = $5,
+            settled_at = NOW()
+        WHERE id = (
+          SELECT id FROM payments WHERE booking_id = $1
+          ORDER BY created_at DESC NULLS LAST LIMIT 1
+        )
       `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut, utrNumber]);
+
+      if (settledRes.rowCount === 0) {
+        await query(`
+          INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
+          VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant Escrow Released)', $5, NOW())
+        `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut, utrNumber]);
+      }
 
       // 5. Record Review if provided
       if (rating) {

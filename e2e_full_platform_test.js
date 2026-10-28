@@ -1,5 +1,12 @@
 /**
  * ============================================================================
+ * SUPERSEDED - use tests/e2e_full_suite.test.js (npm run test:e2e) instead.
+ *
+ * This script predates the authorization layer: it signs in with the retired literal
+ * 'salem123' password and calls protected routes with no session token, so every request
+ * it makes now fails with 401. It is kept only as a record of the earlier flow.
+ * ============================================================================
+ *
  * SALEMSEVA: FULL PLATFORM END-TO-END (E2E) AUTOMATED TEST SUITE
  * ============================================================================
  * Scope: Complete end-to-end operational verification across all subsystems:

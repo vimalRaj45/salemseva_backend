@@ -250,7 +250,7 @@ async function adminRoutes(fastify, options) {
         SET is_blocked = $1,
             block_reason = CASE WHEN $1 = TRUE THEN $2 ELSE NULL END,
             blocked_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
-        WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = REPLACE(REPLACE($3, ' ', ''), '-', '')
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($3, '\\D', '', 'g'), 10)
         RETURNING *
       `, [isBlocked, reason || 'Administrative block by Shazu One Central Operations', cleanPhone]);
 
@@ -299,24 +299,51 @@ async function adminRoutes(fastify, options) {
   fastify.get('/admin/customers', async (req, reply) => {
     try {
       const result = await query(`
-        SELECT 
-          COALESCE(b.customer_phone, u.phone) as customer_phone,
-          COALESCE(MAX(b.customer_name), MAX(u.full_name), 'Salem Customer') as customer_name,
-          COALESCE(MAX(b.locality), MAX(u.locality), 'Fairlands') as locality,
-          MAX(b.service_address) as latest_address,
-          COUNT(b.id) as total_orders,
-          COALESCE(SUM(b.final_amount), 0) as total_spent,
-          MAX(b.created_at) as last_order_date,
-          COUNT(CASE WHEN b.status = 'completed' THEN 1 END) as completed_orders,
-          COUNT(CASE WHEN b.status IN ('matching', 'accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented') THEN 1 END) as active_orders,
-          BOOL_OR(COALESCE(u.is_blocked, FALSE)) as is_blocked,
-          MAX(u.block_reason) as block_reason,
-          MAX(u.blocked_at) as blocked_at
-        FROM bookings b
-        FULL OUTER JOIN users u ON b.customer_phone = u.phone
-        WHERE (b.customer_phone IS NOT NULL OR (u.phone IS NOT NULL AND u.role != 'admin'))
-        GROUP BY COALESCE(b.customer_phone, u.phone)
-        ORDER BY total_orders DESC, last_order_date DESC
+        WITH people AS (
+          SELECT
+            RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) as phone_key,
+            MAX(phone) as phone,
+            MAX(full_name) as full_name,
+            MAX(locality) as locality,
+            BOOL_OR(COALESCE(is_blocked, FALSE)) as is_blocked,
+            MAX(block_reason) as block_reason,
+            MAX(blocked_at) as blocked_at
+          FROM users
+          WHERE role != 'admin'
+          GROUP BY 1
+        ),
+        orders AS (
+          SELECT
+            RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10) as phone_key,
+            MAX(customer_name) as customer_name,
+            MAX(locality) as locality,
+            MAX(service_address) as latest_address,
+            COUNT(*) as total_orders,
+            COALESCE(SUM(final_amount), 0) as total_spent,
+            MAX(created_at) as last_order_date,
+            COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_orders,
+            COUNT(CASE WHEN status IN ('matching', 'accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented') THEN 1 END) as active_orders
+          FROM bookings
+          WHERE RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10) <> ''
+          GROUP BY 1
+        )
+        SELECT
+          COALESCE(p.phone, o.phone_key) as customer_phone,
+          COALESCE(o.customer_name, p.full_name, 'Salem Customer') as customer_name,
+          COALESCE(o.locality, p.locality, 'Fairlands') as locality,
+          o.latest_address,
+          COALESCE(o.total_orders, 0) as total_orders,
+          COALESCE(o.total_spent, 0) as total_spent,
+          o.last_order_date,
+          COALESCE(o.completed_orders, 0) as completed_orders,
+          COALESCE(o.active_orders, 0) as active_orders,
+          COALESCE(p.is_blocked, FALSE) as is_blocked,
+          p.block_reason,
+          p.blocked_at
+        FROM people p
+        FULL OUTER JOIN orders o ON p.phone_key = o.phone_key
+        WHERE COALESCE(p.phone_key, o.phone_key) <> ''
+        ORDER BY total_orders DESC, last_order_date DESC NULLS LAST
       `);
 
       return {
@@ -343,7 +370,7 @@ async function adminRoutes(fastify, options) {
           t.rating_avg as technician_rating
         FROM bookings b
         LEFT JOIN technicians t ON b.technician_id = t.id
-        WHERE b.customer_phone = $1
+        WHERE RIGHT(REGEXP_REPLACE(b.customer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
         ORDER BY b.created_at DESC
       `, [phone]);
 
@@ -767,14 +794,12 @@ async function adminRoutes(fastify, options) {
 
         // If compensateTech is true, record compensation in payments
         if (compensateTech) {
-          try {
-            await query(`
-              INSERT INTO payments (booking_id, amount, status, tech_payout_amount, payment_method)
-              VALUES ($1, 99.00, 'tech_compensated', 99.00, 'admin_travel_allowance')
-            `, [bookingId]);
-          } catch (e) {
-            fastify.log.warn('Could not insert payment compensation row:', e.message);
-          }
+          // Payments has no `amount` column and `tech_compensated` is not a payment_status
+          // label, so this insert never landed. Travel allowance is a settled payout.
+          await query(`
+            INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, settled_at)
+            VALUES ($1, 99.00, 99.00, 0.00, 'settled', 'admin_travel_allowance', NOW())
+          `, [bookingId]);
         }
       }
 
@@ -798,12 +823,13 @@ async function adminRoutes(fastify, options) {
 
       // Release advance payment and mark refunded to customer wallet
       try {
+        // payments has no refund_amount column. The refunded figure is amount_total, which
+        // stays on the row, so marking the status is the whole ledger write.
         await query(`
           UPDATE payments
           SET status = 'refunded',
-              refund_amount = COALESCE(amount, amount_total, 49.00),
               settled_at = NOW()
-          WHERE booking_id = $1 AND status != 'refunded'
+          WHERE booking_id = $1 AND status <> 'refunded'
         `, [bookingId]);
       } catch (refundErr) {
         fastify.log.warn('Release technician customer refund note: ' + refundErr.message);
@@ -889,14 +915,12 @@ async function adminRoutes(fastify, options) {
 
         // Optional travel compensation
         if (compensateTech) {
-          try {
-            await query(`
-              INSERT INTO payments (booking_id, amount_total, amount, status, tech_payout_amount, payment_method, settled_at)
-              VALUES ($1, 99.00, 99.00, 'tech_compensated', 99.00, 'admin_travel_allowance', NOW())
-            `, [bookingId]);
-          } catch (payErr) {
-            fastify.log.warn('Travel compensation payment insert failed: ' + payErr.message);
-          }
+          // Same two defects as the release-technician path: no `amount` column and a status
+          // label outside the payment_status enum. Both are corrected here.
+          await query(`
+            INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, settled_at)
+            VALUES ($1, 99.00, 99.00, 0.00, 'settled', 'admin_travel_allowance', NOW())
+          `, [bookingId]);
         }
       }
 
@@ -920,12 +944,12 @@ async function adminRoutes(fastify, options) {
 
       // Release advance payment and mark refunded to customer wallet
       try {
+        // payments has no refund_amount column; amount_total already holds the refunded sum.
         await query(`
           UPDATE payments
           SET status = 'refunded',
-              refund_amount = COALESCE(amount, amount_total, 49.00),
               settled_at = NOW()
-          WHERE booking_id = $1 AND status != 'refunded'
+          WHERE booking_id = $1 AND status <> 'refunded'
         `, [bookingId]);
       } catch (refundErr) {
         fastify.log.warn('Admin cancel customer refund note: ' + refundErr.message);

@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const crypto = require('crypto');
+const sessionStore = require('../services/session.service');
 const whatsAppGateway = require('../services/whatsapp.service');
 const {
   generateRegistrationOptions,
@@ -8,14 +9,20 @@ const {
   verifyAuthenticationResponse
 } = require('@simplewebauthn/server');
 
-function hashPassword(pwd) {
-  if (!pwd) return '';
-  return crypto.createHash('sha256').update(pwd.trim()).digest('hex');
-}
+// Password hashing lives in one place so every route module agrees on the format.
+// See services/password.service.js.
+const {
+  hashPassword,
+  verifyPassword,
+  needsRehash,
+  constantTimeEqual
+} = require('../services/password.service');
 
 // In-memory Concurrent Session Registry
 // Format: { [cleanPhone]: { sessionToken: string, loggedInAt: number, lastActive: number, role: string } }
-const activeUserSessions = {};
+// The store lives in session.service so the request authentication hook in server.js can
+// resolve the token a client presents. Every assignment below also indexes the token.
+const activeUserSessions = sessionStore.store;
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -146,16 +153,17 @@ async function authRoutes(fastify, options) {
 
         if (techRes.rows.length > 0) {
           const t = techRes.rows[0];
-          const hashedInput = hashPassword(password);
-          
-          if (t.password_hash) {
-            if (hashedInput !== t.password_hash) {
-              return { error: 'Incorrect password for this technician account. Please verify and retry.', status: 401 };
-            }
-          } else if (!password || password.trim().length < 4) {
-            return { error: 'Password is required to sign in.', status: 401 };
-          } else {
-            await query(`UPDATE technicians SET password_hash = $1 WHERE id = $2`, [hashedInput, t.id]);
+        
+          if (!t.password_hash) {
+            // An account without a password used to accept any input and adopt it as the
+            // password, which let anyone claim the account by knowing the phone number.
+            return { error: 'This partner account has no password yet. Sign in with WhatsApp OTP and set a password first.', status: 403 };
+          }
+          if (!verifyPassword(password, t.password_hash)) {
+            return { error: 'Incorrect password for this technician account. Please verify and retry.', status: 401 };
+          }
+          if (needsRehash(t.password_hash)) {
+            await query(`UPDATE technicians SET password_hash = $1 WHERE id = $2`, [hashPassword(password), t.id]);
           }
 
           if (t.is_blocked) {
@@ -212,16 +220,16 @@ async function authRoutes(fastify, options) {
 
         if (custRes.rows.length > 0) {
           const u = custRes.rows[0];
-          const hashedInput = hashPassword(password);
 
-          if (u.password_hash) {
-            if (hashedInput !== u.password_hash) {
-              return { error: 'Incorrect password. Please verify and retry.', status: 401 };
-            }
-          } else if (!password || password.trim().length < 4) {
-            return { error: 'Password is required to sign in.', status: 401 };
-          } else {
-            await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashedInput, u.id]);
+          if (!u.password_hash) {
+            // Never adopt an arbitrary password for an existing account: that is account takeover.
+            return { error: 'This account has no password yet. Sign in with WhatsApp OTP and set a password first.', status: 403 };
+          }
+          if (!verifyPassword(password, u.password_hash)) {
+            return { error: 'Incorrect password. Please verify and retry.', status: 401 };
+          }
+          if (needsRehash(u.password_hash)) {
+            await query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hashPassword(password), u.id]);
           }
 
           if (u.is_blocked) {
@@ -279,8 +287,17 @@ async function authRoutes(fastify, options) {
 
       // Dedicated Shazu One Central Ops Admin authentication
       if (!userRecord) {
-        if (cleanPhone === '9842099999' || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@shazuone.in') {
-          if (!password || hashPassword(password) !== hashPassword('salem123')) {
+        const adminIdentities = String(process.env.ADMIN_PHONE || '9842099999').replace(/\D/g, '').slice(-10);
+        if (cleanPhone === adminIdentities || rawInput.toLowerCase() === 'admin' || rawInput.toLowerCase() === 'ops.admin@shazuone.in') {
+          // Credentials come from the environment only. The old hardcoded default meant
+          // anyone holding the source could sign in as admin.
+          if (!process.env.ADMIN_PASSWORD) {
+            return reply.status(503).send({
+              success: false,
+              error: 'Admin sign-in is not configured on this server (ADMIN_PASSWORD is missing).'
+            });
+          }
+          if (!password || !constantTimeEqual(password, process.env.ADMIN_PASSWORD)) {
             return reply.status(401).send({ success: false, error: 'Incorrect admin credentials' });
           }
           userRole = 'admin';
@@ -306,7 +323,7 @@ async function authRoutes(fastify, options) {
 
       // Session registration
       const sessionPhone = (userRecord.phone || cleanPhone).replace(/[\s\-\(\)\+]/g, '').slice(-10);
-      const sessionToken = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
+      const sessionToken = sessionStore.newToken();
 
       activeUserSessions[sessionPhone] = {
         sessionToken,
@@ -445,11 +462,12 @@ async function authRoutes(fastify, options) {
 
         // Insert into DB without overwriting existing data
         try {
+          const cleanAadhaar = String(aadhaar || '').replace(/\D/g, '').slice(0, 12) || null;
           const insertTechRes = await query(`
-            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, rating_avg, rating_count, jobs_completed_count)
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, 0.00, 0, 0)
+            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, rating_avg, rating_count, jobs_completed_count)
+            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, $7, 0.00, 0, 0)
             RETURNING id
-          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities, pwdHash]);
+          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.trade, createdUser.assignedLocalities, pwdHash, cleanAadhaar]);
           
           if (insertTechRes.rows[0]?.id) {
             createdUser.id = insertTechRes.rows[0].id;
@@ -493,7 +511,7 @@ async function authRoutes(fastify, options) {
         }
       }
 
-      const sessionToken = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
+      const sessionToken = sessionStore.newToken();
       activeUserSessions[cleanPhone] = {
         sessionToken,
         role: createdUser.role,
@@ -668,6 +686,10 @@ async function authRoutes(fastify, options) {
       // Dispatch via Baileys WhatsApp Service
       const sendResult = await whatsAppGateway.sendOtpMessage(cleanPhone, otpCode, purpose);
 
+      // The code is never returned to the caller unless an operator explicitly opts in for
+      // local development. Echoing it made every account claimable with one HTTP request.
+      const echoOtp = process.env.ALLOW_OTP_ECHO === '1';
+
       return {
         success: true,
         message: 'WhatsApp OTP code has been dispatched.',
@@ -675,9 +697,7 @@ async function authRoutes(fastify, options) {
         expiresInSeconds: 300,
         delivered: sendResult.delivered,
         simulated: Boolean(sendResult.simulated),
-        simulatedOtp: otpCode,
-        demoOtp: otpCode,
-        otp: otpCode
+        ...(echoOtp ? { simulatedOtp: otpCode, demoOtp: otpCode, otp: otpCode } : {})
       };
     } catch (e) {
       fastify.log.error(e);
@@ -778,7 +798,7 @@ async function authRoutes(fastify, options) {
 
       // For direct login purpose with existing user, issue active session
       if (existingUser && purpose === 'login') {
-        sessionToken = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
+        sessionToken = sessionStore.newToken();
         activeUserSessions[cleanPhone] = {
           sessionToken,
           role: existingUser.role,
@@ -1139,7 +1159,7 @@ async function authRoutes(fastify, options) {
         });
       }
 
-      const sessionToken = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 12);
+      const sessionToken = sessionStore.newToken();
       activeUserSessions[credentialPhone] = {
         sessionToken,
         role: userRole,

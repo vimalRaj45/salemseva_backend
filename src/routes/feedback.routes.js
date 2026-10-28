@@ -95,7 +95,7 @@ async function feedbackRoutes(fastify, options) {
             UPDATE users 
             SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
+            WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
             RETURNING id, phone, wallet_balance
           `, [rewardAmount, cleanPhone]);
 

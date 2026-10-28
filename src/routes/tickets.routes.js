@@ -198,7 +198,7 @@ async function ticketsRoutes(fastify, options) {
             admin_notes = COALESCE(NULLIF($2, ''), admin_notes),
             resolution_summary = $3,
             resolved_by = $4,
-            resolved_at = CASE WHEN $1 IN ('resolved', 'closed') THEN NOW() ELSE resolved_at END,
+            resolved_at = CASE WHEN $1::varchar IN ('resolved', 'closed') THEN NOW() ELSE resolved_at END,
             updated_at = NOW()
         WHERE id = $5
         RETURNING *;

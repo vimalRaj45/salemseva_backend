@@ -1,6 +1,8 @@
 const { query, pool } = require('./db');
+const { requireDestructive } = require('./destructive.guard');
 
 async function truncateTransactions() {
+  requireDestructive('truncate_transactions.js');
   console.log('--- Starting Database Truncation (Preserving Users & Technicians Master Data) ---');
 
   try {

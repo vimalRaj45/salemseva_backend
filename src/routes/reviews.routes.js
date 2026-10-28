@@ -58,19 +58,38 @@ async function reviewsRoutes(fastify, options) {
           const settingsRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
           const reviewCredits = settingsRes.rows.length > 0 ? parseFloat(settingsRes.rows[0].review_reward_credits) : 25.00;
 
-          // Credit customer wallet in database
+          // A booking can carry only the customer phone (customer_id is not filled at
+          // creation in every path), so resolve the customer by id and fall back to the
+          // normalised phone; without the fallback the reward was silently credited to nobody.
           await query(`
-            UPDATE users 
-            SET wallet_balance = wallet_balance + $1 
-            WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
+            UPDATE users
+            SET wallet_balance = wallet_balance + $1
+            WHERE id = (
+              SELECT id FROM users
+              WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
+                 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = (
+                      SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
+                      FROM bookings WHERE id = $2
+                    )
+              LIMIT 1
+            )
           `, [reviewCredits, bookingId]);
-
+          
           // Record transaction in ledger
           try {
             await query(`
               INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
               SELECT id, phone, 'Service Review Reward', $1, 'CREDIT', 'REVIEW_REWARD', 'Credits earned for completing 5-star service rating on Shazu One'
-              FROM users WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
+              FROM users
+              WHERE id = (
+                SELECT id FROM users
+                WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
+                   OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = (
+                        SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
+                        FROM bookings WHERE id = $2
+                      )
+                LIMIT 1
+              )
             `, [reviewCredits, bookingId]);
           } catch (txErr) {}
 
@@ -84,10 +103,14 @@ async function reviewsRoutes(fastify, options) {
           // Real Automated Referral Fulfillment: If this customer was referred by someone, reward the referrer
           try {
             const custRes = await query(`
-              SELECT u.id, u.full_name, u.locality, u.referred_by 
-              FROM users u 
-              JOIN bookings b ON u.id = b.customer_id 
-              WHERE b.id = $1
+              SELECT u.id, u.full_name, u.locality, u.referred_by
+              FROM users u
+              WHERE u.id = (SELECT customer_id FROM bookings WHERE id = $1)
+                 OR RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10) = (
+                      SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
+                      FROM bookings WHERE id = $1
+                    )
+              LIMIT 1
             `, [bookingId]);
             if (custRes.rows.length > 0 && custRes.rows[0].referred_by) {
               const refCode = custRes.rows[0].referred_by;

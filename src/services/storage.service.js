@@ -27,6 +27,20 @@ try {
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB strict limit
 
+// Uploads that silently degrade to a data URI in a text column were reported as successful
+// while nothing reached object storage. The fallback now has to be requested explicitly.
+const ALLOW_BASE64_FALLBACK = process.env.ALLOW_BASE64_FALLBACK === '1';
+
+// The client declares the MIME type and it was passed straight to S3 as ContentType, which
+// allows an HTML or SVG payload to be served from our own origin. Only these are accepted.
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'application/pdf'
+]);
+
 /**
  * Ensure bucket exists in S3-compatible storage
  */
@@ -76,7 +90,14 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
     throw new Error(`File size (${(buffer.length / (1024 * 1024)).toFixed(2)} MB) exceeds 5 MB limit.`);
   }
 
-  // 2. Resolve File Extension
+  // 2. Reject anything that is not a document type we serve
+  const normalizedMime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  if (!ALLOWED_MIME_TYPES.has(normalizedMime)) {
+    throw new Error(`Unsupported file type: ${normalizedMime || 'unknown'}. Allowed: JPEG, PNG, WEBP, PDF.`);
+  }
+  mimeType = normalizedMime;
+
+  // 3. Resolve File Extension
   let ext = 'jpg';
   if (mimeType.includes('png')) ext = 'png';
   else if (mimeType.includes('webp')) ext = 'webp';
@@ -121,7 +142,11 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
       storageType: 'S3_NEON'
     };
   } catch (s3Error) {
-    console.warn('Direct S3 upload failed, using secure fallback storage:', s3Error.message);
+    if (!ALLOW_BASE64_FALLBACK) {
+      console.error('Storage upload failed and the base64 fallback is disabled:', s3Error.message);
+      throw new Error(`Storage upload failed: ${s3Error.message}`);
+    }
+    console.warn('Direct S3 upload failed, using the base64 fallback:', s3Error.message);
     
     // Resilient fallback: Return clean Data URI so user experience is 100% uninterrupted
     const fallbackDataUrl = `data:${mimeType};base64,${buffer.toString('base64')}`;

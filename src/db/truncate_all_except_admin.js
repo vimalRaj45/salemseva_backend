@@ -1,6 +1,8 @@
 const { query, pool } = require('./db');
+const { requireDestructive } = require('./destructive.guard');
 
 async function truncateAllExceptAdmin() {
+  requireDestructive('truncate_all_except_admin.js');
   console.log('--- Shazu One: Starting full database purge (keeping Admin + config only) ---');
   try {
     // 1. Discover all existing tables in the public schema

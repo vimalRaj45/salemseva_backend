@@ -21,7 +21,11 @@
  * ============================================================================
  */
 
-const BASE_URL = process.env.TEST_API_URL || 'http://localhost:8080';
+require('dotenv').config();
+
+// 127.0.0.1 rather than localhost: Node resolves localhost to ::1 first, while the server
+// binds 0.0.0.0, so the probe would fail against a healthy server.
+const BASE_URL = (process.env.TEST_API_URL || `http://127.0.0.1:${process.env.PORT || 8080}`).replace(/\/+$/, '');
 
 const STATS = {
   total: 0,
@@ -31,6 +35,10 @@ const STATS = {
 };
 
 const FAILED_TESTS = [];
+
+// The API now refuses every route that is not explicitly public, so this suite signs in
+// once as the administrator and carries that token on every call.
+let ADMIN_TOKEN = '';
 
 function logSection(title) {
   console.log('\n======================================================================');
@@ -53,6 +61,7 @@ function assertTest(name, condition, details = '') {
 async function api(path, options = {}) {
   const url = `${BASE_URL}${path}`;
   const defaultHeaders = { 'Content-Type': 'application/json' };
+  if (ADMIN_TOKEN && options.auth !== false) defaultHeaders.Authorization = `Bearer ${ADMIN_TOKEN}`;
   try {
     const res = await fetch(url, {
       ...options,
@@ -88,6 +97,18 @@ async function runMasterE2ETestSuite() {
     'Health Check Endpoint',
     health.ok && health.data?.status === 'HEALTHY',
     `Database: ${health.data?.database}`
+  );
+
+  const adminLogin = await api('/api/v1/auth/login', {
+    method: 'POST',
+    auth: false,
+    body: JSON.stringify({ identifier: 'admin', password: process.env.ADMIN_PASSWORD, role: 'admin' })
+  });
+  ADMIN_TOKEN = adminLogin.data?.sessionToken || '';
+  assertTest(
+    'Administrator Sign-In',
+    adminLogin.ok && Boolean(ADMIN_TOKEN),
+    ADMIN_TOKEN ? 'session token issued' : `HTTP ${adminLogin.status}: ${adminLogin.data?.error || 'no token'}`
   );
 
   const servicesEn = await api('/api/v1/services?lang=en');
@@ -353,20 +374,28 @@ async function runMasterE2ETestSuite() {
   // =========================================================================
   logSection('5. Customer Cancellations & Audit Trail');
 
-  // Create a separate booking to test cancellation flow
+  // Create a separate booking to test cancellation flow. It uses AC rather than plumber:
+  // dispatch is refused with NO_TECHNICIANS_IN_DOMAIN when no technician offers the trade, so
+  // a fixture built on an unstaffed trade failed for a reason unrelated to cancellation.
   const cancelBookingRes = await api('/api/v1/bookings', {
     method: 'POST',
     body: JSON.stringify({
-      serviceId: 'plumber',
-      selectedIssue: 'plumb_leak',
+      serviceId: 'ac',
+      selectedIssue: 'ac_cooling',
       customerName: 'Cancellation Test User',
       customerPhone: testPhone,
       locality: 'Ammapet',
       address: '15, Kamaraj Colony, Ammapet, Salem',
-      bookingType: 'instant'
+      bookingType: 'instant',
+      scheduledSlot: 'instant_now'
     })
   });
   cancelBookingId = cancelBookingRes.data?.booking?.id;
+  assertTest(
+    'Cancellation Fixture Booking Created',
+    Boolean(cancelBookingId),
+    cancelBookingId ? `Booking ID: ${cancelBookingId}` : `HTTP ${cancelBookingRes.status}: ${cancelBookingRes.data?.error || 'no booking'}`
+  );
 
   // Case A: Customer Cancels Booking with Structured Reason and Notes
   const cancelSubmitRes = await api(`/api/v1/bookings/${cancelBookingId}/cancel`, {
@@ -550,6 +579,27 @@ async function runMasterE2ETestSuite() {
     Boolean(cancelledInOverview && cancelledInOverview.cancellation_reason),
     `Found Cancelled Booking #${cancelledInOverview?.id}: "${cancelledInOverview?.cancellation_reason}"`
   );
+
+  // =========================================================================
+  // CLEANUP - only against a local database, never against a remote target
+  // =========================================================================
+  if (/127\.0\.0\.1|localhost/.test(BASE_URL)) {
+    try {
+      const { pool } = require('../src/db/db');
+      await pool.query(
+        `DELETE FROM payments WHERE booking_id IN (SELECT id FROM bookings WHERE customer_phone = $1)`,
+        [testPhone]
+      );
+      await pool.query(`DELETE FROM audit_logs WHERE booking_id IN (SELECT id::text FROM bookings WHERE customer_phone = $1)`, [testPhone]);
+      await pool.query(`DELETE FROM bookings WHERE customer_phone = $1`, [testPhone]);
+      await pool.query(`DELETE FROM reviews WHERE customer_phone = $1`, [testPhone]).catch(() => {});
+      await pool.query(`DELETE FROM users WHERE role <> 'admin' AND phone = $1`, [testPhone]).catch(() => {});
+      await pool.end();
+      console.log(`  Cleanup                  : rows for ${testPhone} removed`);
+    } catch (cleanupErr) {
+      console.log(`  Cleanup                  : failed (${cleanupErr.message})`);
+    }
+  }
 
   // =========================================================================
   // FINAL TEST SUITE REPORT
