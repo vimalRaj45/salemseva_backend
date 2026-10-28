@@ -416,7 +416,25 @@ async function adminRoutes(fastify, options) {
     try {
       const { id } = req.params;
       const [techRes, jobsRes, earningsRes] = await Promise.all([
-        query(`SELECT * FROM technicians WHERE id = $1`, [id]),
+        query(`
+          SELECT 
+            t.*,
+            COALESCE(
+              NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
+              NULLIF(t.rating_avg, 0),
+              CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+            ) as rating_avg,
+            GREATEST(
+              COALESCE(t.rating_count, 0),
+              (SELECT count(*)::int FROM reviews r WHERE r.technician_id = t.id)
+            ) as rating_count,
+            GREATEST(
+              COALESCE(t.jobs_completed_count, 0),
+              (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
+            ) as jobs_completed_count
+          FROM technicians t
+          WHERE t.id = $1
+        `, [id]),
         query(`
           SELECT 
             b.*,
@@ -429,10 +447,10 @@ async function adminRoutes(fastify, options) {
         `, [id]),
         query(`
           SELECT 
-            COALESCE(SUM(tech_payout_amount), 0) as lifetime_earnings,
-            COALESCE(SUM(amount_total), 0) as gross_job_volume
-          FROM payments p
-          JOIN bookings b ON p.booking_id = b.id
+            COALESCE(SUM(CASE WHEN b.status = 'completed' THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * 0.95, 0) ELSE 0 END), 0) as lifetime_earnings,
+            COALESCE(SUM(COALESCE(p.amount_total, b.final_amount, 0)), 0) as gross_job_volume
+          FROM bookings b
+          LEFT JOIN payments p ON p.booking_id = b.id
           WHERE b.technician_id = $1
         `, [id])
       ]);
