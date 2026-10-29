@@ -171,11 +171,18 @@ async function reviewsRoutes(fastify, options) {
           r.id, r.booking_id, r.rating, r.comment, r.tags, 
           r.is_below_3_star, r.root_cause_tags, r.ops_manager_escalated, r.ops_manager_notes, r.created_at,
           b.service_id, b.locality, b.customer_name,
-          t.full_name as technician_name, t.primary_trade
+          t.full_name as technician_name, t.primary_trade,
+          CASE 
+            WHEN b.service_id = 'ac' THEN 'AC Repair & Service'
+            WHEN b.service_id = 'electrician' THEN 'Electrician & Wiring'
+            WHEN b.service_id = 'plumber' THEN 'Plumber & Sanitary'
+            WHEN b.service_id = 'cleaning' THEN 'Home & Bath Cleaning'
+            ELSE 'Home Service'
+          END as service_name
         FROM reviews r
         LEFT JOIN bookings b ON r.booking_id = b.id
         LEFT JOIN technicians t ON r.technician_id = t.id OR b.technician_id = t.id
-        WHERE 1=1
+        WHERE r.comment IS NOT NULL AND TRIM(r.comment) != ''
       `;
       const params = [];
       if (serviceId) {
@@ -186,7 +193,7 @@ async function reviewsRoutes(fastify, options) {
         params.push(techId);
         sql += ` AND (r.technician_id = $${params.length} OR b.technician_id = $${params.length})`;
       }
-      sql += ` ORDER BY r.created_at DESC LIMIT $${params.length + 1}`;
+      sql += ` ORDER BY r.rating DESC, r.created_at DESC LIMIT $${params.length + 1}`;
       params.push(parseInt(limit) || 50);
 
       const res = await query(sql, params);
