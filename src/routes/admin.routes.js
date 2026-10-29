@@ -16,7 +16,11 @@ async function adminRoutes(fastify, options) {
             b.*,
             t.full_name as technician_name,
             t.phone as technician_phone,
-            t.rating_avg as technician_rating,
+            COALESCE(
+              NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
+              NULLIF(t.rating_avg, 0),
+              CASE WHEN (SELECT count(*)::int FROM bookings b2 WHERE b2.technician_id = t.id AND b2.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+            ) as technician_rating,
             t.primary_trade as technician_trade
           FROM bookings b
           LEFT JOIN technicians t ON b.technician_id = t.id
