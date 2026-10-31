@@ -40,7 +40,7 @@ async function getLiveFeeSettings() {
 
   try {
     const res = await query(`
-      SELECT customer_platform_fee_percent, payment_gateway_fee_percent, partner_commission_percent, platform_commission_percent 
+      SELECT customer_platform_fee_percent, payment_gateway_fee_percent, partner_commission_percent, platform_commission_percent, inspection_visit_fee 
       FROM platform_settings 
       WHERE id = 'reward_settings' 
       LIMIT 1
@@ -56,7 +56,10 @@ async function getLiveFeeSettings() {
           : getPaymentGatewayFeePercent(),
         partnerCommPercent: row.partner_commission_percent !== null && row.partner_commission_percent !== undefined
           ? parseFloat(row.partner_commission_percent)
-          : (row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? parseFloat(row.platform_commission_percent) : getPartnerCommissionPercent())
+          : (row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? parseFloat(row.platform_commission_percent) : getPartnerCommissionPercent()),
+        inspectionVisitFee: row.inspection_visit_fee !== null && row.inspection_visit_fee !== undefined
+          ? parseFloat(row.inspection_visit_fee)
+          : 99.0
       };
       lastCacheTime = now;
       return cachedSettings;
@@ -68,7 +71,8 @@ async function getLiveFeeSettings() {
   cachedSettings = {
     customerFeePercent: getCustomerPlatformFeePercent(),
     gatewayFeePercent: getPaymentGatewayFeePercent(),
-    partnerCommPercent: getPartnerCommissionPercent()
+    partnerCommPercent: getPartnerCommissionPercent(),
+    inspectionVisitFee: 99.0
   };
   lastCacheTime = now;
   return cachedSettings;

@@ -19,6 +19,11 @@ async function settingsRoutes(fastify, options) {
         updated_by VARCHAR(100) DEFAULT 'admin'
       );
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS platform_commission_percent NUMERIC(5,2) DEFAULT 2.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS customer_platform_fee_percent NUMERIC(5,2) DEFAULT 2.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS payment_gateway_fee_percent NUMERIC(5,2) DEFAULT 2.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS gateway_fee_percent NUMERIC(5,2) DEFAULT 2.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS partner_commission_percent NUMERIC(5,2) DEFAULT 2.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS inspection_visit_fee NUMERIC(10,2) DEFAULT 99.00;
     `);
 
     // Seed initial row if table is empty
@@ -61,7 +66,8 @@ async function settingsRoutes(fastify, options) {
             partner_commission_percent: partnerComm,
             partner_payout_percent: partnerPayout,
             customer_platform_fee_percent: feeSettings.customerFeePercent,
-            payment_gateway_fee_percent: feeSettings.gatewayFeePercent
+            payment_gateway_fee_percent: feeSettings.gatewayFeePercent,
+            inspection_visit_fee: feeSettings.inspectionVisitFee || 99.00
           }
         };
       }
@@ -82,6 +88,7 @@ async function settingsRoutes(fastify, options) {
           partner_payout_percent: partnerPayout,
           customer_platform_fee_percent: feeSettings.customerFeePercent,
           payment_gateway_fee_percent: feeSettings.gatewayFeePercent,
+          inspection_visit_fee: parseFloat(row.inspection_visit_fee ?? feeSettings.inspectionVisitFee ?? 99.00),
           updated_at: row.updated_at
         }
       };
@@ -281,6 +288,11 @@ async function settingsRoutes(fastify, options) {
           feedback_rewards_enabled: Boolean(result.rows[0].feedback_rewards_enabled),
           partner_referral_incentive: parseFloat(result.rows[0].partner_referral_incentive),
           partner_welcome_bonus: parseFloat(result.rows[0].partner_welcome_bonus),
+          partner_commission_percent: parseFloat(result.rows[0].partner_commission_percent ?? result.rows[0].platform_commission_percent ?? 2.0),
+          platform_commission_percent: parseFloat(result.rows[0].platform_commission_percent ?? result.rows[0].partner_commission_percent ?? 2.0),
+          customer_platform_fee_percent: parseFloat(result.rows[0].customer_platform_fee_percent ?? 2.0),
+          payment_gateway_fee_percent: parseFloat(result.rows[0].payment_gateway_fee_percent ?? result.rows[0].gateway_fee_percent ?? 2.0),
+          inspection_visit_fee: parseFloat(result.rows[0].inspection_visit_fee ?? 99.0),
           updated_at: result.rows[0].updated_at
         }
       };
