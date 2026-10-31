@@ -24,7 +24,7 @@ function getPaymentGatewayFeePercent() {
 
 function getPartnerCommissionPercent() {
   const envVal = parseFloat(process.env.PARTNER_COMMISSION_PERCENT);
-  return !isNaN(envVal) && envVal >= 0 && envVal <= 100 ? envVal : 5.0;
+  return !isNaN(envVal) && envVal >= 0 && envVal <= 100 ? envVal : 2.0;
 }
 
 // Backward-compatibility alias

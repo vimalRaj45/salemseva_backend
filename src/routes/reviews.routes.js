@@ -51,16 +51,17 @@ async function reviewsRoutes(fastify, options) {
         WHERE id = $1
       `, [bookingId]);
 
-      // If rating >= 4, award admin-configured wallet credits and 2 star points
-      if (!isBelow3Star) {
-        try {
-          // Fetch reward setting from database
-          const settingsRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-          const reviewCredits = settingsRes.rows.length > 0 ? parseFloat(settingsRes.rows[0].review_reward_credits) : 25.00;
+      // Award credits strictly for BOOKING completion and REFERRAL
+      try {
+        const existingBookingReward = await query(`
+          SELECT id FROM wallet_transactions 
+          WHERE category = 'BOOKING_REWARD' AND description LIKE '%' || $1 || '%'
+        `, [bookingId]);
 
-          // A booking can carry only the customer phone (customer_id is not filled at
-          // creation in every path), so resolve the customer by id and fall back to the
-          // normalised phone; without the fallback the reward was silently credited to nobody.
+        if (existingBookingReward.rows.length === 0) {
+          const settingsRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+          const bookingCredits = settingsRes.rows.length > 0 ? parseFloat(settingsRes.rows[0].review_reward_credits) : 25.00;
+
           await query(`
             UPDATE users
             SET wallet_balance = wallet_balance + $1
@@ -73,13 +74,12 @@ async function reviewsRoutes(fastify, options) {
                     )
               LIMIT 1
             )
-          `, [reviewCredits, bookingId]);
+          `, [bookingCredits, bookingId]);
           
-          // Record transaction in ledger
           try {
             await query(`
               INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-              SELECT id, phone, 'Service Review Reward', $1, 'CREDIT', 'REVIEW_REWARD', 'Credits earned for completing 5-star service rating on Shazu One'
+              SELECT id, phone, 'Booking Completion Cashback', $1, 'CREDIT', 'BOOKING_REWARD', 'Credits earned for completing booking #' || $2
               FROM users
               WHERE id = (
                 SELECT id FROM users
@@ -90,15 +90,16 @@ async function reviewsRoutes(fastify, options) {
                       )
                 LIMIT 1
               )
-            `, [reviewCredits, bookingId]);
+            `, [bookingCredits, bookingId]);
           } catch (txErr) {}
+        }
 
-          // Award technician +2 Star Points towards zero commission
-          await query(`
-            UPDATE technicians 
-            SET star_points = star_points + 2 
-            WHERE id = (SELECT technician_id FROM bookings WHERE id = $1)
-          `, [bookingId]);
+        // Award technician +2 Star Points towards zero commission on completed job
+        await query(`
+          UPDATE technicians 
+          SET star_points = star_points + 2 
+          WHERE id = (SELECT technician_id FROM bookings WHERE id = $1)
+        `, [bookingId]);
 
           // Real Automated Referral Fulfillment: If this customer was referred by someone, reward the referrer
           try {
@@ -134,17 +135,14 @@ async function reviewsRoutes(fastify, options) {
           } catch (refErr) {}
         } catch (e) {}
       }
-    }
 
-    // Resolve dynamic review credits for response
-    let awardedCredits = 0;
-    if (!isBelow3Star) {
-      try {
-        const sRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-        awardedCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].review_reward_credits) : 25.00;
-      } catch (e) {
-        awardedCredits = 25.00;
-      }
+    // Resolve booking cashback credits for response
+    let awardedCredits = 25.00;
+    try {
+      const sRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+      awardedCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].review_reward_credits) : 25.00;
+    } catch (e) {
+      awardedCredits = 25.00;
     }
 
     return {
@@ -155,10 +153,10 @@ async function reviewsRoutes(fastify, options) {
       },
       escalationStatus: isBelow3Star ? 'ESCALATED_TO_SALEM_OPS' : 'NORMAL_COMPLETED',
       creditsAwarded: awardedCredits,
-      techStarPointsAwarded: !isBelow3Star ? 2 : 0,
+      techStarPointsAwarded: 2,
       customerBenefit: isBelow3Star 
         ? 'Eligible for 100% Free Warranty Revisit or Full Diagnostic Refund'
-        : `+${awardedCredits} Seva Credits Added to Wallet`
+        : `+${awardedCredits} Seva Credits Earned for Completed Booking`
     };
   });
 

@@ -42,17 +42,11 @@ async function walletRoutes(fastify, options) {
         const storePhone = canonicalPhone(cleanPhone);
         const createRes = await query(`
           INSERT INTO users (phone, full_name, role, wallet_balance, referral_code, locality, preferred_lang)
-          VALUES ($1, 'Customer', 'customer', 50.00, $2, 'Fairlands', 'ta')
+          VALUES ($1, 'Customer', 'customer', 0.00, $2, 'Fairlands', 'ta')
           ON CONFLICT (phone) DO UPDATE SET wallet_balance = users.wallet_balance
           RETURNING id, full_name, phone, wallet_balance, referral_code, referred_by
         `, [storePhone, genCode]);
         user = createRes.rows[0];
-
-        // Seed initial signup bonus transaction in DB
-        await query(`
-          INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-          VALUES ($1, $2, 'Welcome Signup Bonus', 50.00, 'CREDIT', 'SIGNUP_BONUS', 'Instant +50 Seva Credits for registering on Shazu One')
-        `, [user.id, user.phone]);
       }
 
       // 2. Fetch all wallet transactions for this user from DB

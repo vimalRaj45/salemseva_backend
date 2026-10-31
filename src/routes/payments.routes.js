@@ -590,7 +590,73 @@ async function paymentsRoutes(fastify, options) {
         `, [targetId, techId, parseFloat(rating), reviewComment || 'Excellent on-time service & genuine spare parts fitted.']);
       }
 
-      // 6. Audit Log
+      // 6. Reward credits strictly for BOOKING completion and REFERRAL
+      try {
+        const existingBookingReward = await query(`
+          SELECT id FROM wallet_transactions 
+          WHERE category = 'BOOKING_REWARD' AND description LIKE '%' || $1 || '%'
+        `, [targetId]);
+
+        if (existingBookingReward.rows.length === 0) {
+          const bookingCredits = 25.00;
+          const userRes = await query(`
+            SELECT id, phone, full_name, locality, referred_by 
+            FROM users 
+            WHERE id = (SELECT customer_id FROM bookings WHERE id = $1)
+               OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = (
+                    SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
+                    FROM bookings WHERE id = $1
+                  )
+            LIMIT 1
+          `, [targetId]);
+
+          if (userRes.rows.length > 0) {
+            const customer = userRes.rows[0];
+            await query(`
+              UPDATE users 
+              SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE id = $2
+            `, [bookingCredits, customer.id]);
+
+            await query(`
+              INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
+              VALUES ($1, $2, 'Booking Completion Cashback', $3, 'CREDIT', 'BOOKING_REWARD', 'Credits earned for completing booking #' || $4)
+            `, [customer.id, customer.phone, bookingCredits, targetId]);
+
+            // Award referrer if this was a referred user's completed booking
+            if (customer.referred_by) {
+              const referrerRes = await query(`
+                SELECT id, phone, full_name 
+                FROM users 
+                WHERE referral_code = $1 
+                LIMIT 1
+              `, [customer.referred_by]);
+
+              if (referrerRes.rows.length > 0) {
+                const existingRef = await query(`
+                  SELECT id FROM wallet_transactions 
+                  WHERE user_id = $1 AND category = 'REFERRAL_REWARD' AND description LIKE '%' || $2 || '%'
+                `, [referrerRes.rows[0].id, customer.full_name]);
+
+                if (existingRef.rows.length === 0) {
+                  const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+                  const refCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].customer_referral_credits) : 50.00;
+                  await query(`UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2`, [refCredits, referrerRes.rows[0].id]);
+                  await query(`
+                    INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
+                    VALUES ($1, $2, 'Referral Reward: ' || $3, $4, 'CREDIT', 'REFERRAL_REWARD', 'Friend ' || $3 || ' completed first service in ' || $5 || ' (+' || $4 || ' Credits)')
+                  `, [referrerRes.rows[0].id, referrerRes.rows[0].phone, customer.full_name, refCredits, customer.locality || 'Salem']);
+                }
+              }
+            }
+          }
+        }
+      } catch (rewardErr) {
+        fastify.log.warn('Could not fulfill booking/referral credits in settle-payout: ' + rewardErr.message);
+      }
+
+      // 7. Audit Log
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'SERVICE_COMPLETED_ESCROW_SETTLED', 'customer', 'customer', $2)

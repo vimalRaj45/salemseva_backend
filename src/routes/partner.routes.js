@@ -900,16 +900,13 @@ async function partnerRoutes(fastify, options) {
       let referrerIncentive = 0.00;
       if (hasReferral) {
         try {
-          const sRes = await query(`SELECT partner_welcome_bonus, partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+          const sRes = await query(`SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
           if (sRes.rows.length > 0) {
-            referralBonus = parseFloat(sRes.rows[0].partner_welcome_bonus);
             referrerIncentive = parseFloat(sRes.rows[0].partner_referral_incentive);
           } else {
-            referralBonus = 50.00;
             referrerIncentive = 100.00;
           }
         } catch (sErr) {
-          referralBonus = 50.00;
           referrerIncentive = 100.00;
         }
       }

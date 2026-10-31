@@ -10,10 +10,10 @@ async function settingsRoutes(fastify, options) {
         customer_referral_credits NUMERIC(10,2) DEFAULT 50.00,
         referee_discount_amount NUMERIC(10,2) DEFAULT 50.00,
         review_reward_credits NUMERIC(10,2) DEFAULT 25.00,
-        feedback_reward_credits NUMERIC(10,2) DEFAULT 15.00,
-        feedback_rewards_enabled BOOLEAN DEFAULT TRUE,
+        feedback_reward_credits NUMERIC(10,2) DEFAULT 0.00,
+        feedback_rewards_enabled BOOLEAN DEFAULT FALSE,
         partner_referral_incentive NUMERIC(10,2) DEFAULT 100.00,
-        partner_welcome_bonus NUMERIC(10,2) DEFAULT 50.00,
+        partner_welcome_bonus NUMERIC(10,2) DEFAULT 0.00,
         platform_commission_percent NUMERIC(5,2) DEFAULT 2.00,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_by VARCHAR(100) DEFAULT 'admin'
@@ -30,7 +30,7 @@ async function settingsRoutes(fastify, options) {
           review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
           partner_referral_incentive, partner_welcome_bonus, platform_commission_percent, updated_by
         ) VALUES (
-          'reward_settings', 50.00, 50.00, 25.00, 15.00, TRUE, 100.00, 50.00, 2.00, 'system_init'
+          'reward_settings', 50.00, 50.00, 25.00, 0.00, FALSE, 100.00, 0.00, 2.00, 'system_init'
         )
       `);
     }
@@ -53,10 +53,10 @@ async function settingsRoutes(fastify, options) {
             customer_referral_credits: 50.00,
             referee_discount_amount: 50.00,
             review_reward_credits: 25.00,
-            feedback_reward_credits: 15.00,
-            feedback_rewards_enabled: true,
+            feedback_reward_credits: 0.00,
+            feedback_rewards_enabled: false,
             partner_referral_incentive: 100.00,
-            partner_welcome_bonus: 50.00,
+            partner_welcome_bonus: 0.00,
             platform_commission_percent: partnerComm,
             partner_commission_percent: partnerComm,
             partner_payout_percent: partnerPayout,
@@ -120,10 +120,10 @@ async function settingsRoutes(fastify, options) {
         customer_referral_credits: 50.00,
         referee_discount_amount: 50.00,
         review_reward_credits: 25.00,
-        feedback_reward_credits: 15.00,
-        feedback_rewards_enabled: true,
+        feedback_reward_credits: 0.00,
+        feedback_rewards_enabled: false,
         partner_referral_incentive: 100.00,
-        partner_welcome_bonus: 50.00,
+        partner_welcome_bonus: 0.00,
         inspection_visit_fee: 99.00,
         updated_by: 'system',
         updated_at: new Date()
@@ -133,11 +133,14 @@ async function settingsRoutes(fastify, options) {
         customer_referral_credits: parseFloat(row.customer_referral_credits || 50),
         referee_discount_amount: parseFloat(row.referee_discount_amount || 50),
         review_reward_credits: parseFloat(row.review_reward_credits || 25),
-        feedback_reward_credits: parseFloat(row.feedback_reward_credits || 15),
+        feedback_reward_credits: parseFloat(row.feedback_reward_credits || 0),
         feedback_rewards_enabled: Boolean(row.feedback_rewards_enabled),
         partner_referral_incentive: parseFloat(row.partner_referral_incentive || 100),
-        partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 50),
-        platform_commission_percent: parseFloat(row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? row.platform_commission_percent : getEnvCommissionPercent()),
+        partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 0),
+        partner_commission_percent: parseFloat(row.partner_commission_percent !== null && row.partner_commission_percent !== undefined ? row.partner_commission_percent : (row.platform_commission_percent || 2.0)),
+        platform_commission_percent: parseFloat(row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? row.platform_commission_percent : (row.partner_commission_percent || 2.0)),
+        customer_platform_fee_percent: parseFloat(row.customer_platform_fee_percent !== null && row.customer_platform_fee_percent !== undefined ? row.customer_platform_fee_percent : 2.0),
+        payment_gateway_fee_percent: parseFloat(row.payment_gateway_fee_percent !== null && row.payment_gateway_fee_percent !== undefined ? row.payment_gateway_fee_percent : (row.gateway_fee_percent || 2.0)),
         inspection_visit_fee: parseFloat(row.inspection_visit_fee || 99),
         updated_by: row.updated_by,
         updated_at: row.updated_at
@@ -168,7 +171,11 @@ async function settingsRoutes(fastify, options) {
         feedback_rewards_enabled,
         partner_referral_incentive,
         partner_welcome_bonus,
+        partner_commission_percent,
         platform_commission_percent,
+        customer_platform_fee_percent,
+        payment_gateway_fee_percent,
+        inspection_visit_fee,
         updated_by = 'admin_salem_central'
       } = req.body || {};
 
@@ -178,21 +185,34 @@ async function settingsRoutes(fastify, options) {
       const newCustRef = customer_referral_credits !== undefined ? Math.max(0, parseFloat(customer_referral_credits)) : parseFloat(current.customer_referral_credits || 50);
       const newRefDisc = referee_discount_amount !== undefined ? Math.max(0, parseFloat(referee_discount_amount)) : parseFloat(current.referee_discount_amount || 50);
       const newRevCredits = review_reward_credits !== undefined ? Math.max(0, parseFloat(review_reward_credits)) : parseFloat(current.review_reward_credits || 25);
-      const newFbCredits = feedback_reward_credits !== undefined ? Math.max(0, parseFloat(feedback_reward_credits)) : parseFloat(current.feedback_reward_credits || 15);
-      const newFbEnabled = feedback_rewards_enabled !== undefined ? Boolean(feedback_rewards_enabled) : Boolean(current.feedback_rewards_enabled ?? true);
+      const newFbCredits = feedback_reward_credits !== undefined ? Math.max(0, parseFloat(feedback_reward_credits)) : parseFloat(current.feedback_reward_credits || 0);
+      const newFbEnabled = feedback_rewards_enabled !== undefined ? Boolean(feedback_rewards_enabled) : Boolean(current.feedback_rewards_enabled ?? false);
       const newPartnerIncentive = partner_referral_incentive !== undefined ? Math.max(0, parseFloat(partner_referral_incentive)) : parseFloat(current.partner_referral_incentive || 100);
-      const newPartnerBonus = partner_welcome_bonus !== undefined ? Math.max(0, parseFloat(partner_welcome_bonus)) : parseFloat(current.partner_welcome_bonus || 50);
-      const newCommission = platform_commission_percent !== undefined
-        ? Math.max(0, Math.min(100, parseFloat(platform_commission_percent)))
-        : parseFloat(current.platform_commission_percent !== null && current.platform_commission_percent !== undefined ? current.platform_commission_percent : getEnvCommissionPercent());
+      const newPartnerBonus = partner_welcome_bonus !== undefined ? Math.max(0, parseFloat(partner_welcome_bonus)) : parseFloat(current.partner_welcome_bonus || 0);
+      const rawComm = partner_commission_percent !== undefined ? partner_commission_percent : platform_commission_percent;
+      const newCommission = rawComm !== undefined
+        ? Math.max(0, Math.min(100, parseFloat(rawComm)))
+        : parseFloat(current.partner_commission_percent || current.platform_commission_percent || 2.0);
+      const newCustFee = customer_platform_fee_percent !== undefined
+        ? Math.max(0, Math.min(100, parseFloat(customer_platform_fee_percent)))
+        : parseFloat(current.customer_platform_fee_percent || 2.0);
+      const newGatewayFee = payment_gateway_fee_percent !== undefined
+        ? Math.max(0, Math.min(100, parseFloat(payment_gateway_fee_percent)))
+        : parseFloat(current.payment_gateway_fee_percent || current.gateway_fee_percent || 2.0);
+      const newVisitFee = inspection_visit_fee !== undefined
+        ? Math.max(0, parseFloat(inspection_visit_fee))
+        : parseFloat(current.inspection_visit_fee || 99);
 
       const updateSql = `
         INSERT INTO platform_settings (
           id, customer_referral_credits, referee_discount_amount,
           review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
-          partner_referral_incentive, partner_welcome_bonus, platform_commission_percent, updated_at, updated_by
+          partner_referral_incentive, partner_welcome_bonus, 
+          partner_commission_percent, platform_commission_percent,
+          customer_platform_fee_percent, payment_gateway_fee_percent, gateway_fee_percent,
+          inspection_visit_fee, updated_at, updated_by
         ) VALUES (
-          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, $9
+          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $10, $11, CURRENT_TIMESTAMP, $12
         )
         ON CONFLICT (id) DO UPDATE SET
           customer_referral_credits = EXCLUDED.customer_referral_credits,
@@ -202,7 +222,12 @@ async function settingsRoutes(fastify, options) {
           feedback_rewards_enabled = EXCLUDED.feedback_rewards_enabled,
           partner_referral_incentive = EXCLUDED.partner_referral_incentive,
           partner_welcome_bonus = EXCLUDED.partner_welcome_bonus,
+          partner_commission_percent = EXCLUDED.partner_commission_percent,
           platform_commission_percent = EXCLUDED.platform_commission_percent,
+          customer_platform_fee_percent = EXCLUDED.customer_platform_fee_percent,
+          payment_gateway_fee_percent = EXCLUDED.payment_gateway_fee_percent,
+          gateway_fee_percent = EXCLUDED.gateway_fee_percent,
+          inspection_visit_fee = EXCLUDED.inspection_visit_fee,
           updated_at = CURRENT_TIMESTAMP,
           updated_by = EXCLUDED.updated_by
         RETURNING *;
@@ -217,6 +242,9 @@ async function settingsRoutes(fastify, options) {
         newPartnerIncentive,
         newPartnerBonus,
         newCommission,
+        newCustFee,
+        newGatewayFee,
+        newVisitFee,
         updated_by
       ]);
 

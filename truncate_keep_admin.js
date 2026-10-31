@@ -32,13 +32,27 @@ async function truncateKeepAdmin() {
     await query(`TRUNCATE TABLE ${tablesToTruncate.join(', ')} CASCADE;`);
     console.log('✅ Transactional and technician tables truncated.');
 
-    // 2. Delete all non-admin users
+    // 2. Delete all non-admin users and reset balances
     const deleteUsersRes = await query(`
       DELETE FROM users 
       WHERE role != 'admin' 
         AND phone NOT IN ('+919842099999', '9842099999');
     `);
     console.log(`✅ Deleted ${deleteUsersRes.rowCount} non-admin user(s).`);
+
+    await query(`UPDATE users SET wallet_balance = 0.00;`);
+    console.log('✅ Reset remaining user wallet balance to 0.00.');
+
+    try {
+      await query(`
+        UPDATE platform_settings 
+        SET feedback_reward_credits = 0.00, 
+            feedback_rewards_enabled = FALSE, 
+            partner_welcome_bonus = 0.00 
+        WHERE id = 'reward_settings';
+      `);
+      console.log('✅ Updated reward settings: feedback & welcome rewards disabled.');
+    } catch (sErr) {}
 
     await query('COMMIT');
     console.log('✅ Transaction committed successfully.\n');

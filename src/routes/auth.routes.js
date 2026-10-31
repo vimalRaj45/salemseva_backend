@@ -106,7 +106,7 @@ function formatCustomerUser(u, cleanPhone) {
     email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
     locality: u.locality || 'Fairlands, Salem',
     address: u.default_address || 'Fairlands, Salem - 636016',
-    walletBalance: parseFloat(u.wallet_balance || 100)
+    walletBalance: parseFloat(u.wallet_balance || 0)
   };
 }
 
@@ -220,7 +220,7 @@ async function authRoutes(fastify, options) {
               email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
               locality: u.locality || 'Fairlands, Salem',
               address: u.default_address || 'Fairlands, Salem - 636016',
-              walletBalance: parseFloat(u.wallet_balance || 100)
+              walletBalance: parseFloat(u.wallet_balance || 0)
             },
             role: u.role || 'customer'
           };
@@ -502,7 +502,7 @@ async function authRoutes(fastify, options) {
           email: email || `${(name || 'customer').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
           locality: locality || 'Fairlands, Salem',
           address: address || `${locality}, Salem - 636016`,
-          walletBalance: 100, // ₹100 Welcome reward
+          walletBalance: 0,
           firstTimeUser: true,
           referralCodeUsed: referralCode ? referralCode.toUpperCase() : null
         };
@@ -511,7 +511,7 @@ async function authRoutes(fastify, options) {
         try {
           const insertCustRes = await query(`
             INSERT INTO users (full_name, phone, email, role, locality, default_address, wallet_balance, password_hash)
-            VALUES ($1, $2, $3, 'customer', $4, $5, 100.00, $6)
+            VALUES ($1, $2, $3, 'customer', $4, $5, 0.00, $6)
             RETURNING id
           `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.locality, createdUser.address, pwdHash]);
 
