@@ -913,9 +913,11 @@ async function bookingsRoutes(fastify, options) {
         let payments = rawPayments.map(p => ({
           id: p.id,
           transaction_id: p.razorpay_payment_id || p.payout_utr || p.transaction_id || `txn_${b.id}`,
-          amount: parseFloat(p.amount_total || p.amount || (p.tech_payout_amount ? p.tech_payout_amount : 99.00)),
+          amount: parseFloat(p.amount_total || p.amount || 0.00),
           status: (p.status || 'SETTLED').toUpperCase(),
           payment_method: p.payment_method || 'UPI (Instant Escrow)',
+          pg_fee: parseFloat(p.pg_fee || 0.00),
+          platform_fee: parseFloat(p.platform_commission || 0.00),
           created_at: p.created_at || p.settled_at || b.created_at
         }));
 
@@ -941,28 +943,44 @@ async function bookingsRoutes(fastify, options) {
         }
 
         const isPaidStage = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status) || (b.status === 'cancelled' && b.technician_id);
+        const isCancelled = b.status === 'cancelled';
+        const actualGrossPaid = parseFloat(b.final_amount || b.visit_fee || 99.00);
+        const refundAmt = parseFloat(b.refund_amount || 0.00);
+        const refundPlatformCut = parseFloat(b.refund_platform_fee || 0.00);
+        const refundGatewayCut = parseFloat(b.refund_gateway_fee || 0.00);
+
         const totalPaidAmount = b.status === 'completed' 
           ? (visitFee + finalQuoteSubtotal) 
-          : (isPaidStage ? visitFee : 0.00);
+          : (isCancelled ? actualGrossPaid : (isPaidStage ? visitFee : 0.00));
 
         return {
           ...b,
           quote_subtotal: finalQuoteSubtotal,
           final_amount: totalPaidAmount,
+          gross_paid_amount: actualGrossPaid,
+          refund_amount: refundAmt,
+          refund_platform_fee: refundPlatformCut,
+          refund_gateway_fee: refundGatewayCut,
+          refund_status: b.refund_status || (isCancelled ? 'REFUND_INITIATED' : null),
           payments,
           quoteItems,
           auditLogs,
           paymentSummary: {
             totalPaid: totalPaidAmount,
+            grossPaid: actualGrossPaid,
+            refundAmount: refundAmt,
+            refundPlatformFee: refundPlatformCut,
+            refundGatewayFee: refundGatewayCut,
+            isCancelled,
             part1Fee: visitFee,
             part1PaymentId: `TXN-VISIT-${b.id}`,
-            part1Status: isPaidStage ? 'PAID' : (b.status === 'accepted' ? 'PENDING_2MIN' : 'NOT_CHARGED'),
-            part1Disbursal: '100% to Technician (Fuel & Travel)',
+            part1Status: isCancelled ? (refundAmt > 0 ? 'REFUNDED' : 'CANCELLED') : (isPaidStage ? 'PAID' : (b.status === 'accepted' ? 'PENDING_2MIN' : 'NOT_CHARGED')),
+            part1Disbursal: isCancelled ? (b.technician_id ? 'Compensated to Technician' : 'Zero Technician Disbursal') : '100% to Technician (Fuel & Travel)',
             part2Amount: finalQuoteSubtotal,
             part2PaymentId: b.status === 'completed' ? `TXN-FINAL-${b.id}` : null,
             part2Status: b.status === 'completed' ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
             platformCommission: b.status === 'completed' ? parseFloat((finalQuoteSubtotal * (getPartnerCommissionPercent() / 100.0)).toFixed(2)) : 0,
-            escrowGuarantee: '100% Protected under Shazu One Escrow'
+            escrowGuarantee: isCancelled ? 'Escrow Released & Refunded' : '100% Protected under Shazu One Escrow'
           }
         };
       }));
@@ -1439,7 +1457,7 @@ async function bookingsRoutes(fastify, options) {
         await query(`
           INSERT INTO payments (booking_id, amount_total, pg_fee, platform_commission, tech_payout_amount, status, payment_method, settled_at)
           VALUES ($1, $2, $3, $4, 0.00, 'refunded', 'Razorpay Gateway Refund', NOW())
-        `, [booking.id, originalAmount, gatewayChargeDeduction, platformFeeDeduction]);
+        `, [booking.id, refundAmount, gatewayChargeDeduction, platformFeeDeduction]);
       } catch (payErr) {
         // An empty catch here meant a cancelled booking could be reported as refunded with no
         // ledger row behind it. The booking update has already happened, so the only correct
@@ -1479,6 +1497,7 @@ async function bookingsRoutes(fastify, options) {
           originalPaid: originalAmount,
           platformFeeRetained: platformFeeDeduction,
           gatewayChargeRetained: gatewayChargeDeduction,
+          technicianTravelDisbursal: 0.00,
           refundAmount,
           refundStatus: 'REFUND_INITIATED',
           policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,

@@ -1,6 +1,6 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
-const { getPlatformCommissionPercent, calculateCommissionSplit, getLiveFeeSettings } = require('../services/commission.service');
+const { getPlatformCommissionPercent, calculateCommissionSplit, getLiveFeeSettings, getCustomerPlatformFeePercent, getPaymentGatewayFeePercent } = require('../services/commission.service');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -582,6 +582,10 @@ async function adminRoutes(fastify, options) {
           b.scheduled_slot,
           b.cancelled_at,
           b.cancellation_reason,
+          b.refund_amount,
+          b.refund_platform_fee,
+          b.refund_gateway_fee,
+          b.refund_status,
           t.full_name as technician_name,
           t.phone as technician_phone,
           t.primary_trade as technician_trade,
@@ -647,16 +651,21 @@ async function adminRoutes(fastify, options) {
           techPayout = visitFee; // Travel disbursal if cancelled after technician dispatch
         }
 
-        // Platform Commission: configured % of quote labor
+        // Platform Commission: configured % of quote labor OR retained cancellation fee
         let platformCut = 0;
         if (isCompleted) {
           platformCut = parseFloat(r.payment_platform_commission) || parseFloat((quoteSubtotal * platformCommRate).toFixed(2));
+        } else if (isCancelled && r.refund_platform_fee) {
+          platformCut = parseFloat(r.refund_platform_fee);
         }
 
-        // Customer Refund
+        // Customer Refund & Gateway Fee Retention
         let refund = 0;
-        if (isCancelled && (r.cancellation_reason?.includes('customer') || !r.technician_name)) {
-          refund = gross; // 100% refunded if cancelled before technician dispatch
+        if (isCancelled) {
+          refund = parseFloat(r.refund_amount !== null && r.refund_amount !== undefined ? r.refund_amount : ((r.cancellation_reason?.includes('customer') || !r.technician_name) ? gross : 0));
+          if (r.refund_gateway_fee) {
+            razorpayFee = parseFloat(r.refund_gateway_fee);
+          }
         }
 
         // Update overall summary
@@ -893,29 +902,47 @@ async function adminRoutes(fastify, options) {
         ? `${reasonDetails} [Admin Note: ${adminNotes}]` 
         : (reasonDetails || 'Customer did not respond to technician/ops attempts. Technician released by central dispatch.');
 
+      const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
+      const custFeeRate = getCustomerPlatformFeePercent();
+      const pgFeeRate = getPaymentGatewayFeePercent();
+      let platformFeeDeduction = 0.00;
+      let gatewayChargeDeduction = 0.00;
+      let refundAmount = 0.00;
+
+      if (!compensateTech) {
+        platformFeeDeduction = parseFloat((originalAmount * (custFeeRate / 100.0)).toFixed(2));
+        gatewayChargeDeduction = parseFloat((originalAmount * (pgFeeRate / 100.0)).toFixed(2));
+        refundAmount = parseFloat(Math.max(0, originalAmount - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
+      }
+
       // Update booking to cancelled
       const updateRes = await query(`
         UPDATE bookings 
-        SET status = 'cancelled',
-            cancellation_reason = $1,
+        SET status               = 'cancelled',
+            cancellation_reason  = $1,
             cancellation_details = $2,
-            cancelled_by = 'admin_ops',
-            cancelled_at = NOW(),
-            technician_id = NULL
+            cancelled_by         = 'admin_ops',
+            cancelled_at         = NOW(),
+            refund_amount        = $4,
+            refund_platform_fee  = $5,
+            refund_gateway_fee   = $6,
+            refund_status        = 'REFUND_INITIATED',
+            technician_id        = NULL
         WHERE id = $3
         RETURNING *
-      `, [fullReason, fullDetails, bookingId]);
+      `, [fullReason, fullDetails, bookingId, refundAmount, platformFeeDeduction, gatewayChargeDeduction]);
 
       // Release advance payment and mark refunded to customer wallet
       try {
-        // payments has no refund_amount column. The refunded figure is amount_total, which
-        // stays on the row, so marking the status is the whole ledger write.
         await query(`
           UPDATE payments
           SET status = 'refunded',
+              amount_total = $2,
+              pg_fee = $3,
+              platform_commission = $4,
               settled_at = NOW()
           WHERE booking_id = $1 AND status <> 'refunded'
-        `, [bookingId]);
+        `, [bookingId, refundAmount, gatewayChargeDeduction, platformFeeDeduction]);
       } catch (refundErr) {
         fastify.log.warn('Release technician customer refund note: ' + refundErr.message);
       }
@@ -1009,33 +1036,52 @@ async function adminRoutes(fastify, options) {
         }
       }
 
-      // 2. Cancel the booking
+      // 2. Cancel the booking & calculate exact refund figures
       const fullDetails = [
         reasonDetails,
         adminNotes ? `[Admin Note: ${adminNotes}]` : ''
       ].filter(Boolean).join(' ').trim() || 'Cancelled by Shazu One Central Operations admin.';
 
+      const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
+      const custFeeRate = getCustomerPlatformFeePercent();
+      const pgFeeRate = getPaymentGatewayFeePercent();
+      let platformFeeDeduction = 0.00;
+      let gatewayChargeDeduction = 0.00;
+      let refundAmount = 0.00;
+
+      if (!compensateTech) {
+        platformFeeDeduction = parseFloat((originalAmount * (custFeeRate / 100.0)).toFixed(2));
+        gatewayChargeDeduction = parseFloat((originalAmount * (pgFeeRate / 100.0)).toFixed(2));
+        refundAmount = parseFloat(Math.max(0, originalAmount - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
+      }
+
       const updateRes = await query(`
         UPDATE bookings
-        SET status            = 'cancelled',
+        SET status               = 'cancelled',
             cancellation_reason  = $1,
             cancellation_details = $2,
-            cancelled_by      = $3,
-            cancelled_at      = NOW(),
-            technician_id     = NULL
-        WHERE id = $4
+            cancelled_by         = $3,
+            cancelled_at         = NOW(),
+            refund_amount        = $4,
+            refund_platform_fee  = $5,
+            refund_gateway_fee   = $6,
+            refund_status        = 'REFUND_INITIATED',
+            technician_id        = NULL
+        WHERE id = $7
         RETURNING *
-      `, [reason, fullDetails, adminId, bookingId]);
+      `, [reason, fullDetails, adminId, refundAmount, platformFeeDeduction, gatewayChargeDeduction, bookingId]);
 
-      // Release advance payment and mark refunded to customer wallet
+      // Record accurate refund in payments ledger
       try {
-        // payments has no refund_amount column; amount_total already holds the refunded sum.
         await query(`
           UPDATE payments
           SET status = 'refunded',
+              amount_total = $2,
+              pg_fee = $3,
+              platform_commission = $4,
               settled_at = NOW()
           WHERE booking_id = $1 AND status <> 'refunded'
-        `, [bookingId]);
+        `, [bookingId, refundAmount, gatewayChargeDeduction, platformFeeDeduction]);
       } catch (refundErr) {
         fastify.log.warn('Admin cancel customer refund note: ' + refundErr.message);
       }
