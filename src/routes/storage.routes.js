@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const { uploadToS3, getObjectFromS3, bucketName, MAX_FILE_SIZE } = require('../services/storage.service');
+const { getPartnerCommissionPercent } = require('../services/commission.service');
 
 async function storageRoutes(fastify, options) {
   // Ensure database columns exist in Neon PostgreSQL
@@ -171,7 +172,8 @@ async function storageRoutes(fastify, options) {
 
       const parsedAmount = parseFloat(billAmount) || null;
       const validBillAmt = parsedAmount !== null ? parsedAmount : 0;
-      const platformFee = Math.round((validBillAmt + laborCost) * 0.05 * 100) / 100;
+      const commRate = getPartnerCommissionPercent() / 100.0;
+      const platformFee = Math.round((validBillAmt + laborCost) * commRate * 100) / 100;
       const dynamicTotal = validBillAmt + laborCost + platformFee;
 
       // Update Booking in DB with parts bill, subtotal and recalculated total
@@ -248,7 +250,8 @@ async function storageRoutes(fastify, options) {
       if (laborCost <= 0) laborCost = 250.00;
 
       const subtotal = row.parts_mode === 'user_buys' ? laborCost : (billAmt + laborCost);
-      const platformFee = Math.round(subtotal * 0.05 * 100) / 100;
+      const commRate2 = getPartnerCommissionPercent() / 100.0;
+      const platformFee = Math.round(subtotal * commRate2 * 100) / 100;
       const totalAmount = subtotal + platformFee;
 
       return {

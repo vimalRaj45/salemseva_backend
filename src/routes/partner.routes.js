@@ -2,6 +2,7 @@ const { query } = require('../db/db');
 // Password hashing lives in one place so onboarding and sign-in agree on the format.
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
+const { getPartnerCommissionPercent, getLiveFeeSettings } = require('../services/commission.service');
 
 async function partnerRoutes(fastify, options) {
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
@@ -217,13 +218,15 @@ async function partnerRoutes(fastify, options) {
         LIMIT 100
       `, [tech.id]);
 
-      // Calculate real today earnings and completed jobs from actual DB bookings
+      // Calculate real today earnings and completed jobs from actual DB bookings using dynamic commission
+      const liveFees = await getLiveFeeSettings();
+      const partnerEarningsMultiplier = Math.max(0, (100 - liveFees.partnerCommPercent) / 100.0);
       const statsRes = await query(`
         SELECT 
-          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * 0.98, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
           COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs_count
         FROM bookings WHERE technician_id = $1
-      `, [tech.id]);
+      `, [tech.id, partnerEarningsMultiplier]);
       const techStats = statsRes.rows[0] || { today_earnings: 0, completed_jobs_count: 0 };
       const realTodayEarnings = parseFloat(techStats.today_earnings || 0);
       const realJobsCount = parseInt(techStats.completed_jobs_count || tech.jobs_completed_count || 0, 10);
@@ -1278,12 +1281,16 @@ async function partnerRoutes(fastify, options) {
 
       const res = await query(historySql, params);
 
+      const feeConfig = await getLiveFeeSettings();
+      const partnerRate = (100 - feeConfig.partnerCommPercent) / 100.0;
+      const platformRate = feeConfig.partnerCommPercent / 100.0;
+
       const jobs = res.rows.map(row => {
         const gross = parseFloat(row.final_amount) || 899.00;
         const visitFee = parseFloat(row.visit_fee) || 99.00;
         const laborAndParts = Math.max(0, gross - visitFee);
-        const techShare = visitFee + (laborAndParts * 0.95) + (row.is_urgent_dispatch ? 40 : 0);
-        const platformCut = (laborAndParts * 0.05) + (row.is_urgent_dispatch ? 10 : 0);
+        const techShare = visitFee + (laborAndParts * partnerRate) + (row.is_urgent_dispatch ? 40 : 0);
+        const platformCut = (laborAndParts * platformRate) + (row.is_urgent_dispatch ? 10 : 0);
 
         return {
           id: row.id,

@@ -1,6 +1,12 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
-const { calculateDualCommissionInvoice } = require('../services/commission.service');
+const {
+  calculateDualCommissionInvoice,
+  getPartnerCommissionPercent,
+  getCustomerPlatformFeePercent,
+  getPaymentGatewayFeePercent,
+  getLiveFeeSettings
+} = require('../services/commission.service');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -955,7 +961,7 @@ async function bookingsRoutes(fastify, options) {
             part2Amount: finalQuoteSubtotal,
             part2PaymentId: b.status === 'completed' ? `TXN-FINAL-${b.id}` : null,
             part2Status: b.status === 'completed' ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
-            platformCommission: b.status === 'completed' ? parseFloat((finalQuoteSubtotal * 0.05).toFixed(2)) : 0,
+            platformCommission: b.status === 'completed' ? parseFloat((finalQuoteSubtotal * (getPartnerCommissionPercent() / 100.0)).toFixed(2)) : 0,
             escrowGuarantee: '100% Protected under Shazu One Escrow'
           }
         };
@@ -1363,8 +1369,10 @@ async function bookingsRoutes(fastify, options) {
 
       if (booking.status === 'cancelled') {
         const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-        const platformFeeDeduction = parseFloat((originalPaid * 0.02).toFixed(2));
-        const gatewayChargeDeduction = parseFloat((originalPaid * 0.02).toFixed(2));
+        const custFeeRate = getCustomerPlatformFeePercent();
+        const pgFeeRate = getPaymentGatewayFeePercent();
+        const platformFeeDeduction = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
+        const gatewayChargeDeduction = parseFloat((originalPaid * (pgFeeRate / 100.0)).toFixed(2));
         const refundAmount = parseFloat(Math.max(0, originalPaid - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
 
         return {
@@ -1380,7 +1388,7 @@ async function bookingsRoutes(fastify, options) {
             platformFeeRetained: platformFeeDeduction,
             gatewayChargeRetained: gatewayChargeDeduction,
             refundAmount,
-            policyNotice: `As per Shazu One policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
+            policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
             cancelledAt: booking.cancelled_at || new Date().toISOString()
           }
         };
@@ -1391,9 +1399,11 @@ async function bookingsRoutes(fastify, options) {
       const cancelReasonText = reason || 'Customer requested cancellation';
       const cancelDetailsText = reasonDetails || '';
 
-      // Platform Cut (2%) & Razorpay Gateway Processing Fee (2%) Retention
-      const platformFeeDeduction = parseFloat((originalAmount * 0.02).toFixed(2));
-      const gatewayChargeDeduction = parseFloat((originalAmount * 0.02).toFixed(2));
+      // Platform Cut & Razorpay Gateway Processing Fee Retention (Configured via .env)
+      const custFeeRate = getCustomerPlatformFeePercent();
+      const pgFeeRate = getPaymentGatewayFeePercent();
+      const platformFeeDeduction = parseFloat((originalAmount * (custFeeRate / 100.0)).toFixed(2));
+      const gatewayChargeDeduction = parseFloat((originalAmount * (pgFeeRate / 100.0)).toFixed(2));
       const totalDeductions = parseFloat((platformFeeDeduction + gatewayChargeDeduction).toFixed(2));
       const refundAmount = parseFloat(Math.max(0, originalAmount - totalDeductions).toFixed(2));
 
@@ -1459,7 +1469,7 @@ async function bookingsRoutes(fastify, options) {
 
       return {
         success: true,
-        message: 'Booking cancelled successfully. Refund initiated after retaining 2% platform fee and 2% Razorpay service charge.',
+        message: `Booking cancelled successfully. Refund initiated after retaining ${custFeeRate}% platform fee and ${pgFeeRate}% Razorpay service charge.`,
         booking: updatedBooking,
         cancellationSummary: {
           bookingId: booking.id,
@@ -1471,7 +1481,7 @@ async function bookingsRoutes(fastify, options) {
           gatewayChargeRetained: gatewayChargeDeduction,
           refundAmount,
           refundStatus: 'REFUND_INITIATED',
-          policyNotice: `As per Shazu One policy, 2% platform fee (₹${platformFeeDeduction}) and 2% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
+          policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
           cancelledAt: new Date().toISOString()
         }
       };

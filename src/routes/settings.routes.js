@@ -1,5 +1,5 @@
 const { query } = require('../db/db');
-const { getEnvCommissionPercent, invalidateCommissionCache } = require('../services/commission.service');
+const { getEnvCommissionPercent, getLiveFeeSettings, invalidateCommissionCache } = require('../services/commission.service');
 
 async function settingsRoutes(fastify, options) {
   // Ensure platform_settings table exists and seed default configuration if empty
@@ -41,6 +41,10 @@ async function settingsRoutes(fastify, options) {
   // 1. GET /settings/rewards - Public Endpoint for Customer and Partner UI
   fastify.get('/settings/rewards', async (req, reply) => {
     try {
+      const feeSettings = await getLiveFeeSettings();
+      const partnerComm = feeSettings.partnerCommPercent;
+      const partnerPayout = Math.max(0, 100 - partnerComm);
+
       const res = await query(`SELECT * FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
       if (res.rows.length === 0) {
         return {
@@ -52,7 +56,12 @@ async function settingsRoutes(fastify, options) {
             feedback_reward_credits: 15.00,
             feedback_rewards_enabled: true,
             partner_referral_incentive: 100.00,
-            partner_welcome_bonus: 50.00
+            partner_welcome_bonus: 50.00,
+            platform_commission_percent: partnerComm,
+            partner_commission_percent: partnerComm,
+            partner_payout_percent: partnerPayout,
+            customer_platform_fee_percent: feeSettings.customerFeePercent,
+            payment_gateway_fee_percent: feeSettings.gatewayFeePercent
           }
         };
       }
@@ -68,7 +77,33 @@ async function settingsRoutes(fastify, options) {
           feedback_rewards_enabled: Boolean(row.feedback_rewards_enabled),
           partner_referral_incentive: parseFloat(row.partner_referral_incentive),
           partner_welcome_bonus: parseFloat(row.partner_welcome_bonus),
+          platform_commission_percent: partnerComm,
+          partner_commission_percent: partnerComm,
+          partner_payout_percent: partnerPayout,
+          customer_platform_fee_percent: feeSettings.customerFeePercent,
+          payment_gateway_fee_percent: feeSettings.gatewayFeePercent,
           updated_at: row.updated_at
+        }
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 1b. GET /settings/fees - Public Real-Time Fee Matrix
+  fastify.get('/settings/fees', async (req, reply) => {
+    try {
+      const feeSettings = await getLiveFeeSettings();
+      const partnerComm = feeSettings.partnerCommPercent;
+      const partnerPayout = Math.max(0, 100 - partnerComm);
+      return {
+        success: true,
+        fees: {
+          customerPlatformFeePercent: feeSettings.customerFeePercent,
+          paymentGatewayFeePercent: feeSettings.gatewayFeePercent,
+          partnerCommissionPercent: partnerComm,
+          partnerPayoutPercent: partnerPayout
         }
       };
     } catch (err) {

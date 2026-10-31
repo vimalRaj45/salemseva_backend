@@ -1,6 +1,6 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
-const { getPlatformCommissionPercent, calculateCommissionSplit } = require('../services/commission.service');
+const { getPlatformCommissionPercent, calculateCommissionSplit, getLiveFeeSettings } = require('../services/commission.service');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -427,6 +427,8 @@ async function adminRoutes(fastify, options) {
   fastify.get('/admin/technicians/:id/dossier', async (req, reply) => {
     try {
       const { id } = req.params;
+      const feeConfig = await getLiveFeeSettings();
+      const techPayoutRate = (100 - feeConfig.partnerCommPercent) / 100.0;
       const [techRes, jobsRes, earningsRes] = await Promise.all([
         query(`
           SELECT 
@@ -459,12 +461,12 @@ async function adminRoutes(fastify, options) {
         `, [id]),
         query(`
           SELECT 
-            COALESCE(SUM(CASE WHEN b.status = 'completed' THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * 0.95, 0) ELSE 0 END), 0) as lifetime_earnings,
+            COALESCE(SUM(CASE WHEN b.status = 'completed' THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * $2::numeric, 0) ELSE 0 END), 0) as lifetime_earnings,
             COALESCE(SUM(COALESCE(p.amount_total, b.final_amount, 0)), 0) as gross_job_volume
           FROM bookings b
           LEFT JOIN payments p ON p.booking_id = b.id
           WHERE b.technician_id = $1
-        `, [id])
+        `, [id, techPayoutRate])
       ]);
 
       if (techRes.rows.length === 0) {
@@ -614,6 +616,9 @@ async function adminRoutes(fastify, options) {
 
       const regionMap = {};
       const dailyMap = {};
+      const feeConfig = await getLiveFeeSettings();
+      const partnerPayoutRate = (100 - feeConfig.partnerCommPercent) / 100.0;
+      const platformCommRate = feeConfig.partnerCommPercent / 100.0;
 
       const transactions = rows.map(r => {
         const visitFee = parseFloat(r.visit_fee) || 49.00;
@@ -628,23 +633,24 @@ async function adminRoutes(fastify, options) {
           gross = 0;
         }
 
-        // Razorpay Gateway Fee: 2% + 18% GST on the fee = 2.36% of gross transaction
-        const razorpayFee = gross > 0 ? parseFloat((gross * 0.0236).toFixed(2)) : 0.00;
+        // Razorpay Gateway Fee: dynamic gateway fee + 18% GST on the fee
+        const pgFeeMultiplier = ((feeConfig.gatewayFeePercent || 2.0) * 1.18) / 100.0;
+        const razorpayFee = gross > 0 ? parseFloat((gross * pgFeeMultiplier).toFixed(2)) : 0.00;
 
-        // Technician Payout: 100% of visit travel fee + 95% of quote labor
+        // Technician Payout: 100% of visit travel fee + dynamic payout % of quote labor
         let techPayout = 0;
         if (isCompleted) {
-          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((visitFee + quoteSubtotal * 0.95).toFixed(2));
+          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((visitFee + quoteSubtotal * partnerPayoutRate).toFixed(2));
         } else if (isPaid && !isCancelled) {
           techPayout = visitFee; // Visit fee travel allocation
         } else if (isCancelled && r.technician_name) {
           techPayout = visitFee; // Travel disbursal if cancelled after technician dispatch
         }
 
-        // Platform Commission: 5% of quote labor
+        // Platform Commission: configured % of quote labor
         let platformCut = 0;
         if (isCompleted) {
-          platformCut = parseFloat(r.payment_platform_commission) || parseFloat((quoteSubtotal * 0.05).toFixed(2));
+          platformCut = parseFloat(r.payment_platform_commission) || parseFloat((quoteSubtotal * platformCommRate).toFixed(2));
         }
 
         // Customer Refund
