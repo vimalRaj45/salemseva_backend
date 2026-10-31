@@ -89,7 +89,11 @@ function formatTechnicianUser(t, cleanPhone) {
     todayEarnings: 0,
     today_earnings: 0,
     serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-    assignedLocalities: t.assigned_localities || ['Fairlands']
+    assignedLocalities: t.assigned_localities || ['Fairlands'],
+    secondaryTrades: Array.isArray(t.secondary_trades) ? t.secondary_trades : [],
+    secondary_trades: Array.isArray(t.secondary_trades) ? t.secondary_trades : [],
+    dailyJobCapacity: Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4)),
+    daily_job_capacity: Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4))
   };
 }
 
@@ -335,6 +339,8 @@ async function authRoutes(fastify, options) {
         password = '',
         role = 'customer',
         trade = 'ac',
+        secondaryTrades = [],
+        secondary_trades = [],
         locality = 'Fairlands, Salem',
         address = '',
         aadhaar = '',
@@ -436,6 +442,11 @@ async function authRoutes(fastify, options) {
           cleaning: 'Home & Bathroom Cleaning Pro'
         };
 
+        const rawSecondary = Array.isArray(secondaryTrades) && secondaryTrades.length > 0
+          ? secondaryTrades
+          : (Array.isArray(secondary_trades) ? secondary_trades : []);
+        const sanitizedSecondary = rawSecondary.filter(t => t && t !== trade);
+
         createdUser = {
           id: `tech-${Date.now()}`,
           role: 'technician',
@@ -444,6 +455,8 @@ async function authRoutes(fastify, options) {
           email: email || `${(name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
           trade: trade || 'ac',
           tradeName: tradeNames[trade] || 'Home Services Specialist',
+          secondaryTrades: sanitizedSecondary,
+          secondary_trades: sanitizedSecondary,
           isKycVerified: false,
           isOnline: false,
           ratingAvg: 0.0,
@@ -464,11 +477,24 @@ async function authRoutes(fastify, options) {
             : createdUser.assignedLocalities;
           const clampedDailyCapacity = Math.min(4, Math.max(1, parseInt(dailyJobCapacity, 10) || 4));
           const insertTechRes = await query(`
-            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa, years_experience, rating_avg, rating_count, jobs_completed_count, daily_job_capacity)
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5::text[], $6, $7, $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, $10, 0.00, 0, 0, $11)
+            INSERT INTO technicians (
+              full_name, phone, email, primary_trade, secondary_trades,
+              is_kyc_verified, is_online, assigned_localities, password_hash,
+              aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa,
+              years_experience, rating_avg, rating_count, jobs_completed_count,
+              daily_job_capacity
+            )
+            VALUES (
+              $1, $2, $3, $4, $5::text[],
+              FALSE, FALSE, $6::text[], $7,
+              $8, $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10,
+              $11, 0.00, 0, 0,
+              $12
+            )
             RETURNING id
           `, [
             createdUser.name, createdUser.phone, createdUser.email, createdUser.trade,
+            sanitizedSecondary,
             localities, pwdHash, cleanAadhaar, safeAadhaarDocUrl,
             (upiId || '').trim() || null,
             parseInt(experienceYears, 10) || 0,
