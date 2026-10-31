@@ -111,7 +111,15 @@ async function adminRoutes(fastify, options) {
             FROM bookings b 
             WHERE b.technician_id = t.id 
               AND b.status IN ('accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented')
-          ) as active_job_count
+          ) as active_job_count,
+          COALESCE(t.daily_job_capacity, 4) as daily_job_capacity,
+          (
+            SELECT count(*)::int 
+            FROM bookings b 
+            WHERE b.technician_id = t.id 
+              AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE)
+              AND b.status NOT IN ('cancelled', 'rejected')
+          ) as today_jobs_count
         FROM technicians t
         WHERE 1=1
       `;
@@ -743,7 +751,25 @@ async function adminRoutes(fastify, options) {
   // 10. Dispatch Technician to Booking
   fastify.post('/admin/bookings/dispatch', async (req, reply) => {
     try {
-      const { bookingId, technicianId } = req.body;
+      const { bookingId, technicianId, force = false } = req.body;
+
+      if (!force) {
+        const tCheck = await query(`
+          SELECT t.id, t.full_name, COALESCE(t.daily_job_capacity, 4) as capacity,
+            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE) AND b.status NOT IN ('cancelled', 'rejected')) as today_count
+          FROM technicians t WHERE t.id = $1
+        `, [technicianId]);
+        if (tCheck.rows.length > 0) {
+          const { full_name, capacity, today_count } = tCheck.rows[0];
+          if (today_count >= capacity) {
+            return reply.status(409).send({
+              success: false,
+              code: 'DAILY_CAPACITY_REACHED',
+              error: `${full_name} has reached their daily job limit (${today_count}/${capacity} jobs today).`
+            });
+          }
+        }
+      }
 
       const updateRes = await query(`
         UPDATE bookings 

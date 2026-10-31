@@ -342,7 +342,8 @@ async function authRoutes(fastify, options) {
         upiId = '',
         experienceYears = 0,
         assignedLocalities,
-        referralCode = ''
+        referralCode = '',
+        dailyJobCapacity = 4
       } = req.body || {};
 
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
@@ -461,21 +462,24 @@ async function authRoutes(fastify, options) {
           const localities = (Array.isArray(assignedLocalities) && assignedLocalities.length > 0)
             ? assignedLocalities
             : createdUser.assignedLocalities;
+          const clampedDailyCapacity = Math.min(4, Math.max(1, parseInt(dailyJobCapacity, 10) || 4));
           const insertTechRes = await query(`
-            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa, years_experience, rating_avg, rating_count, jobs_completed_count)
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5::text[], $6, $7, $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, $10, 0.00, 0, 0)
+            INSERT INTO technicians (full_name, phone, email, primary_trade, is_kyc_verified, is_online, assigned_localities, password_hash, aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa, years_experience, rating_avg, rating_count, jobs_completed_count, daily_job_capacity)
+            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5::text[], $6, $7, $8::text, CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END, $9, $10, 0.00, 0, 0, $11)
             RETURNING id
           `, [
             createdUser.name, createdUser.phone, createdUser.email, createdUser.trade,
             localities, pwdHash, cleanAadhaar, safeAadhaarDocUrl,
             (upiId || '').trim() || null,
-            parseInt(experienceYears, 10) || 0
+            parseInt(experienceYears, 10) || 0,
+            clampedDailyCapacity
           ]);
           
           if (insertTechRes.rows[0]?.id) {
             createdUser.id = insertTechRes.rows[0].id;
           }
           createdUser.assignedLocalities = localities;
+          createdUser.dailyJobCapacity = clampedDailyCapacity;
 
           await query(`
             INSERT INTO users (full_name, phone, email, role, locality, password_hash)

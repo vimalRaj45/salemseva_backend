@@ -223,7 +223,15 @@ async function bookingsRoutes(fastify, options) {
             AND status != 'cancelled';
         `, [serviceId || 'ac', `%${targetDate}%`]);
         const dayBookingsCount = parseInt(dayBookingsRes.rows[0]?.count || 0, 10);
-        const maxDailyCapacity = Math.max(1, totalDomainTechs * 4);
+        const maxDailyCapRes = await query(`
+          SELECT COALESCE(SUM(COALESCE(daily_job_capacity, 4)), 0)::int as capacity
+          FROM technicians
+          WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
+            AND is_blocked = FALSE 
+            AND is_kyc_verified = TRUE;
+        `, [serviceId || 'ac']);
+        const dynamicCapacity = parseInt(maxDailyCapRes.rows[0]?.capacity || 0, 10);
+        const maxDailyCapacity = Math.max(1, dynamicCapacity || (totalDomainTechs * 4));
 
         if (dayBookingsCount >= maxDailyCapacity) {
           return reply.status(400).send({
@@ -234,20 +242,27 @@ async function bookingsRoutes(fastify, options) {
         }
       }
 
-      // Check if customer requested a specific active specialist
+      // Check if customer requested a specific active specialist (respect daily capacity limit)
       const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
       let assignedTechId = null;
       let initialStatus = 'created';
 
       if (requestedTechId) {
-        const checkTech = await query('SELECT id, full_name, phone FROM technicians WHERE id = $1', [requestedTechId]);
+        const checkTech = await query(`
+          SELECT t.id, t.full_name, t.phone, COALESCE(t.daily_job_capacity, 4) as capacity,
+            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE) AND b.status NOT IN ('cancelled', 'rejected')) as today_count
+          FROM technicians t WHERE t.id = $1
+        `, [requestedTechId]);
         if (checkTech.rows.length > 0) {
-          assignedTechId = checkTech.rows[0].id;
-          initialStatus = 'accepted';
+          const tRow = checkTech.rows[0];
+          if (parseInt(tRow.today_count, 10) < parseInt(tRow.capacity, 10)) {
+            assignedTechId = tRow.id;
+            initialStatus = 'accepted';
+          }
         }
       }
 
-      // Check for available active specialists in Salem for this trade and locality
+      // Check for available active specialists in Salem for this trade and locality within daily capacity limit
       const onlineTechRes = await query(`
         SELECT id, full_name, phone FROM technicians 
         WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)) OR $1 IS NULL) 
@@ -267,6 +282,12 @@ async function bookingsRoutes(fastify, options) {
               )
             )
           )
+          AND (
+            SELECT COUNT(*) FROM bookings b 
+            WHERE b.technician_id = technicians.id 
+              AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE)
+              AND b.status NOT IN ('cancelled', 'rejected')
+          ) < COALESCE(daily_job_capacity, 4)
         LIMIT 1
       `, [serviceId || null, locality || '', address || '']);
       const onlineTech = assignedTechId ? { id: assignedTechId } : (onlineTechRes.rows[0] || null);

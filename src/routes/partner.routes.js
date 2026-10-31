@@ -41,7 +41,20 @@ async function partnerRoutes(fastify, options) {
         ...(Array.isArray(tech.secondary_trades) ? tech.secondary_trades : [])
       ].filter(Boolean);
 
+      // Calculate technician's daily job capacity and today's taken count (capped 1 to 4)
+      const techDailyCapacity = Math.min(4, Math.max(1, parseInt(tech.daily_job_capacity, 10) || 4));
+      const todayCountRes = await query(`
+        SELECT COUNT(*)::int as count 
+        FROM bookings 
+        WHERE technician_id = $1 
+          AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
+          AND status NOT IN ('cancelled', 'rejected')
+      `, [tech.id]);
+      const jobsTakenToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
+      const canTakeMoreJobsToday = jobsTakenToday < techDailyCapacity;
+
       // Get latest active job for this partner from DB (prioritize technician's own assigned jobs over unassigned broadcast requests)
+      // If technician has reached daily job limit, suppress unassigned broadcast requests ($5 = true)
       // Filter strictly by the technician's chosen operational areas (assigned_localities)
       // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
       const jobRes = await query(`
@@ -50,6 +63,7 @@ async function partnerRoutes(fastify, options) {
           technician_id = $1 
           OR (
             technician_id IS NULL 
+            AND $5::boolean = TRUE
             AND (service_id = ANY($2::text[]) OR $2::text[] IS NULL)
             AND (
               $4::text[] IS NULL OR cardinality($4::text[]) = 0 OR
@@ -91,7 +105,7 @@ async function partnerRoutes(fastify, options) {
           END,
           created_at DESC 
         LIMIT 1
-      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null]);
+      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null, canTakeMoreJobsToday]);
 
       const activeJob = jobRes.rows[0] || null;
       if (activeJob && (!activeJob.customer_otp || String(activeJob.customer_otp).trim().length !== 4)) {
@@ -218,6 +232,10 @@ async function partnerRoutes(fastify, options) {
         success: true,
         technician: {
           ...tech,
+          daily_job_capacity: techDailyCapacity,
+          dailyJobCapacity: techDailyCapacity,
+          jobsTakenToday,
+          canTakeMoreJobsToday,
           assigned_localities: tech.assigned_localities || ['Fairlands'],
           assignedLocalities: tech.assigned_localities || ['Fairlands'],
           secondary_trades: tech.secondary_trades || [],
@@ -230,6 +248,9 @@ async function partnerRoutes(fastify, options) {
           jobs_completed_count: realJobsCount,
           jobsCompleted: realJobsCount
         },
+        dailyJobCapacity: techDailyCapacity,
+        jobsTakenToday,
+        canTakeMoreJobsToday,
         cancelNotice,
         offlineJobRequest,
         myScheduledJobs: myScheduledRes.rows.map(b => ({
@@ -304,7 +325,7 @@ async function partnerRoutes(fastify, options) {
         cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
         const cleanDigits = phoneParam.replace(/\D/g, '').slice(-10);
         const techRes = await query(`
-          SELECT id, primary_trade, secondary_trades, assigned_localities FROM technicians 
+          SELECT id, primary_trade, secondary_trades, assigned_localities, daily_job_capacity FROM technicians 
           WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 
              OR id::text = $1
              OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
@@ -312,6 +333,7 @@ async function partnerRoutes(fastify, options) {
         `, [cleanPhone, cleanDigits || '']);
         if (techRes.rows.length > 0) {
           techId = techRes.rows[0].id;
+          const techCap = Math.min(4, Math.max(1, parseInt(techRes.rows[0].daily_job_capacity, 10) || 4));
           const pTrade = techRes.rows[0].primary_trade;
           const sTrades = Array.isArray(techRes.rows[0].secondary_trades) ? techRes.rows[0].secondary_trades : [];
           allTrades = [pTrade, ...sTrades].filter(Boolean);
@@ -319,6 +341,24 @@ async function partnerRoutes(fastify, options) {
             trade = pTrade;
           }
           techAssignedLocalities = techRes.rows[0].assigned_localities || null;
+
+          // If technician has already reached daily job limit, return empty leads
+          const todayCountRes = await query(`
+            SELECT COUNT(*)::int as count 
+            FROM bookings 
+            WHERE technician_id = $1 
+              AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
+              AND status NOT IN ('cancelled', 'rejected')
+          `, [techId]);
+          if (parseInt(todayCountRes.rows[0]?.count || 0, 10) >= techCap) {
+            return {
+              success: true,
+              leads: [],
+              dailyCapacityReached: true,
+              dailyJobCapacity: techCap,
+              message: `Daily job limit of ${techCap} jobs reached for today.`
+            };
+          }
         }
       }
 
@@ -456,6 +496,23 @@ async function partnerRoutes(fastify, options) {
         }
       }
 
+      // Check if technician has reached their daily job limit (1 to 4 jobs)
+      const maxDailyCap = Math.min(4, Math.max(1, parseInt(tech.daily_job_capacity, 10) || 4));
+      const todayCountRes = await query(`
+        SELECT COUNT(*)::int as count 
+        FROM bookings 
+        WHERE technician_id = $1 
+          AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
+          AND status NOT IN ('cancelled', 'rejected')
+      `, [tech.id]);
+      const currentJobsToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
+      if (currentJobsToday >= maxDailyCap) {
+        return reply.status(403).send({
+          success: false,
+          error: `Daily job limit reached (${maxDailyCap} jobs per day limit). You have already taken ${currentJobsToday} jobs today.`
+        });
+      }
+
       // Update booking with technician_id and status = 'accepted'
       const updateRes = await query(`
         UPDATE bookings 
@@ -532,13 +589,34 @@ async function partnerRoutes(fastify, options) {
       `, [cleanPhone, technicianId || '']);
 
       const tech = techUpdate.rows[0];
+      const targetTechId = tech ? tech.id : technicianId;
+
+      // Check daily job capacity limit (1 to 4)
+      if (targetTechId) {
+        const tRow = tech || (await query('SELECT daily_job_capacity FROM technicians WHERE id = $1', [targetTechId])).rows[0];
+        const maxDailyCap = Math.min(4, Math.max(1, parseInt(tRow?.daily_job_capacity, 10) || 4));
+        const todayCountRes = await query(`
+          SELECT COUNT(*)::int as count 
+          FROM bookings 
+          WHERE technician_id = $1 
+            AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
+            AND status NOT IN ('cancelled', 'rejected')
+        `, [targetTechId]);
+        const currentJobsToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
+        if (currentJobsToday >= maxDailyCap) {
+          return reply.status(403).send({
+            success: false,
+            error: `Daily job limit reached (${maxDailyCap} jobs per day limit). You have already taken ${currentJobsToday} jobs today.`
+          });
+        }
+      }
 
       // 2. Set booking status to 'accepted' and assign technician
       await query(`
         UPDATE bookings 
         SET status = 'accepted', technician_id = $1, matched_at = COALESCE(matched_at, NOW()) 
         WHERE id = $2
-      `, [tech ? tech.id : technicianId, bookingId]);
+      `, [targetTechId, bookingId]);
 
       // 3. Record Audit Log
       await query(`
@@ -734,7 +812,8 @@ async function partnerRoutes(fastify, options) {
         serviceArea = 'Fairlands, Salem',
         assignedLocalities,
         referralCode,
-        aadhaarCardUrl
+        aadhaarCardUrl,
+        dailyJobCapacity = 4
       } = req.body;
 
       const phoneDigits = String(phone || '').replace(/[^0-9]/g, '').slice(-10);
@@ -768,13 +847,15 @@ async function partnerRoutes(fastify, options) {
         ? secondaryTrades.filter(t => t && t !== trade)
         : [];
 
+      const clampedDailyCapacity = Math.min(4, Math.max(1, parseInt(dailyJobCapacity, 10) || 4));
+
       const insertSql = `
         INSERT INTO technicians (
           full_name, phone, primary_trade, secondary_trades, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
-          rating_avg, rating_count, jobs_completed_count
-        ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0)
+          rating_avg, rating_count, jobs_completed_count, daily_job_capacity
+        ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0, $11)
         ON CONFLICT (phone) DO NOTHING
         RETURNING *;
       `;
@@ -789,7 +870,8 @@ async function partnerRoutes(fastify, options) {
         parseInt(yearsExperience, 10) || 0,
         resolvedLocalities,
         aadhaarCardUrl || null,
-        partnerPwdHash
+        partnerPwdHash,
+        clampedDailyCapacity
       ]);
 
       // Onboarding creates an account; it never rewrites one. The upsert that used to sit here
@@ -909,7 +991,9 @@ async function partnerRoutes(fastify, options) {
         secondary_trades,
         aadhaarCardUrl,
         serviceArea,
-        assignedLocalities
+        assignedLocalities,
+        dailyJobCapacity,
+        daily_job_capacity
       } = req.body || {};
 
       let resolvedLocs = null;
@@ -918,6 +1002,11 @@ async function partnerRoutes(fastify, options) {
       } else if (serviceArea) {
         resolvedLocs = String(serviceArea).split(',').map(s => s.trim()).filter(Boolean);
       }
+
+      const inputCap = dailyJobCapacity !== undefined ? dailyJobCapacity : daily_job_capacity;
+      const parsedDailyCap = inputCap !== undefined && inputCap !== null && !isNaN(parseInt(inputCap, 10))
+        ? Math.min(4, Math.max(1, parseInt(inputCap, 10)))
+        : null;
 
       const inputSec = secondaryTrades !== undefined ? secondaryTrades : secondary_trades;
       const sanitizedSec = inputSec !== undefined 
@@ -941,7 +1030,8 @@ async function partnerRoutes(fastify, options) {
           secondary_trades = CASE WHEN $4::text[] IS NOT NULL THEN $4::text[] ELSE secondary_trades END,
           aadhaar_card_url = COALESCE($5, aadhaar_card_url),
           aadhaar_uploaded_at = CASE WHEN $5::text IS NOT NULL THEN NOW() ELSE aadhaar_uploaded_at END,
-          assigned_localities = COALESCE($6::text[], assigned_localities)
+          assigned_localities = COALESCE($6::text[], assigned_localities),
+          daily_job_capacity = COALESCE($9::int, daily_job_capacity)
         WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $7
            OR id::text = $8
         RETURNING *;
@@ -953,7 +1043,8 @@ async function partnerRoutes(fastify, options) {
         aadhaarCardUrl || null,
         resolvedLocs || null,
         cleanDigits || 'NOMATCH',
-        technicianId || 'NOMATCH'
+        technicianId || 'NOMATCH',
+        parsedDailyCap
       ]);
 
       if (updateRes.rows.length === 0) {
