@@ -250,7 +250,7 @@ async function bookingsRoutes(fastify, options) {
       if (requestedTechId) {
         const checkTech = await query(`
           SELECT t.id, t.full_name, t.phone, COALESCE(t.daily_job_capacity, 4) as capacity,
-            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE) AND b.status NOT IN ('cancelled', 'rejected')) as today_count
+            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%') AND b.status != 'cancelled') as today_count
           FROM technicians t WHERE t.id = $1
         `, [requestedTechId]);
         if (checkTech.rows.length > 0) {
@@ -285,8 +285,8 @@ async function bookingsRoutes(fastify, options) {
           AND (
             SELECT COUNT(*) FROM bookings b 
             WHERE b.technician_id = technicians.id 
-              AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE)
-              AND b.status NOT IN ('cancelled', 'rejected')
+              AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+              AND b.status != 'cancelled'
           ) < COALESCE(daily_job_capacity, 4)
         LIMIT 1
       `, [serviceId || null, locality || '', address || '']);

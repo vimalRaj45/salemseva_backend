@@ -47,8 +47,8 @@ async function partnerRoutes(fastify, options) {
         SELECT COUNT(*)::int as count 
         FROM bookings 
         WHERE technician_id = $1 
-          AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
-          AND status NOT IN ('cancelled', 'rejected')
+          AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+          AND status != 'cancelled'
       `, [tech.id]);
       const jobsTakenToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
       const canTakeMoreJobsToday = jobsTakenToday < techDailyCapacity;
@@ -347,8 +347,8 @@ async function partnerRoutes(fastify, options) {
             SELECT COUNT(*)::int as count 
             FROM bookings 
             WHERE technician_id = $1 
-              AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
-              AND status NOT IN ('cancelled', 'rejected')
+              AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+              AND status != 'cancelled'
           `, [techId]);
           if (parseInt(todayCountRes.rows[0]?.count || 0, 10) >= techCap) {
             return {
@@ -502,8 +502,8 @@ async function partnerRoutes(fastify, options) {
         SELECT COUNT(*)::int as count 
         FROM bookings 
         WHERE technician_id = $1 
-          AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
-          AND status NOT IN ('cancelled', 'rejected')
+          AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+          AND status != 'cancelled'
       `, [tech.id]);
       const currentJobsToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
       if (currentJobsToday >= maxDailyCap) {
@@ -599,8 +599,8 @@ async function partnerRoutes(fastify, options) {
           SELECT COUNT(*)::int as count 
           FROM bookings 
           WHERE technician_id = $1 
-            AND (created_at >= CURRENT_DATE OR DATE(scheduled_slot) = CURRENT_DATE)
-            AND status NOT IN ('cancelled', 'rejected')
+            AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+            AND status != 'cancelled'
         `, [targetTechId]);
         const currentJobsToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
         if (currentJobsToday >= maxDailyCap) {

@@ -117,8 +117,8 @@ async function adminRoutes(fastify, options) {
             SELECT count(*)::int 
             FROM bookings b 
             WHERE b.technician_id = t.id 
-              AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE)
-              AND b.status NOT IN ('cancelled', 'rejected')
+              AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+              AND b.status != 'cancelled'
           ) as today_jobs_count
         FROM technicians t
         WHERE 1=1
@@ -756,7 +756,7 @@ async function adminRoutes(fastify, options) {
       if (!force) {
         const tCheck = await query(`
           SELECT t.id, t.full_name, COALESCE(t.daily_job_capacity, 4) as capacity,
-            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR DATE(b.scheduled_slot) = CURRENT_DATE) AND b.status NOT IN ('cancelled', 'rejected')) as today_count
+            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%') AND b.status != 'cancelled') as today_count
           FROM technicians t WHERE t.id = $1
         `, [technicianId]);
         if (tCheck.rows.length > 0) {
