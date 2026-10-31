@@ -944,14 +944,18 @@ async function bookingsRoutes(fastify, options) {
 
         const isPaidStage = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status) || (b.status === 'cancelled' && b.technician_id);
         const isCancelled = b.status === 'cancelled';
-        const actualGrossPaid = parseFloat(b.final_amount || b.visit_fee || 99.00);
+        const couponDiscountVal = parseFloat(b.coupon_discount || 0.00);
+        const actualVisitPaid = b.final_amount != null
+          ? parseFloat(b.final_amount)
+          : Math.max(0, visitFee - couponDiscountVal);
+        const actualGrossPaid = actualVisitPaid;
         const refundAmt = parseFloat(b.refund_amount || 0.00);
         const refundPlatformCut = parseFloat(b.refund_platform_fee || 0.00);
         const refundGatewayCut = parseFloat(b.refund_gateway_fee || 0.00);
 
         const totalPaidAmount = b.status === 'completed' 
-          ? (visitFee + finalQuoteSubtotal) 
-          : (isCancelled ? actualGrossPaid : (isPaidStage ? visitFee : 0.00));
+          ? (actualVisitPaid + finalQuoteSubtotal) 
+          : (isCancelled ? actualGrossPaid : (isPaidStage ? actualVisitPaid : 0.00));
 
         return {
           ...b,
@@ -972,7 +976,10 @@ async function bookingsRoutes(fastify, options) {
             refundPlatformFee: refundPlatformCut,
             refundGatewayFee: refundGatewayCut,
             isCancelled,
-            part1Fee: visitFee,
+            part1Fee: actualVisitPaid,
+            originalVisitFee: visitFee,
+            couponDiscount: couponDiscountVal,
+            couponCode: b.coupon_code || null,
             part1PaymentId: `TXN-VISIT-${b.id}`,
             part1Status: isCancelled ? (refundAmt > 0 ? 'REFUNDED' : 'CANCELLED') : (isPaidStage ? 'PAID' : (b.status === 'accepted' ? 'PENDING_2MIN' : 'NOT_CHARGED')),
             part1Disbursal: isCancelled ? (b.technician_id ? 'Compensated to Technician' : 'Zero Technician Disbursal') : '100% to Technician (Fuel & Travel)',

@@ -1111,6 +1111,17 @@ async function partnerRoutes(fastify, options) {
     }
   });
 
+  // Alias PATCH /technicians/:id/profile to allow RESTful technician profile updates
+  fastify.patch('/technicians/:id/profile', async (req, reply) => {
+    req.body = { ...(req.body || {}), technicianId: req.params.id };
+    return fastify.inject({
+      method: 'POST',
+      url: '/partner/profile/update',
+      payload: req.body,
+      headers: { 'content-type': 'application/json' }
+    }).then(res => reply.status(res.statusCode).send(JSON.parse(res.payload)));
+  });
+
   // 4. Partner Create Digital Job Card & Quote in Neon DB
   const handleCreateQuote = async (req, reply) => {
     try {
@@ -1361,7 +1372,7 @@ async function partnerRoutes(fastify, options) {
         today_earnings: 0,
         starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
         serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-        assignedLocalities: t.assigned_localities || ['Fairlands', 'Hasthampatti']
+        assignedLocalities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands']
       }));
 
       return {

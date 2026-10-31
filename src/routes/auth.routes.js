@@ -175,29 +175,7 @@ async function authRoutes(fastify, options) {
           };
 
           return {
-            user: {
-              id: t.id,
-              role: 'technician',
-              name: t.full_name || t.name || 'Certified Partner',
-              phone: t.phone || `+91 ${cleanPhone}`,
-              email: t.email || `${(t.full_name || 'tech').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
-              trade: t.primary_trade || t.trade || 'ac',
-              tradeName: tradeNames[t.primary_trade || t.trade] || 'Home Services Specialist',
-              upiId: t.upi_vpa,
-              upi_vpa: t.upi_vpa,
-              aadhaarCardUrl: t.aadhaar_card_url,
-              aadhaarNumber: t.aadhaar_number,
-              isKycVerified: Boolean(t.is_kyc_verified),
-              is_kyc_verified: Boolean(t.is_kyc_verified),
-              status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
-              isOnline: Boolean(t.is_online),
-              ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
-              jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
-              todayEarnings: 0,
-              today_earnings: 0,
-              serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-              assignedLocalities: t.assigned_localities || ['Fairlands']
-            },
+            user: formatTechnicianUser(t, cleanPhone),
             role: 'technician'
           };
         }
