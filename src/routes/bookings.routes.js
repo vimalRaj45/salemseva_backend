@@ -65,6 +65,13 @@ async function bookingsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'serviceId is required' });
       }
 
+      if (!address || !String(address).trim()) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Customer service address is required to dispatch technician. Please provide address.'
+        });
+      }
+
       // Check if customer is blocked
       const rawCustomerPhone = customerPhone || phone || req.body?.customerPhone || req.body?.phone || '';
       const cleanPhone = (rawCustomerPhone || '').replace(/[\s\-\(\)]/g, '');

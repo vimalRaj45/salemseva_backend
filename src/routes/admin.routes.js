@@ -764,9 +764,17 @@ async function adminRoutes(fastify, options) {
   });
 
   // 10. Dispatch Technician to Booking
-  fastify.post('/admin/bookings/dispatch', async (req, reply) => {
+  const handleBookingDispatch = async (req, reply) => {
     try {
-      const { bookingId, technicianId, force = false } = req.body;
+      const bookingId = req.params?.id || req.body?.bookingId;
+      const { technicianId, force = false } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'bookingId is required' });
+      }
+      if (!technicianId) {
+        return reply.status(400).send({ success: false, error: 'technicianId is required' });
+      }
 
       if (!force) {
         const tCheck = await query(`
@@ -792,6 +800,10 @@ async function adminRoutes(fastify, options) {
         WHERE id = $2 
         RETURNING *
       `, [technicianId, bookingId]);
+
+      if (updateRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
 
       // Record Audit Log
       await query(`
@@ -846,7 +858,10 @@ async function adminRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.post('/admin/bookings/dispatch', handleBookingDispatch);
+  fastify.post('/admin/bookings/:id/dispatch', handleBookingDispatch);
 
   // 10B. Admin Emergency Release: Release Technician & Cancel Unresponsive Booking
   fastify.post('/admin/bookings/release-technician', async (req, reply) => {
@@ -972,16 +987,21 @@ async function adminRoutes(fastify, options) {
   });
 
   // 10C. Admin General-Purpose Cancel Order & Release Technician
-  fastify.post('/admin/bookings/cancel-order', async (req, reply) => {
+  const handleCancelBooking = async (req, reply) => {
     try {
+      const bookingId = req.params?.id || req.body?.bookingId;
       const {
-        bookingId,
         reason,
+        details = '',
         reasonDetails = '',
         compensateTech = false,
         adminNotes = '',
-        adminId = 'admin_ops'
+        adminId = 'admin_ops',
+        adminUser
       } = req.body || {};
+
+      const actualDetails = details || reasonDetails;
+      const actualAdmin = adminUser || adminId;
 
       if (!bookingId) {
         return reply.status(400).send({ success: false, error: 'bookingId is required' });
@@ -1038,7 +1058,7 @@ async function adminRoutes(fastify, options) {
 
       // 2. Cancel the booking & calculate exact refund figures
       const fullDetails = [
-        reasonDetails,
+        actualDetails,
         adminNotes ? `[Admin Note: ${adminNotes}]` : ''
       ].filter(Boolean).join(' ').trim() || 'Cancelled by Shazu One Central Operations admin.';
 
@@ -1069,7 +1089,7 @@ async function adminRoutes(fastify, options) {
             technician_id        = NULL
         WHERE id = $7
         RETURNING *
-      `, [reason, fullDetails, adminId, refundAmount, platformFeeDeduction, gatewayChargeDeduction, bookingId]);
+      `, [reason, fullDetails, actualAdmin, refundAmount, platformFeeDeduction, gatewayChargeDeduction, bookingId]);
 
       // Record accurate refund in payments ledger
       try {
@@ -1092,7 +1112,7 @@ async function adminRoutes(fastify, options) {
         VALUES ($1, 'ADMIN_CANCEL_ORDER', $2, 'admin', $3)
       `, [
         bookingId,
-        adminId,
+        actualAdmin,
         JSON.stringify({
           reason,
           reasonDetails: fullDetails,
@@ -1115,7 +1135,10 @@ async function adminRoutes(fastify, options) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
     }
-  });
+  };
+
+  fastify.post('/admin/bookings/cancel-order', handleCancelBooking);
+  fastify.post('/admin/bookings/:id/cancel', handleCancelBooking);
 
   // 10b. Emergency Admin Payment Override ("Mark as Paid")
   fastify.post('/admin/bookings/:id/payment-override', async (req, reply) => {
