@@ -95,21 +95,7 @@ async function paymentsRoutes(fastify, options) {
           `, [customer.referred_by]);
 
           if (referrerRes.rows.length > 0) {
-            const referrer = referrerRes.rows[0];
-            const existingRef = await query(`
-              SELECT id FROM wallet_transactions 
-              WHERE user_id = $1 AND category = 'REFERRAL_REWARD' AND description LIKE '%' || $2 || '%'
-            `, [referrer.id, customer.full_name]);
-
-            if (existingRef.rows.length === 0) {
-              const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-              const refCashReward = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].customer_referral_credits || 50) : 50.00;
-              await query(`UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`, [refCashReward, referrer.id]);
-              await query(`
-                INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-                VALUES ($1, $2, 'Friend Referral Cash Reward', $3, 'CREDIT', 'REFERRAL_REWARD', 'Friend ' || $4 || ' completed first service! Direct ₹' || $3 || ' cash discount credited for your next booking.')
-              `, [referrer.id, referrer.phone, refCashReward, customer.full_name]);
-            }
+            // Customer referral rewards are coupon-based (REFERWAIVER50) on bookings, no virtual wallet credits needed
           }
         }
       }

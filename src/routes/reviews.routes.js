@@ -70,25 +70,7 @@ async function reviewsRoutes(fastify, options) {
                   )
             LIMIT 1
           `, [bookingId]);
-          if (custRes.rows.length > 0 && custRes.rows[0].referred_by) {
-            const refCode = custRes.rows[0].referred_by;
-            const referrerRes = await query(`SELECT id, phone, full_name FROM users WHERE referral_code = $1 LIMIT 1`, [refCode]);
-            if (referrerRes.rows.length > 0) {
-              const existingRef = await query(`
-                SELECT id FROM wallet_transactions 
-                WHERE user_id = $1 AND category = 'REFERRAL_REWARD' AND description LIKE '%' || $2 || '%'
-              `, [referrerRes.rows[0].id, custRes.rows[0].full_name]);
-              if (existingRef.rows.length === 0) {
-                const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-                const refCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].customer_referral_credits) : 50.00;
-                await query(`UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`, [refCredits, referrerRes.rows[0].id]);
-                await query(`
-                  INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-                  VALUES ($1, $2, 'Friend Referral Cash Reward', $3, 'CREDIT', 'REFERRAL_REWARD', 'Friend ' || $4 || ' completed first service! Direct ₹' || $3 || ' discount added for your next booking.')
-                `, [referrerRes.rows[0].id, referrerRes.rows[0].phone, refCredits, custRes.rows[0].full_name]);
-              }
-            }
-          }
+          // Customer referrals are coupon-based on booking, zero virtual wallet credits needed
         } catch (refErr) {}
     }
 

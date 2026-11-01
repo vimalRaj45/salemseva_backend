@@ -97,7 +97,8 @@ function formatTechnicianUser(t, cleanPhone) {
   };
 }
 
-function formatCustomerUser(u, cleanPhone) {
+function formatCustomerUser(u, cleanPhone, referralCount = 0) {
+  const refCode = u.referral_code || ('SEVA' + (cleanPhone || '9999').slice(-4).toUpperCase());
   return {
     id: u.id,
     role: u.role || 'customer',
@@ -106,7 +107,11 @@ function formatCustomerUser(u, cleanPhone) {
     email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
     locality: u.locality || 'Fairlands, Salem',
     address: u.default_address || 'Fairlands, Salem - 636016',
-    walletBalance: parseFloat(u.wallet_balance || 0)
+    walletBalance: parseFloat(u.wallet_balance || 0),
+    referralCode: refCode,
+    referredBy: u.referred_by || null,
+    isReferred: Boolean(u.referred_by),
+    referralsCount: parseInt(referralCount, 10) || 0
   };
 }
 
@@ -211,17 +216,17 @@ async function authRoutes(fastify, options) {
             return { error: `Your account has been suspended by Shazu One Central Operations. Reason: ${u.block_reason || 'Administrative review'}`, status: 403 };
           }
 
+          let refCount = 0;
+          try {
+            const refCountRes = await query(`
+              SELECT COUNT(*)::int as count FROM users 
+              WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
+            `, [u.referral_code || '', cleanPhone || '']);
+            refCount = refCountRes.rows[0]?.count || 0;
+          } catch (_) {}
+
           return {
-            user: {
-              id: u.id,
-              role: u.role || 'customer',
-              name: u.full_name || 'Salem Customer',
-              phone: u.phone || (cleanPhone ? `+91 ${cleanPhone}` : ''),
-              email: u.email || `${(u.full_name || 'user').toLowerCase().replace(/[^a-z]/g, '')}@shazuone.in`,
-              locality: u.locality || 'Fairlands, Salem',
-              address: u.default_address || 'Fairlands, Salem - 636016',
-              walletBalance: parseFloat(u.wallet_balance || 0)
-            },
+            user: formatCustomerUser(u, cleanPhone, refCount),
             role: u.role || 'customer'
           };
         }
@@ -494,6 +499,25 @@ async function authRoutes(fastify, options) {
           fastify.log.warn('Could not insert tech to DB:', dbErr.message);
         }
       } else {
+        let referredBy = null;
+        if (referralCode && String(referralCode).trim()) {
+          const refTrim = String(referralCode).trim().toUpperCase();
+          const refPhone = refTrim.replace(/[^0-9]/g, '').slice(-10);
+          try {
+            const refCheck = await query(`
+              SELECT referral_code, phone FROM users 
+              WHERE UPPER(referral_code) = $1 OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+              LIMIT 1
+            `, [refTrim, refPhone]);
+            if (refCheck.rows.length > 0) {
+              referredBy = refCheck.rows[0].referral_code || refCheck.rows[0].phone;
+            } else {
+              referredBy = refTrim;
+            }
+          } catch (_) {}
+        }
+        const userRefCode = 'SEVA' + cleanPhone.slice(-4) + Math.random().toString(36).substring(2, 5).toUpperCase();
+
         createdUser = {
           id: `cust-${Date.now()}`,
           role: 'customer',
@@ -504,22 +528,25 @@ async function authRoutes(fastify, options) {
           address: address || `${locality}, Salem - 636016`,
           walletBalance: 0,
           firstTimeUser: true,
-          referralCodeUsed: referralCode ? referralCode.toUpperCase() : null
+          referralCode: userRefCode,
+          referredBy: referredBy,
+          isReferred: Boolean(referredBy),
+          referralsCount: 0
         };
 
         // Insert into DB
         try {
           const insertCustRes = await query(`
-            INSERT INTO users (full_name, phone, email, role, locality, default_address, wallet_balance, password_hash)
-            VALUES ($1, $2, $3, 'customer', $4, $5, 0.00, $6)
+            INSERT INTO users (full_name, phone, email, role, locality, default_address, wallet_balance, password_hash, referral_code, referred_by)
+            VALUES ($1, $2, $3, 'customer', $4, $5, 0.00, $6, $7, $8)
             RETURNING id
-          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.locality, createdUser.address, pwdHash]);
+          `, [createdUser.name, createdUser.phone, createdUser.email, createdUser.locality, createdUser.address, pwdHash, userRefCode, referredBy]);
 
           if (insertCustRes.rows[0]?.id) {
             createdUser.id = insertCustRes.rows[0].id;
           }
         } catch (dbErr) {
-          fastify.log.warn('Could not insert user to DB:', dbErr.message);
+          fastify.log.warn('Could not insert user to DB: ' + dbErr.message);
         }
       }
 
@@ -745,7 +772,16 @@ async function authRoutes(fastify, options) {
 
       let existingUser = null;
       if (custRes.rows.length > 0) {
-        existingUser = formatCustomerUser(custRes.rows[0], cleanPhone);
+        const u = custRes.rows[0];
+        let refCount = 0;
+        try {
+          const refCountRes = await query(`
+            SELECT COUNT(*)::int as count FROM users 
+            WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
+          `, [u.referral_code || '', cleanPhone]);
+          refCount = refCountRes.rows[0]?.count || 0;
+        } catch (_) {}
+        existingUser = formatCustomerUser(u, cleanPhone, refCount);
       } else if (techRes.rows.length > 0) {
         existingUser = formatTechnicianUser(techRes.rows[0], cleanPhone);
       }

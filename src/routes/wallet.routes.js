@@ -49,33 +49,17 @@ async function walletRoutes(fastify, options) {
         user = createRes.rows[0];
       }
 
-      // 2. Fetch all wallet transactions for this user from DB
-      const txRes = await query(`
-        SELECT 
-          id, 
-          title, 
-          amount::numeric, 
-          type, 
-          category, 
-          description, 
-          created_at as timestamp
-        FROM wallet_transactions 
-        WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
-        ORDER BY created_at DESC
-      `, [cleanPhone]);
+      // Referral & coupon discount status
+      let friendsCompleted = 0;
+      try {
+        const refCountRes = await query(`
+          SELECT COUNT(*)::int as count FROM users 
+          WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
+        `, [user.referral_code || '', cleanPhone]);
+        friendsCompleted = refCountRes.rows[0]?.count || 0;
+      } catch (_) {}
 
-      // 3. Aggregate referral statistics from DB
-      const refCountRes = await query(`
-        SELECT 
-          COUNT(*) FILTER (WHERE category = 'REFERRAL_REWARD') as friends_completed,
-          COALESCE(SUM(amount) FILTER (WHERE category = 'REFERRAL_REWARD'), 0) as credits_from_referrals
-        FROM wallet_transactions
-        WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
-      `, [cleanPhone]);
-
-      const friendsCompleted = parseInt(refCountRes.rows[0]?.friends_completed || 0, 10);
-      const creditsEarnedFromReferrals = parseFloat(refCountRes.rows[0]?.credits_from_referrals || 0);
-      const friendsInvited = Math.max(friendsCompleted + 2, 3); // realistic invite counter
+      const isReferralEligible = Boolean(user.referred_by || friendsCompleted > 0);
       const currentBalance = parseFloat(user.wallet_balance || 0);
 
       return {
@@ -85,11 +69,14 @@ async function walletRoutes(fastify, options) {
         walletBalance: currentBalance,
         serviceValue: `₹${currentBalance.toFixed(2)}`,
         conversionRate: '1 Rupee = 1 Rupee Direct Discount',
-        referralCode: user.referral_code || 'SALEM100',
-        friendsInvited,
+        referralCode: user.referral_code || ('SEVA' + cleanPhone.slice(-4)),
+        referralCoupon: 'REFERWAIVER50',
+        isReferralEligible,
+        referredBy: user.referred_by || null,
+        friendsInvited: friendsCompleted,
         friendsCompleted,
-        creditsEarnedFromReferrals,
-        transactions: txRes.rows
+        creditsEarnedFromReferrals: 0,
+        transactions: []
       };
     } catch (err) {
       fastify.log.error(err);
@@ -144,18 +131,19 @@ async function walletRoutes(fastify, options) {
         user = insertUser.rows[0];
       }
 
-      // Insert transaction into PostgreSQL
-      const txRes = await query(`
-        INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-        VALUES ($1, $2, $3, $4, 'CREDIT', $5, $6)
-        RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
-      `, [user.id, user.phone, title, creditAmt, category, description]);
-
       return {
         success: true,
         newBalance: parseFloat(user.wallet_balance),
         creditedAmount: creditAmt,
-        transaction: txRes.rows[0]
+        transaction: {
+          id: `tx_${Date.now()}`,
+          title,
+          amount: creditAmt,
+          type: 'CREDIT',
+          category,
+          description,
+          timestamp: new Date().toISOString()
+        }
       };
     } catch (err) {
       fastify.log.error(err);
@@ -208,24 +196,19 @@ async function walletRoutes(fastify, options) {
         RETURNING wallet_balance
       `, [actualDebit, user.id]);
 
-      // Record debit transaction in DB
-      const txRes = await query(`
-        INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-        VALUES ($1, $2, $3, $4, 'DEBIT', 'CHECKOUT_BURN', $5)
-        RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
-      `, [
-        user.id, 
-        user.phone, 
-        `Redeemed on Booking #${bookingId}`, 
-        actualDebit, 
-        `20% Burn Cap Applied for Service #${bookingId}`
-      ]);
-
       return {
         success: true,
         newBalance: parseFloat(updatedUserRes.rows[0].wallet_balance),
         debitedAmount: actualDebit,
-        transaction: txRes.rows[0]
+        transaction: {
+          id: `tx_${Date.now()}`,
+          title: `Redeemed on Booking #${bookingId}`,
+          amount: actualDebit,
+          type: 'DEBIT',
+          category: 'CHECKOUT_BURN',
+          description: `20% Burn Cap Applied for Service #${bookingId}`,
+          timestamp: new Date().toISOString()
+        }
       };
     } catch (err) {
       fastify.log.error(err);
@@ -249,53 +232,21 @@ async function walletRoutes(fastify, options) {
       }
       const cleanPhone = sanitizePhone(targetPhone);
 
-      // Fetch dynamic referral reward setting from DB
+      // Dynamic referral waiver coupon (REFERWAIVER50)
       let rewardAmt = 50.00;
       try {
-        const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+        const sRes = await query(`SELECT referee_discount_amount FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
         if (sRes.rows.length > 0) {
-          rewardAmt = parseFloat(sRes.rows[0].customer_referral_credits);
+          rewardAmt = parseFloat(sRes.rows[0].referee_discount_amount || 50);
         }
       } catch (sErr) {}
 
-      // Update DB balance
-      const updateRes = await query(`
-        UPDATE users 
-        SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
-        RETURNING id, phone, wallet_balance
-      `, [rewardAmt, cleanPhone]);
-
-      let user = updateRes.rows[0];
-      if (!user) {
-        const insertRes = await query(`
-          INSERT INTO users (phone, full_name, role, wallet_balance, referral_code)
-          VALUES ($1, 'Customer', 'customer', $2, 'SALEM100')
-          RETURNING id, phone, wallet_balance
-        `, [canonicalPhone(cleanPhone), rewardAmt]);
-        user = insertRes.rows[0];
-      }
-
-      // Record transaction
-      const txRes = await query(`
-        INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-        VALUES ($1, $2, $3, $4, 'CREDIT', 'REFERRAL_REWARD', $5)
-        RETURNING id, title, amount::numeric, type, category, description, created_at as timestamp
-      `, [
-        user.id,
-        user.phone,
-        `Referral Completed: ${friendName}`,
-        rewardAmt,
-        `Friend ${friendName} completed their 1st service in ${locality}. +${rewardAmt} Seva Credits unlocked!`
-      ]);
-
       return {
         success: true,
-        message: `Friend ${friendName} completed service! +${rewardAmt} Credits added.`,
+        message: `Friend ${friendName} completed service! Coupon REFERWAIVER50 unlocked for your next booking.`,
         rewardAmount: rewardAmt,
-        newBalance: parseFloat(user.wallet_balance),
-        transaction: txRes.rows[0]
+        couponCode: 'REFERWAIVER50',
+        discountValue: rewardAmt
       };
     } catch (err) {
       fastify.log.error(err);
@@ -305,6 +256,68 @@ async function walletRoutes(fastify, options) {
 
   fastify.post('/wallet/customer/simulate-referral', simulateReferralHandler);
   fastify.post('/wallet/simulate-referral', simulateReferralHandler);
+
+  // POST /wallet/customer/apply-referral - Link friend referral code to customer account to unlock REFERWAIVER50
+  fastify.post('/wallet/customer/apply-referral', async (req, reply) => {
+    try {
+      const { phone = '', referralCode = '', customerId = null } = req.body || {};
+      const cleanPhone = sanitizePhone(phone);
+      if (!cleanPhone && !customerId) {
+        return reply.status(400).send({ success: false, error: 'Customer phone or account ID is required' });
+      }
+      const refCodeTrim = String(referralCode || '').trim().toUpperCase();
+      if (!refCodeTrim) {
+        return reply.status(400).send({ success: false, error: 'Please enter a valid referral code or friend phone' });
+      }
+
+      const userRes = await query(`
+        SELECT id, phone, referral_code, referred_by FROM users 
+        WHERE ($1::text IS NOT NULL AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        LIMIT 1
+      `, [customerId, cleanPhone]);
+
+      if (userRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Customer account not found' });
+      }
+      const u = userRes.rows[0];
+      if (u.referred_by) {
+        return reply.status(400).send({ success: false, error: 'A referral code has already been applied to your account.' });
+      }
+
+      const refDigits = refCodeTrim.replace(/[^0-9]/g, '').slice(-10);
+      const userDigits = (u.phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (u.referral_code && u.referral_code.toUpperCase() === refCodeTrim) {
+        return reply.status(400).send({ success: false, error: 'You cannot use your own referral code.' });
+      }
+      if (refDigits && refDigits === userDigits) {
+        return reply.status(400).send({ success: false, error: 'You cannot refer your own mobile number.' });
+      }
+
+      const referrerRes = await query(`
+        SELECT id, full_name, phone, referral_code FROM users
+        WHERE UPPER(referral_code) = $1
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        LIMIT 1
+      `, [refCodeTrim, refDigits]);
+
+      const effectiveReferredBy = referrerRes.rows.length > 0 
+        ? (referrerRes.rows[0].referral_code || referrerRes.rows[0].phone) 
+        : refCodeTrim;
+
+      await query(`UPDATE users SET referred_by = $1 WHERE id = $2`, [effectiveReferredBy, u.id]);
+
+      return {
+        success: true,
+        message: 'Referral applied successfully! REFERWAIVER50 flat ₹50 waiver unlocked for your booking.',
+        referredBy: effectiveReferredBy,
+        couponUnlocked: 'REFERWAIVER50'
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 
 
   // ==========================================

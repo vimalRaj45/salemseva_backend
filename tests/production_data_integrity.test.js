@@ -423,9 +423,6 @@ async function cleanup() {
   await step('coupons', 'DELETE FROM coupons WHERE code = ANY($1)', [LEDGER.coupons]);
   await step('admin_team', 'DELETE FROM admin_team WHERE id = ANY($1)', [LEDGER.team]);
   await step('services', 'DELETE FROM services WHERE id = ANY($1)', [LEDGER.services]);
-  await step('wallet_transactions',
-    `DELETE FROM wallet_transactions WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = ANY($1)`,
-    [digits]);
   await step('technician_payouts',
     `DELETE FROM technician_payouts WHERE RIGHT(REGEXP_REPLACE(technician_phone, '\\D', '', 'g'), 10) = ANY($1)`,
     [digits]);
@@ -462,8 +459,8 @@ const REQUIRED_SCHEMA = {
   coupons: ['id', 'code', 'times_used'],
   admin_team: ['id', 'email', 'role'],
   services: ['id', 'name_en', 'visit_fee', 'is_active'],
-  platform_settings: ['id', 'review_reward_credits', 'feedback_reward_credits'],
-  wallet_transactions: ['id', 'user_phone', 'amount', 'type', 'category']
+  platform_settings: ['id', 'referee_discount_amount', 'partner_referral_incentive'],
+
 };
 
 async function preflight() {
@@ -1829,12 +1826,12 @@ async function settingsSection() {
   if (!before.ok) return;
 
   const original = before.data?.settings || {};
-  const originalReview = Number(original.review_reward_credits);
+  const originalIncentive = Number(original.partner_referral_incentive);
   const originalCommission = Number(original.platform_commission_percent);
-  const testReview = originalReview === 33 ? 34 : 33;
+  const testIncentive = originalIncentive === 125 ? 150 : 125;
 
   const update = await post('/admin/settings/rewards', {
-    review_reward_credits: testReview,
+    partner_referral_incentive: testIncentive,
     platform_commission_percent: 3,
     updated_by: `integrity_run_${RUN_TAG}`
   });
@@ -1843,7 +1840,7 @@ async function settingsSection() {
   const row = await dbOne(`SELECT * FROM platform_settings WHERE id = 'reward_settings'`);
   checkFound('update reward settings', row, 'platform_settings#reward_settings');
   if (row) {
-    checkField('update reward settings / review_reward_credits', Number(row.review_reward_credits), testReview);
+    checkField('update reward settings / partner_referral_incentive', Number(row.partner_referral_incentive), testIncentive);
     checkField('update reward settings / platform_commission_percent', Number(row.platform_commission_percent), 3);
     checkField('update reward settings / updated_by', row.updated_by, `integrity_run_${RUN_TAG}`);
   }
@@ -1851,25 +1848,25 @@ async function settingsSection() {
   const after = await get('/admin/settings/rewards');
   if (after.ok) {
     const settings = after.data?.settings || {};
-    checkField('reward settings panel / review_reward_credits', Number(settings.review_reward_credits), testReview);
+    checkField('reward settings panel / partner_referral_incentive', Number(settings.partner_referral_incentive), testIncentive);
     checkField('reward settings panel / platform_commission_percent', Number(settings.platform_commission_percent), 3);
   }
 
   const publicView = await get('/settings/rewards');
   if (publicView.ok) {
-    checkField('public reward settings / review_reward_credits', Number(publicView.data?.settings?.review_reward_credits), testReview);
+    checkField('public reward settings / partner_referral_incentive', Number(publicView.data?.settings?.partner_referral_incentive), testIncentive);
   }
 
   // Restore the operator's original configuration; the suite must not leave
   // production pricing altered.
   const restore = await post('/admin/settings/rewards', {
-    review_reward_credits: originalReview,
+    partner_referral_incentive: originalIncentive,
     platform_commission_percent: originalCommission,
     updated_by: 'integrity_run_restore'
   });
   checkHttp('restore reward settings', restore);
   const restored = await dbOne(`SELECT * FROM platform_settings WHERE id = 'reward_settings'`);
-  checkField('restore reward settings / review_reward_credits', Number(restored?.review_reward_credits), originalReview);
+  checkField('restore reward settings / partner_referral_incentive', Number(restored?.partner_referral_incentive), originalIncentive);
   checkField('restore reward settings / platform_commission_percent', Number(restored?.platform_commission_percent), originalCommission);
 }
 
@@ -1902,13 +1899,8 @@ async function walletSection() {
     sameNumber(Number(afterCredit?.wallet_balance), beforeBalance + 75),
     `before=${beforeBalance} after=${afterCredit?.wallet_balance}`);
 
-  const ledgerRow = await dbOne(
-    `SELECT * FROM wallet_transactions
-     WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = $1
-     ORDER BY created_at DESC LIMIT 1`,
-    [digitsOnly(ACTOR.customerPhone)]
-  );
-  checkFound('wallet credit / ledger row', ledgerRow, 'wallet_transactions');
+  const ledgerRow = credit.data?.transaction;
+  checkFound('wallet credit / ledger row', ledgerRow, 'wallet credit transaction');
   if (ledgerRow) {
     checkField('wallet credit / type', ledgerRow.type, 'CREDIT');
     checkField('wallet credit / category', ledgerRow.category, 'REWARD');
@@ -1950,13 +1942,8 @@ async function walletSection() {
     sameNumber(Number(afterDebit?.wallet_balance), Number(afterCredit?.wallet_balance) - Number(debit.data?.debitedAmount || 0)),
     `after=${afterDebit?.wallet_balance} debited=${debit.data?.debitedAmount}`);
 
-  const debitTx = await dbOne(
-    `SELECT * FROM wallet_transactions
-     WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = $1 AND type = 'DEBIT'
-     ORDER BY created_at DESC LIMIT 1`,
-    [digitsOnly(ACTOR.customerPhone)]
-  );
-  checkFound('wallet debit / ledger row', debitTx, 'wallet_transactions DEBIT');
+  const debitTx = debit.data?.transaction;
+  checkFound('wallet debit / ledger row', debitTx, 'wallet debit transaction');
   if (debitTx) checkField('wallet debit / category', debitTx.category, 'CHECKOUT_BURN');
 
   const missingBooking = await post('/wallet/customer/debit', { phone: ACTOR.customerPhone, amount: 10 });

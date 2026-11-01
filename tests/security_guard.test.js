@@ -310,10 +310,6 @@ async function cleanup() {
     await query('DELETE FROM bookings WHERE id = $1', [bookingId]).catch(() => {});
   }
   await query(
-    `DELETE FROM wallet_transactions WHERE RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = ANY($1)`,
-    [digits]
-  ).catch(() => {});
-  await query(
     `DELETE FROM users WHERE role <> 'admin' AND RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = ANY($1)`,
     [digits]
   ).catch(() => {});

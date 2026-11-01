@@ -7,11 +7,7 @@ async function settingsRoutes(fastify, options) {
     await query(`
       CREATE TABLE IF NOT EXISTS platform_settings (
         id VARCHAR(50) PRIMARY KEY DEFAULT 'reward_settings',
-        customer_referral_credits NUMERIC(10,2) DEFAULT 50.00,
         referee_discount_amount NUMERIC(10,2) DEFAULT 50.00,
-        review_reward_credits NUMERIC(10,2) DEFAULT 25.00,
-        feedback_reward_credits NUMERIC(10,2) DEFAULT 0.00,
-        feedback_rewards_enabled BOOLEAN DEFAULT FALSE,
         partner_referral_incentive NUMERIC(10,2) DEFAULT 100.00,
         partner_welcome_bonus NUMERIC(10,2) DEFAULT 0.00,
         platform_commission_percent NUMERIC(5,2) DEFAULT 2.00,
@@ -34,11 +30,10 @@ async function settingsRoutes(fastify, options) {
     if (checkRes.rows.length === 0) {
       await query(`
         INSERT INTO platform_settings (
-          id, customer_referral_credits, referee_discount_amount,
-          review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
+          id, referee_discount_amount,
           partner_referral_incentive, partner_welcome_bonus, platform_commission_percent, updated_by
         ) VALUES (
-          'reward_settings', 50.00, 50.00, 25.00, 0.00, FALSE, 100.00, 0.00, 2.00, 'system_init'
+          'reward_settings', 50.00, 100.00, 0.00, 2.00, 'system_init'
         )
       `);
     }
@@ -75,17 +70,13 @@ async function settingsRoutes(fastify, options) {
         };
       }
 
-      const row = res.rows[0];
+      const row = res.rows[0] || {};
       return {
         success: true,
         settings: {
-          customer_referral_credits: parseFloat(row.customer_referral_credits),
-          referee_discount_amount: parseFloat(row.referee_discount_amount),
-          review_reward_credits: parseFloat(row.review_reward_credits),
-          feedback_reward_credits: parseFloat(row.feedback_reward_credits),
-          feedback_rewards_enabled: Boolean(row.feedback_rewards_enabled),
-          partner_referral_incentive: parseFloat(row.partner_referral_incentive),
-          partner_welcome_bonus: parseFloat(row.partner_welcome_bonus),
+          referee_discount_amount: parseFloat(row.referee_discount_amount || 50),
+          partner_referral_incentive: parseFloat(row.partner_referral_incentive || 100),
+          partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 0),
           platform_commission_percent: partnerComm,
           partner_commission_percent: partnerComm,
           partner_payout_percent: partnerPayout,
@@ -127,11 +118,7 @@ async function settingsRoutes(fastify, options) {
     try {
       const res = await query(`SELECT * FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
       const row = res.rows[0] || {
-        customer_referral_credits: 50.00,
         referee_discount_amount: 50.00,
-        review_reward_credits: 25.00,
-        feedback_reward_credits: 0.00,
-        feedback_rewards_enabled: false,
         partner_referral_incentive: 100.00,
         partner_welcome_bonus: 0.00,
         inspection_visit_fee: 99.00,
@@ -140,11 +127,7 @@ async function settingsRoutes(fastify, options) {
       };
 
       const settingsObj = {
-        customer_referral_credits: parseFloat(row.customer_referral_credits || 50),
         referee_discount_amount: parseFloat(row.referee_discount_amount || 50),
-        review_reward_credits: parseFloat(row.review_reward_credits || 25),
-        feedback_reward_credits: parseFloat(row.feedback_reward_credits || 0),
-        feedback_rewards_enabled: Boolean(row.feedback_rewards_enabled),
         partner_referral_incentive: parseFloat(row.partner_referral_incentive || 100),
         partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 0),
         partner_commission_percent: parseFloat(row.partner_commission_percent !== null && row.partner_commission_percent !== undefined ? row.partner_commission_percent : (row.platform_commission_percent || 2.0)),
@@ -177,11 +160,7 @@ async function settingsRoutes(fastify, options) {
   const handleUpdateRewards = async (req, reply) => {
     try {
       const {
-        customer_referral_credits,
         referee_discount_amount,
-        review_reward_credits,
-        feedback_reward_credits,
-        feedback_rewards_enabled,
         partner_referral_incentive,
         partner_welcome_bonus,
         partner_commission_percent,
@@ -198,11 +177,7 @@ async function settingsRoutes(fastify, options) {
       const currentRes = await query(`SELECT * FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
       const current = currentRes.rows[0] || {};
 
-      const newCustRef = customer_referral_credits !== undefined ? Math.max(0, parseFloat(customer_referral_credits)) : parseFloat(current.customer_referral_credits || 50);
       const newRefDisc = referee_discount_amount !== undefined ? Math.max(0, parseFloat(referee_discount_amount)) : parseFloat(current.referee_discount_amount || 50);
-      const newRevCredits = review_reward_credits !== undefined ? Math.max(0, parseFloat(review_reward_credits)) : parseFloat(current.review_reward_credits || 25);
-      const newFbCredits = feedback_reward_credits !== undefined ? Math.max(0, parseFloat(feedback_reward_credits)) : parseFloat(current.feedback_reward_credits || 0);
-      const newFbEnabled = feedback_rewards_enabled !== undefined ? Boolean(feedback_rewards_enabled) : Boolean(current.feedback_rewards_enabled ?? false);
       const newPartnerIncentive = partner_referral_incentive !== undefined ? Math.max(0, parseFloat(partner_referral_incentive)) : parseFloat(current.partner_referral_incentive || 100);
       const newPartnerBonus = partner_welcome_bonus !== undefined ? Math.max(0, parseFloat(partner_welcome_bonus)) : parseFloat(current.partner_welcome_bonus || 0);
       const rawComm = partner_commission_percent !== undefined ? partner_commission_percent : platform_commission_percent;
@@ -224,22 +199,17 @@ async function settingsRoutes(fastify, options) {
 
       const updateSql = `
         INSERT INTO platform_settings (
-          id, customer_referral_credits, referee_discount_amount,
-          review_reward_credits, feedback_reward_credits, feedback_rewards_enabled,
+          id, referee_discount_amount,
           partner_referral_incentive, partner_welcome_bonus, 
           partner_commission_percent, platform_commission_percent,
           customer_platform_fee_percent, payment_gateway_fee_percent, gateway_fee_percent,
           inspection_visit_fee, business_upi_id, business_merchant_name, payment_gateway_mode,
           updated_at, updated_by
         ) VALUES (
-          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, $15
+          'reward_settings', $1, $2, $3, $4, $4, $5, $6, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, $11
         )
         ON CONFLICT (id) DO UPDATE SET
-          customer_referral_credits = EXCLUDED.customer_referral_credits,
           referee_discount_amount = EXCLUDED.referee_discount_amount,
-          review_reward_credits = EXCLUDED.review_reward_credits,
-          feedback_reward_credits = EXCLUDED.feedback_reward_credits,
-          feedback_rewards_enabled = EXCLUDED.feedback_rewards_enabled,
           partner_referral_incentive = EXCLUDED.partner_referral_incentive,
           partner_welcome_bonus = EXCLUDED.partner_welcome_bonus,
           partner_commission_percent = EXCLUDED.partner_commission_percent,
@@ -257,11 +227,7 @@ async function settingsRoutes(fastify, options) {
       `;
 
       const result = await query(updateSql, [
-        newCustRef,
         newRefDisc,
-        newRevCredits,
-        newFbCredits,
-        newFbEnabled,
         newPartnerIncentive,
         newPartnerBonus,
         newCommission,
@@ -284,11 +250,7 @@ async function settingsRoutes(fastify, options) {
         `, [
           updated_by,
           JSON.stringify({
-            customer_referral_credits: newCustRef,
             referee_discount_amount: newRefDisc,
-            review_reward_credits: newRevCredits,
-            feedback_reward_credits: newFbCredits,
-            feedback_rewards_enabled: newFbEnabled,
             partner_referral_incentive: newPartnerIncentive,
             partner_welcome_bonus: newPartnerBonus,
             timestamp: new Date().toISOString()
@@ -300,11 +262,7 @@ async function settingsRoutes(fastify, options) {
         success: true,
         message: 'Reward and referral settings updated successfully in database',
         settings: {
-          customer_referral_credits: parseFloat(result.rows[0].customer_referral_credits),
           referee_discount_amount: parseFloat(result.rows[0].referee_discount_amount),
-          review_reward_credits: parseFloat(result.rows[0].review_reward_credits),
-          feedback_reward_credits: parseFloat(result.rows[0].feedback_reward_credits),
-          feedback_rewards_enabled: Boolean(result.rows[0].feedback_rewards_enabled),
           partner_referral_incentive: parseFloat(result.rows[0].partner_referral_incentive),
           partner_welcome_bonus: parseFloat(result.rows[0].partner_welcome_bonus),
           partner_commission_percent: parseFloat(result.rows[0].partner_commission_percent ?? result.rows[0].platform_commission_percent ?? 2.0),

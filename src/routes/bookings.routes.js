@@ -159,6 +159,31 @@ async function bookingsRoutes(fastify, options) {
 
               // Increment coupon usage
               await query(`UPDATE coupons SET times_used = times_used + 1 WHERE id = $1`, [coup.id]);
+
+              if (cleanCode === 'REFERWAIVER50') {
+                const reqPhone = (rawCustomerPhone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+                const reqUserId = customerId || null;
+                let isEligible = false;
+                if (reqPhone || reqUserId) {
+                  try {
+                    const uRes = await query(`
+                      SELECT id, referral_code, referred_by,
+                        (SELECT COUNT(*)::int FROM users u2 WHERE u2.referred_by = users.referral_code OR (u2.referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(u2.referred_by, '[^0-9]', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(users.phone, '[^0-9]', '', 'g'), 10))) as referral_count
+                      FROM users
+                      WHERE ($1::text IS NOT NULL AND id::text = $1)
+                         OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+                      LIMIT 1
+                    `, [reqUserId, reqPhone]);
+                    if (uRes.rows.length > 0) {
+                      const u = uRes.rows[0];
+                      isEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+                    }
+                  } catch (_) {}
+                }
+                if (!isEligible) {
+                  couponDiscount = 0.00;
+                }
+              }
             }
           } else if (cleanCode === 'SALEM100') {
             couponDiscount = Math.min(100.00, visitFee);
@@ -270,7 +295,8 @@ async function bookingsRoutes(fastify, options) {
           const tRow = checkTech.rows[0];
           if (parseInt(tRow.today_count, 10) < parseInt(tRow.capacity, 10)) {
             assignedTechId = tRow.id;
-            initialStatus = 'accepted';
+            // Only set accepted if payment is not required or already completed
+            initialStatus = (finalAmount <= 0 || req.body?.paymentMethod === 'coupon_free') ? 'accepted' : 'created';
           }
         }
       }
@@ -362,8 +388,8 @@ async function bookingsRoutes(fastify, options) {
         VALUES ($1, 'BOOKING_CREATED', $2, 'customer', $3)
       `, [bookingId, rawCustomerPhone.trim(), JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
 
-      // Dispatch high-priority background push to assigned technician (wakes up phone if app is closed)
-      if (assignedTechId) {
+      // Dispatch high-priority background push to assigned technician (only if payment is confirmed or zero-fee)
+      if (assignedTechId && initialStatus !== 'created') {
         try {
           const tRes = await query('SELECT phone, full_name FROM technicians WHERE id = $1', [assignedTechId]);
           if (tRes.rows.length > 0) {
@@ -403,6 +429,34 @@ async function bookingsRoutes(fastify, options) {
 
   fastify.post('/bookings/create', handleCreateBooking);
   fastify.post('/bookings', handleCreateBooking);
+
+  // Cancel an unpaid booking abandoned by customer on payment QR screen
+  fastify.post('/bookings/:id/cancel-unpaid', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const bRes = await query('SELECT id, status, visit_fee, visit_fee_waived FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const b = bRes.rows[0];
+      // Only cancel if still in created / matching and visit fee was not confirmed
+      if (b.status === 'created' || b.status === 'matching') {
+        await query(`
+          UPDATE bookings
+          SET status = 'cancelled',
+              cancellation_reason = 'Payment abandoned by customer before advance fee confirmation',
+              cancelled_at = NOW(),
+              cancelled_by = 'customer'
+          WHERE id = $1
+        `, [id]);
+        return { success: true, message: 'Unpaid booking cancelled cleanly' };
+      }
+      return { success: true, message: 'Booking status unchanged', status: b.status };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 
   // 2. Get Live Tracking & Real Assigned Technician with Dynamic GPS & ETA
   fastify.get('/bookings/:id/track', async (req, reply) => {

@@ -74,6 +74,25 @@ async function couponsRoutes(fastify, options) {
   // 1. GET /coupons/active - Public Available Coupons
   fastify.get('/coupons/active', async (req, reply) => {
     try {
+      const { phone = '', userId = null } = req.query || {};
+      const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+
+      let isReferralEligible = false;
+      if (cleanPhone || userId) {
+        const uRes = await query(`
+          SELECT id, referral_code, referred_by,
+            (SELECT COUNT(*)::int FROM users u2 WHERE u2.referred_by = users.referral_code OR (u2.referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(u2.referred_by, '[^0-9]', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(users.phone, '[^0-9]', '', 'g'), 10))) as referral_count
+          FROM users
+          WHERE ($1::text IS NOT NULL AND id::text = $1)
+             OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+          LIMIT 1
+        `, [userId, cleanPhone]);
+        if (uRes.rows.length > 0) {
+          const u = uRes.rows[0];
+          isReferralEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+        }
+      }
+
       const res = await query(`
         SELECT id, code, discount_type, discount_value, min_order_amount, max_discount_cap, description, valid_until
         FROM coupons
@@ -86,16 +105,23 @@ async function couponsRoutes(fastify, options) {
 
       return {
         success: true,
-        coupons: res.rows.map(r => ({
-          id: r.id,
-          code: r.code,
-          discountType: r.discount_type,
-          discountValue: parseFloat(r.discount_value),
-          minOrderAmount: parseFloat(r.min_order_amount),
-          maxDiscountCap: r.max_discount_cap ? parseFloat(r.max_discount_cap) : null,
-          description: r.description,
-          validUntil: r.valid_until
-        }))
+        coupons: res.rows.map(r => {
+          const isReferralCode = r.code === 'REFERWAIVER50';
+          const isLocked = isReferralCode && !isReferralEligible;
+          return {
+            id: r.id,
+            code: r.code,
+            discountType: r.discount_type,
+            discountValue: parseFloat(r.discount_value),
+            minOrderAmount: parseFloat(r.min_order_amount),
+            maxDiscountCap: r.max_discount_cap ? parseFloat(r.max_discount_cap) : null,
+            description: r.description,
+            validUntil: r.valid_until,
+            referralExclusive: isReferralCode,
+            isLocked,
+            lockedReason: isLocked ? 'Requires friend referral invite or referring a friend to unlock' : null
+          };
+        })
       };
     } catch (err) {
       fastify.log.error(err);
@@ -144,6 +170,39 @@ async function couponsRoutes(fastify, options) {
       }
 
       const coupon = res.rows[0];
+
+      if (cleanCode === 'REFERWAIVER50') {
+        const reqPhone = (req.body?.customerPhone || req.body?.phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+        const reqUserId = req.body?.customerId || req.body?.userId || null;
+
+        let isEligible = false;
+        if (reqPhone || reqUserId) {
+          try {
+            const uRes = await query(`
+              SELECT id, referral_code, referred_by,
+                (SELECT COUNT(*)::int FROM users u2 WHERE u2.referred_by = users.referral_code OR (u2.referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(u2.referred_by, '[^0-9]', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(users.phone, '[^0-9]', '', 'g'), 10))) as referral_count
+              FROM users
+              WHERE ($1::text IS NOT NULL AND id::text = $1)
+                 OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+              LIMIT 1
+            `, [reqUserId, reqPhone]);
+
+            if (uRes.rows.length > 0) {
+              const u = uRes.rows[0];
+              isEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+            }
+          } catch (_) {}
+        }
+
+        if (!isEligible) {
+          return reply.status(400).send({
+            success: false,
+            valid: false,
+            discountAmount: 0,
+            error: 'REFERWAIVER50 is a referral-exclusive waiver. It activates only when you are referred by a friend or refer a friend to Salem Seva.'
+          });
+        }
+      }
 
       if (!coupon.is_active) {
         return {
