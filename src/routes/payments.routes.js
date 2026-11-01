@@ -846,14 +846,71 @@ async function paymentsRoutes(fastify, options) {
         screenshotUrl || null
       ]);
 
-      const isQuoteApproval = paymentType === 'FINAL_SETTLEMENT' || booking.status === 'quote_presented';
-      const nextBookingStatus = isQuoteApproval ? 'quote_approved' : (booking.status === 'created' ? 'matching' : booking.status);
+      const isFinalSettlement = paymentType === 'FINAL_SETTLEMENT' || booking.status === 'quote_approved' || booking.status === 'quote_presented';
+      const nextBookingStatus = isFinalSettlement ? 'completed' : (booking.status === 'created' ? 'matching' : booking.status);
 
-      await query(`
-        UPDATE bookings
-        SET status = $1
-        WHERE id = $2 AND status IN ('created', 'matching', 'quote_presented');
-      `, [nextBookingStatus, bookingId]);
+      if (isFinalSettlement) {
+        await query(`
+          UPDATE bookings
+          SET status = 'completed',
+              completed_at = NOW(),
+              final_amount = COALESCE(quote_subtotal, $1)
+          WHERE id = $2;
+        `, [parsedAmount, bookingId]);
+
+        // Disburse technician payout in database
+        try {
+          const feeSettings = await getLiveFeeSettings();
+          const targetTotal = parseFloat(booking.quote_subtotal || parsedAmount);
+          const upfrontPaid = parseFloat(booking.visit_fee || 99);
+          const inv = calculateDualCommissionInvoice({
+            totalJobAmount: targetTotal,
+            upfrontFeePaid: upfrontPaid,
+            customerFeePercent: feeSettings.customerFeePercent,
+            gatewayFeePercent: feeSettings.gatewayFeePercent,
+            partnerCommPercent: feeSettings.partnerCommPercent
+          });
+
+          const totalTechPayout = inv.partnerDirectRouteTransfer;
+          const utrNumber = cleanUtr || ('UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS');
+          let techId = booking.technician_id;
+          let techPhone = '';
+          let techUpi = '';
+          if (techId) {
+            const tRes = await query('SELECT phone, upi_vpa FROM technicians WHERE id = $1', [techId]);
+            if (tRes.rows.length > 0) {
+              techUpi = tRes.rows[0].upi_vpa || '';
+              techPhone = tRes.rows[0].phone || '';
+            }
+            await query(`
+              INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
+              VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+            `, [
+              techPhone,
+              techId,
+              totalTechPayout,
+              techUpi,
+              utrNumber,
+              `Instant settlement for #${bookingId} (Final Bill Paid via Direct QR)`
+            ]);
+            await query(`
+              UPDATE technicians 
+              SET jobs_completed_count = (
+                SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+              )
+              WHERE id = $1
+            `, [techId]);
+          }
+        } catch (paySyncErr) {
+          fastify.log.warn('Could not auto-disburse tech payout on final settlement: ' + paySyncErr.message);
+        }
+      } else {
+        await query(`
+          UPDATE bookings
+          SET status = $1
+          WHERE id = $2 AND status IN ('created', 'matching');
+        `, [nextBookingStatus, bookingId]);
+      }
 
       // Insert audit log
       try {

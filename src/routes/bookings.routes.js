@@ -951,24 +951,28 @@ async function bookingsRoutes(fastify, options) {
 
         const isPaidStage = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status) || (b.status === 'cancelled' && b.technician_id);
         const isCancelled = b.status === 'cancelled';
+        const isCompleted = b.status === 'completed';
         const couponDiscountVal = parseFloat(b.coupon_discount || 0.00);
-        const actualVisitPaid = b.final_amount != null
-          ? parseFloat(b.final_amount)
-          : Math.max(0, visitFee - couponDiscountVal);
-        const actualGrossPaid = actualVisitPaid;
+        // Part 1 is the advance doorstep inspection fee minus coupon discount
+        const advanceVisitPaid = Math.max(0, visitFee - couponDiscountVal);
+        const actualGrossPaid = advanceVisitPaid;
         const refundAmt = parseFloat(b.refund_amount || 0.00);
         const refundPlatformCut = parseFloat(b.refund_platform_fee || 0.00);
         const refundGatewayCut = parseFloat(b.refund_gateway_fee || 0.00);
 
-        const totalPaidAmount = b.status === 'completed' 
-          ? (actualVisitPaid + finalQuoteSubtotal) 
-          : (isCancelled ? actualGrossPaid : (isPaidStage ? actualVisitPaid : 0.00));
+        // If labor was quoted, Part 2 is the remaining work balance after deducting the advance inspection fee
+        const part2Balance = finalQuoteSubtotal > 0 ? Math.max(0, finalQuoteSubtotal - advanceVisitPaid) : 0.00;
+
+        // When completed, total customer paid is the advance fee + remaining work balance (which equals finalQuoteSubtotal if >= advance)
+        const totalPaidAmount = isCompleted
+          ? (finalQuoteSubtotal > 0 ? Math.max(finalQuoteSubtotal, advanceVisitPaid + part2Balance) : advanceVisitPaid)
+          : (isCancelled ? actualGrossPaid : (isPaidStage ? advanceVisitPaid : 0.00));
 
         return {
           ...b,
           quote_subtotal: finalQuoteSubtotal,
           final_amount: totalPaidAmount,
-          gross_paid_amount: actualGrossPaid,
+          gross_paid_amount: totalPaidAmount,
           refund_amount: refundAmt,
           refund_platform_fee: refundPlatformCut,
           refund_gateway_fee: refundGatewayCut,
@@ -978,22 +982,22 @@ async function bookingsRoutes(fastify, options) {
           auditLogs,
           paymentSummary: {
             totalPaid: totalPaidAmount,
-            grossPaid: actualGrossPaid,
+            grossPaid: totalPaidAmount,
             refundAmount: refundAmt,
             refundPlatformFee: refundPlatformCut,
             refundGatewayFee: refundGatewayCut,
             isCancelled,
-            part1Fee: actualVisitPaid,
+            part1Fee: advanceVisitPaid,
             originalVisitFee: visitFee,
             couponDiscount: couponDiscountVal,
             couponCode: b.coupon_code || null,
             part1PaymentId: `TXN-VISIT-${b.id}`,
             part1Status: isCancelled ? (refundAmt > 0 ? 'REFUNDED' : 'CANCELLED') : (isPaidStage ? 'PAID' : (b.status === 'accepted' ? 'PENDING_2MIN' : 'NOT_CHARGED')),
             part1Disbursal: isCancelled ? (b.technician_id ? 'Compensated to Technician' : 'Zero Technician Disbursal') : '100% to Technician (Fuel & Travel)',
-            part2Amount: finalQuoteSubtotal,
-            part2PaymentId: b.status === 'completed' ? `TXN-FINAL-${b.id}` : null,
-            part2Status: b.status === 'completed' ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
-            platformCommission: b.status === 'completed' ? parseFloat((finalQuoteSubtotal * (getPartnerCommissionPercent() / 100.0)).toFixed(2)) : 0,
+            part2Amount: part2Balance,
+            part2PaymentId: isCompleted ? `TXN-FINAL-${b.id}` : null,
+            part2Status: isCompleted ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
+            platformCommission: isCompleted ? parseFloat((finalQuoteSubtotal * (getPartnerCommissionPercent() / 100.0)).toFixed(2)) : 0,
             escrowGuarantee: isCancelled ? 'Escrow Released & Refunded' : '100% Protected under Shazu One Escrow'
           }
         };
@@ -1096,7 +1100,8 @@ async function bookingsRoutes(fastify, options) {
             technician_id = COALESCE($3::uuid, technician_id),
             parts_mode = COALESCE($4::parts_mode, parts_mode),
             matched_at = CASE WHEN ($1::text = 'accepted' OR $1::text = 'en_route' OR $1::text = 'preparing') AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END,
-            arrived_at = CASE WHEN ($1::text = 'arrived' OR $1::text = 'in_progress') AND arrived_at IS NULL THEN CURRENT_TIMESTAMP ELSE arrived_at END
+            arrived_at = CASE WHEN ($1::text = 'arrived' OR $1::text = 'in_progress') AND arrived_at IS NULL THEN CURRENT_TIMESTAMP ELSE arrived_at END,
+            completed_at = CASE WHEN $1::text = 'completed' AND completed_at IS NULL THEN CURRENT_TIMESTAMP ELSE completed_at END
         WHERE id = $2 
         RETURNING *
       `, [status, targetId, validTechId, partsMode || null]);
@@ -1358,10 +1363,14 @@ async function bookingsRoutes(fastify, options) {
       const subtotal = booking && parseFloat(booking.quote_subtotal) > 0 ? parseFloat(booking.quote_subtotal) : calculatedSubtotal;
       const upfrontVisitFee = booking ? parseFloat(booking.visit_fee || 99) : 99;
 
-      // Compute dynamic dual-commission invoice breakdown from .env / settings
+      // Compute dynamic dual-commission invoice breakdown from live platform_settings
+      const feeSettings = await getLiveFeeSettings();
       const invoice = calculateDualCommissionInvoice({
         totalJobAmount: subtotal,
-        upfrontFeePaid: upfrontVisitFee
+        upfrontFeePaid: upfrontVisitFee,
+        customerFeePercent: feeSettings.customerFeePercent,
+        gatewayFeePercent: feeSettings.gatewayFeePercent,
+        partnerCommPercent: feeSettings.partnerCommPercent
       });
 
       return {
