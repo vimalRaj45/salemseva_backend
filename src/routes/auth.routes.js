@@ -16,6 +16,7 @@ const {
   needsRehash,
   constantTimeEqual
 } = require('../services/password.service');
+const emailService = require('../services/email.service');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -24,6 +25,12 @@ const passkeyChallenges = new Map();
 // In-memory verification tokens store for password reset / first-time password setup
 // Key: token -> { phone: string, verifiedAt: number, role: string }
 const verificationTokens = new Map();
+
+// In-memory store for Admin Email OTPs and active Admin sessions
+// Key: email -> { otpHash: string, expiresAt: number, attempts: number, requestedAt: number }
+const adminOtpStore = new Map();
+// Key: token -> { email: string, adminId: string, role: string, createdAt: number, expiresAt: number }
+const adminSessionStore = new Map();
 
 // Helper to sanitize and obtain expected origins for WebAuthn verification
 function getAllowedOrigins(req) {
@@ -621,8 +628,346 @@ async function authRoutes(fastify, options) {
     }
   });
 
-  // Session heartbeat, concurrent-session verification and server-side logout are gone with
-  // the session layer. The client keeps its own signed-in state and clears it locally.
+  // ── Dedicated Administrator Email OTP Authentication ──────────────────────
+  // Restricts administrator login to emails configured in process.env.ADMIN_ALLOWED_EMAILS
+  // Uses Brevo Transactional Email Service. Zero emoji strictly enforced.
+
+  function getAllowedAdminEmails() {
+    const raw = process.env.ADMIN_ALLOWED_EMAILS || 'malikasaravanan774@gmail.com';
+    return raw
+      .split(',')
+      .map(e => e.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  // Request Admin Login OTP
+  fastify.post('/auth/admin/otp/request', async (req, reply) => {
+    try {
+      const { email = '' } = req.body || {};
+      const cleanEmail = String(email).trim().toLowerCase();
+
+      if (!cleanEmail || !cleanEmail.includes('@')) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Please enter a valid administrator email address.'
+        });
+      }
+
+      const allowedEmails = getAllowedAdminEmails();
+      if (!allowedEmails.includes(cleanEmail)) {
+        return reply.status(403).send({
+          success: false,
+          error: `Access Denied: The email "${cleanEmail}" is not authorized for administrator access. Please contact Central Systems Engineering.`
+        });
+      }
+
+      // 30-second cooldown per email
+      const existing = adminOtpStore.get(cleanEmail);
+      if (existing && existing.requestedAt && Date.now() - existing.requestedAt < 30000) {
+        const remainingSec = Math.ceil((30000 - (Date.now() - existing.requestedAt)) / 1000);
+        return reply.status(429).send({
+          success: false,
+          error: `Please wait ${remainingSec} seconds before requesting a new verification code.`,
+          cooldownRemaining: remainingSec
+        });
+      }
+
+      // Generate 6-digit cryptographic OTP
+      const otpCode = crypto.randomInt(100000, 999999).toString();
+      const otpHash = crypto.createHash('sha256').update(otpCode).digest('hex');
+
+      // 10 minutes expiry
+      adminOtpStore.set(cleanEmail, {
+        otpHash,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+        attempts: 0,
+        requestedAt: Date.now()
+      });
+
+      // Dispatch via Brevo
+      await emailService.sendAdminLoginOtp(cleanEmail, otpCode, 10);
+
+      const echoOtp = process.env.NODE_ENV === 'development' || process.env.ALLOW_OTP_ECHO === '1';
+
+      return {
+        success: true,
+        message: `Administrative verification code sent to ${cleanEmail}. Check your inbox.`,
+        cooldownSeconds: 30,
+        expiresInSeconds: 600,
+        ...(echoOtp ? { debugOtp: otpCode } : {})
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({
+        success: false,
+        error: e.message || 'Failed to dispatch administrative verification code.'
+      });
+    }
+  });
+
+  // Verify Admin Login OTP
+  fastify.post('/auth/admin/otp/verify', async (req, reply) => {
+    try {
+      const { email = '', otp = '' } = req.body || {};
+      const cleanEmail = String(email).trim().toLowerCase();
+      const cleanOtp = String(otp).trim();
+
+      if (!cleanEmail || !cleanOtp) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Administrator email and 6-digit OTP code are required.'
+        });
+      }
+
+      const allowedEmails = getAllowedAdminEmails();
+      if (!allowedEmails.includes(cleanEmail)) {
+        return reply.status(403).send({
+          success: false,
+          error: 'Access Denied: This email is not authorized for administrator access.'
+        });
+      }
+
+      const stored = adminOtpStore.get(cleanEmail);
+      if (!stored) {
+        return reply.status(400).send({
+          success: false,
+          error: 'No active verification code found for this email. Please request a new code.'
+        });
+      }
+
+      if (Date.now() > stored.expiresAt) {
+        adminOtpStore.delete(cleanEmail);
+        return reply.status(400).send({
+          success: false,
+          error: 'Verification code has expired. Please request a new code.'
+        });
+      }
+
+      if (stored.attempts >= 5) {
+        adminOtpStore.delete(cleanEmail);
+        return reply.status(429).send({
+          success: false,
+          error: 'Too many incorrect attempts. For security reasons, please request a new verification code.'
+        });
+      }
+
+      const submittedHash = crypto.createHash('sha256').update(cleanOtp).digest('hex');
+      const isValid = constantTimeEqual(submittedHash, stored.otpHash);
+
+      if (!isValid) {
+        stored.attempts += 1;
+        const remainingAttempts = 5 - stored.attempts;
+        return reply.status(400).send({
+          success: false,
+          error: `Incorrect verification code. ${remainingAttempts} attempts remaining.`
+        });
+      }
+
+      // Valid: Clear OTP entry
+      adminOtpStore.delete(cleanEmail);
+
+      // Fetch or sync Admin User record in database
+      let adminRecord = null;
+      try {
+        const dbRes = await query('SELECT * FROM users WHERE role = $1 LIMIT 1', ['admin']);
+        if (dbRes.rows.length > 0) {
+          adminRecord = dbRes.rows[0];
+        }
+      } catch (dbErr) {
+        fastify.log.warn('Could not query admin record from database: ' + dbErr.message);
+      }
+
+      const adminUser = {
+        id: adminRecord?.id || '00000000-0000-0000-0000-000000000001',
+        role: 'admin',
+        name: adminRecord?.full_name || 'Shazu One Central Ops Admin',
+        email: cleanEmail,
+        phone: adminRecord?.phone || '+919842099999',
+        isVerified: true,
+        authenticatedVia: 'email_otp',
+        authenticatedAt: new Date().toISOString()
+      };
+
+      // Create Admin Session Token (valid for SESSION_TTL_HOURS or 168 hours)
+      const ttlHours = parseInt(process.env.SESSION_TTL_HOURS, 10) || 168;
+      const adminToken = `adm_${crypto.randomBytes(32).toString('hex')}`;
+      adminSessionStore.set(adminToken, {
+        email: cleanEmail,
+        adminId: adminUser.id,
+        role: 'admin',
+        expiresAt: Date.now() + ttlHours * 60 * 60 * 1000,
+        createdAt: Date.now()
+      });
+
+      return {
+        success: true,
+        token: adminToken,
+        user: adminUser,
+        message: 'Administrator session authenticated successfully.'
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // Verify Admin Session
+  fastify.get('/auth/admin/session', async (req, reply) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const customHeader = req.headers['x-admin-token'] || '';
+      const token = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : customHeader.trim();
+
+      if (!token) {
+        return reply.status(401).send({ success: false, error: 'No admin session token provided.' });
+      }
+
+      const session = adminSessionStore.get(token);
+      if (!session || Date.now() > session.expiresAt) {
+        if (session) adminSessionStore.delete(token);
+        return reply.status(401).send({ success: false, error: 'Admin session expired or invalid.' });
+      }
+
+      return {
+        success: true,
+        authenticated: true,
+        email: session.email,
+        role: 'admin'
+      };
+    } catch (e) {
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // Admin Logout
+  fastify.post('/auth/admin/logout', async (req, reply) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const customHeader = req.headers['x-admin-token'] || '';
+      const token = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : customHeader.trim();
+
+      if (token && adminSessionStore.has(token)) {
+        adminSessionStore.delete(token);
+      }
+
+      return {
+        success: true,
+        message: 'Admin session terminated successfully.'
+      };
+    } catch (e) {
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // Get Admin Auth Configuration (informs UI whether emergency password login is enabled in .env)
+  fastify.get('/auth/admin/config', async (req, reply) => {
+    const isPasswordLoginEnabled = String(process.env.ENABLE_ADMIN_PASSWORD_LOGIN).trim().toLowerCase() === 'true';
+    return {
+      success: true,
+      passwordLoginEnabled: isPasswordLoginEnabled
+    };
+  });
+
+  // Emergency Administrator Password Authentication
+  fastify.post('/auth/admin/login-password', async (req, reply) => {
+    try {
+      const isPasswordLoginEnabled = String(process.env.ENABLE_ADMIN_PASSWORD_LOGIN).trim().toLowerCase() === 'true';
+      if (!isPasswordLoginEnabled) {
+        return reply.status(403).send({
+          success: false,
+          error: 'Emergency administrator password login is disabled on this server. Contact system administrator.'
+        });
+      }
+
+      if (!process.env.ADMIN_PASSWORD) {
+        return reply.status(503).send({
+          success: false,
+          error: 'ADMIN_PASSWORD is not configured in backend environment.'
+        });
+      }
+
+      const { email = '', password = '' } = req.body || {};
+      const cleanEmail = String(email).trim().toLowerCase();
+      const submittedPassword = String(password).trim();
+
+      if (!cleanEmail || !cleanEmail.includes('@')) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Please enter a valid administrator email address.'
+        });
+      }
+
+      if (!submittedPassword) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Administrator password is required.'
+        });
+      }
+
+      const allowedEmails = getAllowedAdminEmails();
+      if (!allowedEmails.includes(cleanEmail)) {
+        return reply.status(403).send({
+          success: false,
+          error: `Access Denied: The email "${cleanEmail}" is not authorized for administrator access.`
+        });
+      }
+
+      // Timing-safe comparison with process.env.ADMIN_PASSWORD
+      const isPasswordValid = constantTimeEqual(submittedPassword, process.env.ADMIN_PASSWORD);
+      if (!isPasswordValid) {
+        return reply.status(401).send({
+          success: false,
+          error: 'Incorrect administrator password.'
+        });
+      }
+
+      // Query admin record in database
+      let adminRecord = null;
+      try {
+        const dbRes = await query('SELECT * FROM users WHERE role = $1 LIMIT 1', ['admin']);
+        if (dbRes.rows.length > 0) {
+          adminRecord = dbRes.rows[0];
+        }
+      } catch (dbErr) {
+        fastify.log.warn('Could not query admin record from database: ' + dbErr.message);
+      }
+
+      const adminUser = {
+        id: adminRecord?.id || '00000000-0000-0000-0000-000000000001',
+        role: 'admin',
+        name: adminRecord?.full_name || 'Shazu One Central Ops Admin',
+        email: cleanEmail,
+        phone: adminRecord?.phone || '+919842099999',
+        isVerified: true,
+        authenticatedVia: 'emergency_password',
+        authenticatedAt: new Date().toISOString()
+      };
+
+      const ttlHours = parseInt(process.env.SESSION_TTL_HOURS, 10) || 168;
+      const adminToken = `adm_${crypto.randomBytes(32).toString('hex')}`;
+      adminSessionStore.set(adminToken, {
+        email: cleanEmail,
+        adminId: adminUser.id,
+        role: 'admin',
+        expiresAt: Date.now() + ttlHours * 60 * 60 * 1000,
+        createdAt: Date.now()
+      });
+
+      return {
+        success: true,
+        token: adminToken,
+        user: adminUser,
+        message: 'Administrator authenticated successfully via emergency password override.'
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
 
   // 5. WhatsApp Gateway Live Connection Status & QR Code (Admin / Diagnostics)
   fastify.get('/auth/whatsapp/status', async (req, reply) => {
