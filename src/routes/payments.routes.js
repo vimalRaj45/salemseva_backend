@@ -243,7 +243,9 @@ async function paymentsRoutes(fastify, options) {
 
           // Check if this was a diagnostic advance or quote approval
           const isQuoteApproval = paymentEntity.notes?.type === 'FINAL_SETTLEMENT';
-          const nextStatus = isQuoteApproval ? 'quote_approved' : 'en_route';
+          const bRes = await query('SELECT technician_id FROM bookings WHERE id = $1', [bookingId]);
+          const hasTech = Boolean(bRes.rows[0]?.technician_id);
+          const nextStatus = isQuoteApproval ? 'quote_approved' : (hasTech ? 'en_route' : 'matching');
 
           await query(`
             UPDATE bookings 
@@ -384,12 +386,12 @@ async function paymentsRoutes(fastify, options) {
 
         if (currentB) {
           const isQuoteApproval = currentB.status === 'quote_presented' || parsedAmount > 100;
-          const nextStatus = isQuoteApproval ? 'quote_approved' : 'en_route';
+          const nextStatus = isQuoteApproval ? 'quote_approved' : (currentB.technician_id ? 'en_route' : 'matching');
 
           await query(`
             UPDATE bookings 
             SET status = $1
-            WHERE id = $2 AND status IN ('accepted', 'matching', 'quote_presented')
+            WHERE id = $2 AND status IN ('created', 'accepted', 'matching', 'quote_presented')
           `, [nextStatus, bookingId]);
 
           const quoteSub = parseFloat(currentB.quote_subtotal) || parsedAmount;
