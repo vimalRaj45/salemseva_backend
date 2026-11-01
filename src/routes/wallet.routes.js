@@ -315,27 +315,64 @@ async function walletRoutes(fastify, options) {
   fastify.get('/partner/incentives', async (req, reply) => {
     try {
       const rawPhone = req.query?.phone ? String(req.query.phone).trim() : '';
-      if (!rawPhone) {
-        return reply.status(400).send({ success: false, error: 'Technician phone number is required' });
+      const techIdParam = req.query?.technicianId ? String(req.query.technicianId).trim() : '';
+
+      let tech = null;
+      if (techIdParam && techIdParam !== 'null' && techIdParam !== 'undefined') {
+        const tRes = await query('SELECT * FROM technicians WHERE id::text = $1 LIMIT 1', [techIdParam]);
+        tech = tRes.rows[0];
       }
-      const cleanPhone = sanitizePhone(rawPhone);
 
-      // 1. Fetch technician from DB
-      let techRes = await query(`
-        SELECT id, full_name, phone, star_points, star_tier, zero_comm_unlocked, primary_trade 
-        FROM technicians 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
-        LIMIT 1
-      `, [cleanPhone]);
-
-      let tech = techRes.rows[0];
+      if (!tech && rawPhone) {
+        const cleanPhone = sanitizePhone(rawPhone);
+        const tRes = await query(`
+          SELECT * FROM technicians 
+          WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
+          LIMIT 1
+        `, [cleanPhone]);
+        tech = tRes.rows[0];
+      }
 
       if (!tech) {
-        return reply.status(404).send({ success: false, error: 'Technician partner not found in database' });
+        return {
+          success: true,
+          referralCode: 'TECHPARTNER',
+          starPoints: 0,
+          totalIncentiveEarned: 0,
+          availablePayout: 0,
+          settledPayout: 0,
+          referredTechs: [],
+          incentives: {
+            techName: 'Partner',
+            referralCode: 'TECHPARTNER',
+            totalIncentiveEarned: 0,
+            availablePayout: 0,
+            settledPayout: 0,
+            starPoints: 0,
+            starPointsTarget: 30,
+            zeroCommUnlocked: false,
+            referredTechs: [],
+            incentiveTransactions: []
+          }
+        };
       }
 
-      // 2. Fetch referred technicians ledger from DB
-      const refRes = await query(`
+      const cleanPhone = sanitizePhone(tech.phone || rawPhone);
+
+      // Fetch dynamic incentive amount from settings
+      const sRes = await query(`SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+      const incentiveSetting = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].partner_referral_incentive || 100) : 100.00;
+
+      // 2. Fetch referred technicians roster from technicians table
+      const refRoster = await query(`
+        SELECT id, full_name, phone, primary_trade, assigned_localities, jobs_completed_count, referral_incentive_paid, created_at
+        FROM technicians
+        WHERE referred_by_tech_id = $1
+        ORDER BY created_at DESC
+      `, [tech.id]);
+
+      // 3. Also fetch legacy technician_referrals
+      const legacyRefRes = await query(`
         SELECT 
           id, 
           referred_name as name, 
@@ -352,7 +389,7 @@ async function walletRoutes(fastify, options) {
         ORDER BY created_at DESC
       `, [cleanPhone]);
 
-      // 3. Fetch payouts ledger from DB
+      // 4. Fetch payouts ledger from DB
       const payoutRes = await query(`
         SELECT 
           id, 
@@ -364,59 +401,81 @@ async function walletRoutes(fastify, options) {
           TO_CHAR(created_at, 'Mon DD, YYYY') as date
         FROM technician_payouts
         WHERE RIGHT(REGEXP_REPLACE(technician_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
+           OR technician_id = $2
         ORDER BY created_at DESC
-      `, [cleanPhone]);
+      `, [cleanPhone, tech.id]);
 
-      // 4. Calculate dynamic totals from SQL
-      const totalIncentiveEarned = refRes.rows.reduce((sum, r) => sum + parseFloat(r.incentiveAmount || 0), 0);
-      const availablePayout = refRes.rows
-        .filter(r => r.payoutStatus === 'AVAILABLE_FOR_PAYOUT')
-        .reduce((sum, r) => sum + parseFloat(r.incentiveAmount || 0), 0);
-      const settledPayout = payoutRes.rows.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+      // Combine referred techs list
+      const referredTechs = [
+        ...refRoster.rows.map(t => {
+          const loc = Array.isArray(t.assigned_localities) && t.assigned_localities[0] ? t.assigned_localities[0] : 'Salem';
+          const isPaid = Boolean(t.referral_incentive_paid);
+          return {
+            id: t.id,
+            name: t.full_name,
+            phone: t.phone,
+            trade: t.primary_trade || 'Technician',
+            locality: loc,
+            onboardedAt: t.created_at ? new Date(t.created_at).toLocaleDateString() : 'Recent',
+            incentiveAmount: incentiveSetting,
+            jobsCompleted: t.jobs_completed_count || 0,
+            payoutStatus: isPaid ? 'SETTLED_TO_PHONE' : (t.jobs_completed_count > 0 ? 'READY_TO_CLAIM' : 'Awaiting 1st Job Completion')
+          };
+        }),
+        ...legacyRefRes.rows
+      ];
 
-      // 5. Build incentive transactions list from real DB rows
-      const incentiveTransactions = [];
-
-      refRes.rows.forEach(r => {
-        incentiveTransactions.push({
-          id: `inc-${r.id}`,
-          title: `Referral Incentive: ${r.name} (${r.trade})`,
-          amount: parseFloat(r.incentiveAmount),
-          type: 'CREDIT',
-          status: r.payoutStatus === 'SETTLED_TO_UPI' ? 'PAID_TO_UPI' : 'AVAILABLE',
-          date: r.onboardedAt,
-          description: `Direct ₹${r.incentiveAmount} incentive for onboarding certified partner in ${r.locality}`
-        });
-      });
+      // Calculate totals
+      let totalIncentiveEarned = 0;
+      let availablePayout = 0;
+      let settledPayout = 0;
 
       payoutRes.rows.forEach(p => {
-        incentiveTransactions.push({
-          id: `payout-${p.id}`,
-          title: `Instant UPI Payout (${p.upi_id})`,
-          amount: parseFloat(p.amount),
-          type: 'PAYOUT',
-          status: p.status,
-          date: p.date,
-          description: p.description || `Transferred via IMPS/UPI. Ref: ${p.utr_ref || 'SETTLED'}`
-        });
+        const amt = parseFloat(p.amount || 0);
+        if (p.description && (p.description.toLowerCase().includes('referral') || p.description.toLowerCase().includes('partner'))) {
+          totalIncentiveEarned += amt;
+          if (p.status === 'DISBURSED_100%' || p.status === 'SETTLED') {
+            settledPayout += amt;
+          } else {
+            availablePayout += amt;
+          }
+        }
       });
 
-      const cleanName = tech.full_name.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8);
-      const referralCode = `TECH${cleanName || 'SALEM'}`;
+      // Also check legacy referrals for available payout
+      legacyRefRes.rows.forEach(r => {
+        const amt = parseFloat(r.incentiveAmount || 0);
+        totalIncentiveEarned += amt;
+        if (r.payoutStatus === 'AVAILABLE_FOR_PAYOUT') {
+          availablePayout += amt;
+        } else {
+          settledPayout += amt;
+        }
+      });
+
+      const effectiveCode = tech.referral_code || ('TECH' + (tech.phone || '9999').replace(/\D/g, '').slice(-4));
 
       return {
         success: true,
+        referralCode: effectiveCode,
+        totalIncentiveEarned,
+        availablePayout,
+        settledPayout,
+        starPoints: tech.star_points || 0,
+        starPointsTarget: 30,
+        zeroCommUnlocked: (tech.star_points >= 30) || Boolean(tech.zero_comm_unlocked),
+        referredTechs,
         incentives: {
           techName: tech.full_name,
-          referralCode,
+          referralCode: effectiveCode,
           totalIncentiveEarned,
           availablePayout,
           settledPayout,
           starPoints: tech.star_points || 0,
           starPointsTarget: 30,
-          zeroCommUnlocked: (tech.star_points >= 30) || !!tech.zero_comm_unlocked,
-          referredTechs: refRes.rows,
-          incentiveTransactions
+          zeroCommUnlocked: (tech.star_points >= 30) || Boolean(tech.zero_comm_unlocked),
+          referredTechs,
+          incentiveTransactions: []
         }
       };
     } catch (err) {
