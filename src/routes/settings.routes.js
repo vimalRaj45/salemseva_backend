@@ -24,6 +24,9 @@ async function settingsRoutes(fastify, options) {
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS gateway_fee_percent NUMERIC(5,2) DEFAULT 2.00;
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS partner_commission_percent NUMERIC(5,2) DEFAULT 2.00;
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS inspection_visit_fee NUMERIC(10,2) DEFAULT 99.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS business_upi_id VARCHAR(150) DEFAULT 'shazuone.pay@icici';
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS business_merchant_name VARCHAR(150) DEFAULT 'Shazu One Home Services';
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS payment_gateway_mode VARCHAR(50) DEFAULT 'DYNAMIC_QR';
     `);
 
     // Seed initial row if table is empty
@@ -149,6 +152,9 @@ async function settingsRoutes(fastify, options) {
         customer_platform_fee_percent: parseFloat(row.customer_platform_fee_percent !== null && row.customer_platform_fee_percent !== undefined ? row.customer_platform_fee_percent : 2.0),
         payment_gateway_fee_percent: parseFloat(row.payment_gateway_fee_percent !== null && row.payment_gateway_fee_percent !== undefined ? row.payment_gateway_fee_percent : (row.gateway_fee_percent || 2.0)),
         inspection_visit_fee: parseFloat(row.inspection_visit_fee || 99),
+        business_upi_id: row.business_upi_id || process.env.BUSINESS_UPI_ID || 'shazuone.pay@icici',
+        business_merchant_name: row.business_merchant_name || process.env.BUSINESS_MERCHANT_NAME || 'Shazu One Home Services',
+        payment_gateway_mode: row.payment_gateway_mode || 'DYNAMIC_QR',
         updated_by: row.updated_by,
         updated_at: row.updated_at
       };
@@ -183,6 +189,9 @@ async function settingsRoutes(fastify, options) {
         customer_platform_fee_percent,
         payment_gateway_fee_percent,
         inspection_visit_fee,
+        business_upi_id,
+        business_merchant_name,
+        payment_gateway_mode,
         updated_by = 'admin_salem_central'
       } = req.body || {};
 
@@ -209,6 +218,9 @@ async function settingsRoutes(fastify, options) {
       const newVisitFee = inspection_visit_fee !== undefined
         ? Math.max(0, parseFloat(inspection_visit_fee))
         : parseFloat(current.inspection_visit_fee || 99);
+      const newBusinessUpi = business_upi_id !== undefined ? String(business_upi_id).trim() : (current.business_upi_id || 'shazuone.pay@icici');
+      const newBusinessMerchant = business_merchant_name !== undefined ? String(business_merchant_name).trim() : (current.business_merchant_name || 'Shazu One Home Services');
+      const newPaymentMode = payment_gateway_mode !== undefined ? String(payment_gateway_mode).trim() : (current.payment_gateway_mode || 'DYNAMIC_QR');
 
       const updateSql = `
         INSERT INTO platform_settings (
@@ -217,9 +229,10 @@ async function settingsRoutes(fastify, options) {
           partner_referral_incentive, partner_welcome_bonus, 
           partner_commission_percent, platform_commission_percent,
           customer_platform_fee_percent, payment_gateway_fee_percent, gateway_fee_percent,
-          inspection_visit_fee, updated_at, updated_by
+          inspection_visit_fee, business_upi_id, business_merchant_name, payment_gateway_mode,
+          updated_at, updated_by
         ) VALUES (
-          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $10, $11, CURRENT_TIMESTAMP, $12
+          'reward_settings', $1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, $15
         )
         ON CONFLICT (id) DO UPDATE SET
           customer_referral_credits = EXCLUDED.customer_referral_credits,
@@ -235,6 +248,9 @@ async function settingsRoutes(fastify, options) {
           payment_gateway_fee_percent = EXCLUDED.payment_gateway_fee_percent,
           gateway_fee_percent = EXCLUDED.gateway_fee_percent,
           inspection_visit_fee = EXCLUDED.inspection_visit_fee,
+          business_upi_id = EXCLUDED.business_upi_id,
+          business_merchant_name = EXCLUDED.business_merchant_name,
+          payment_gateway_mode = EXCLUDED.payment_gateway_mode,
           updated_at = CURRENT_TIMESTAMP,
           updated_by = EXCLUDED.updated_by
         RETURNING *;
@@ -252,6 +268,9 @@ async function settingsRoutes(fastify, options) {
         newCustFee,
         newGatewayFee,
         newVisitFee,
+        newBusinessUpi,
+        newBusinessMerchant,
+        newPaymentMode,
         updated_by
       ]);
 
