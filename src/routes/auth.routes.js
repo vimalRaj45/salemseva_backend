@@ -503,6 +503,14 @@ async function authRoutes(fastify, options) {
         if (referralCode && String(referralCode).trim()) {
           const refTrim = String(referralCode).trim().toUpperCase();
           const refPhone = refTrim.replace(/[^0-9]/g, '').slice(-10);
+
+          if (cleanPhone && (refPhone === cleanPhone || refTrim === ('SEVA' + cleanPhone.slice(-4)))) {
+            return reply.status(400).send({
+              success: false,
+              error: 'You cannot use your own referral code.'
+            });
+          }
+
           try {
             const refCheck = await query(`
               SELECT referral_code, phone FROM users 
@@ -512,9 +520,18 @@ async function authRoutes(fastify, options) {
             if (refCheck.rows.length > 0) {
               referredBy = refCheck.rows[0].referral_code || refCheck.rows[0].phone;
             } else {
-              referredBy = refTrim;
+              return reply.status(400).send({
+                success: false,
+                error: `Wrong referral code "${refTrim}". No account found with this referral code. Please check or leave blank.`
+              });
             }
-          } catch (_) {}
+          } catch (dbErr) {
+            fastify.log.error(dbErr);
+            return reply.status(500).send({
+              success: false,
+              error: 'Could not verify referral code. Please try again.'
+            });
+          }
         }
         const userRefCode = 'SEVA' + cleanPhone.slice(-4) + Math.random().toString(36).substring(2, 5).toUpperCase();
 
@@ -558,6 +575,49 @@ async function authRoutes(fastify, options) {
     } catch (e) {
       fastify.log.error(e);
       return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // POST /auth/verify-referral - Check if a referral code exists before registration
+  fastify.post('/auth/verify-referral', async (req, reply) => {
+    try {
+      const { referralCode = '', phone = '' } = req.body || {};
+      const refTrim = String(referralCode || '').trim().toUpperCase();
+      const cleanPhone = (phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (!refTrim) {
+        return reply.status(400).send({ success: false, valid: false, error: 'Please enter a referral code or friend phone' });
+      }
+      const refDigits = refTrim.replace(/[^0-9]/g, '').slice(-10);
+      if (cleanPhone && (cleanPhone === refDigits || refTrim === ('SEVA' + cleanPhone.slice(-4)))) {
+        return reply.status(400).send({ success: false, valid: false, error: 'You cannot use your own referral code.' });
+      }
+
+      const res = await query(`
+        SELECT id, full_name, referral_code, phone FROM users
+        WHERE UPPER(referral_code) = $1
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        LIMIT 1
+      `, [refTrim, refDigits]);
+
+      if (res.rows.length === 0) {
+        return reply.status(404).send({
+          success: false,
+          valid: false,
+          error: `Wrong referral code "${refTrim}". No member found with this referral code.`
+        });
+      }
+
+      const u = res.rows[0];
+      return {
+        success: true,
+        valid: true,
+        referrerName: u.full_name || 'Salem Member',
+        referralCode: u.referral_code || u.phone,
+        message: `Valid referral from ${u.full_name || 'member'}! Flat ₹50 waiver unlocked.`
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
     }
   });
 

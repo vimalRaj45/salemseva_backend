@@ -176,7 +176,18 @@ async function bookingsRoutes(fastify, options) {
                     `, [reqUserId, reqPhone]);
                     if (uRes.rows.length > 0) {
                       const u = uRes.rows[0];
-                      isEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+                      let validReferredBy = false;
+                      if (u.referred_by) {
+                        const refDigits = String(u.referred_by).replace(/[^0-9]/g, '').slice(-10);
+                        const refCheck = await query(`
+                          SELECT id FROM users
+                          WHERE UPPER(referral_code) = $1
+                             OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+                          LIMIT 1
+                        `, [String(u.referred_by).toUpperCase(), refDigits]);
+                        validReferredBy = refCheck.rows.length > 0;
+                      }
+                      isEligible = Boolean(validReferredBy || parseInt(u.referral_count, 10) > 0);
                     }
                   } catch (_) {}
                 }
@@ -189,6 +200,29 @@ async function bookingsRoutes(fastify, options) {
             couponDiscount = Math.min(100.00, visitFee);
           } else if (cleanCode === 'SALEM50') {
             couponDiscount = Math.min(50.00, visitFee);
+          } else {
+            // Check if cleanCode is a valid friend referral code
+            const refDigits = cleanCode.replace(/[^0-9]/g, '').slice(-10);
+            const reqPhone = (rawCustomerPhone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+            const refCheck = await query(`
+              SELECT id, phone, referral_code FROM users
+              WHERE UPPER(referral_code) = $1
+                 OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+              LIMIT 1
+            `, [cleanCode, refDigits]);
+
+            if (refCheck.rows.length > 0) {
+              const referrer = refCheck.rows[0];
+              const referrerDigits = (referrer.phone || '').replace(/[^0-9]/g, '').slice(-10);
+              if (reqPhone && referrerDigits !== reqPhone) {
+                couponDiscount = Math.min(50.00, visitFee);
+                await query(`
+                  UPDATE users SET referred_by = COALESCE(referred_by, $1)
+                  WHERE ($2::text IS NOT NULL AND id::text = $2)
+                     OR ($3::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $3)
+                `, [referrer.referral_code || referrer.phone, customerId, reqPhone]);
+              }
+            }
           }
         } catch (cErr) {
           if (couponCode.toUpperCase() === 'SALEM100') {

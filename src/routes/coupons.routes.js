@@ -89,7 +89,18 @@ async function couponsRoutes(fastify, options) {
         `, [userId, cleanPhone]);
         if (uRes.rows.length > 0) {
           const u = uRes.rows[0];
-          isReferralEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+          let validReferredBy = false;
+          if (u.referred_by) {
+            const refDigits = String(u.referred_by).replace(/[^0-9]/g, '').slice(-10);
+            const refCheck = await query(`
+              SELECT id FROM users
+              WHERE UPPER(referral_code) = $1
+                 OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+              LIMIT 1
+            `, [String(u.referred_by).toUpperCase(), refDigits]);
+            validReferredBy = refCheck.rows.length > 0;
+          }
+          isReferralEligible = Boolean(validReferredBy || parseInt(u.referral_count, 10) > 0);
         }
       }
 
@@ -161,12 +172,66 @@ async function couponsRoutes(fastify, options) {
             message: 'Promo code SALEM100 applied: INR 100 OFF on your first home service'
           };
         }
-        return {
+
+        // Check if customer entered a friend's referral code or phone number
+        const refDigits = cleanCode.replace(/[^0-9]/g, '').slice(-10);
+        const reqPhone = (req.body?.customerPhone || req.body?.phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+        const reqUserId = req.body?.customerId || req.body?.userId || null;
+
+        try {
+          const referrerCheck = await query(`
+            SELECT id, full_name, phone, referral_code FROM users
+            WHERE UPPER(referral_code) = $1
+               OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+            LIMIT 1
+          `, [cleanCode, refDigits]);
+
+          if (referrerCheck.rows.length > 0) {
+            const referrer = referrerCheck.rows[0];
+            const referrerDigits = (referrer.phone || '').replace(/[^0-9]/g, '').slice(-10);
+
+            if (reqPhone && referrerDigits === reqPhone) {
+              return reply.status(400).send({
+                success: false,
+                valid: false,
+                discountAmount: 0,
+                error: 'You cannot use your own referral code.'
+              });
+            }
+
+            if (reqUserId || reqPhone) {
+              await query(`
+                UPDATE users
+                SET referred_by = COALESCE(referred_by, $1)
+                WHERE ($2::text IS NOT NULL AND id::text = $2)
+                   OR ($3::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $3)
+              `, [referrer.referral_code || referrer.phone, reqUserId, reqPhone]);
+            }
+
+            const waiverDiscount = Math.min(50, evalAmount || 99);
+            return {
+              success: true,
+              valid: true,
+              code: 'REFERWAIVER50',
+              discountAmount: waiverDiscount,
+              message: 'Referral code verified! Flat ₹50 waiver applied to your booking.'
+            };
+          } else if (cleanCode.startsWith('SEVA') || cleanCode.startsWith('REF') || cleanCode.startsWith('TECH') || refDigits.length === 10) {
+            return reply.status(400).send({
+              success: false,
+              valid: false,
+              discountAmount: 0,
+              error: `Wrong referral code "${cleanCode}". No member found with this referral code.`
+            });
+          }
+        } catch (_) {}
+
+        return reply.status(400).send({
           success: false,
           valid: false,
           discountAmount: 0,
-          error: `Invalid coupon code "${cleanCode}". Please verify and re-enter.`
-        };
+          error: `Invalid coupon or referral code "${cleanCode}". Please verify and re-enter.`
+        });
       }
 
       const coupon = res.rows[0];
@@ -189,7 +254,18 @@ async function couponsRoutes(fastify, options) {
 
             if (uRes.rows.length > 0) {
               const u = uRes.rows[0];
-              isEligible = Boolean(u.referred_by || parseInt(u.referral_count, 10) > 0);
+              let validReferredBy = false;
+              if (u.referred_by) {
+                const refDigits = String(u.referred_by).replace(/[^0-9]/g, '').slice(-10);
+                const refCheck = await query(`
+                  SELECT id FROM users
+                  WHERE UPPER(referral_code) = $1
+                     OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+                  LIMIT 1
+                `, [String(u.referred_by).toUpperCase(), refDigits]);
+                validReferredBy = refCheck.rows.length > 0;
+              }
+              isEligible = Boolean(validReferredBy || parseInt(u.referral_count, 10) > 0);
             }
           } catch (_) {}
         }

@@ -301,9 +301,14 @@ async function walletRoutes(fastify, options) {
         LIMIT 1
       `, [refCodeTrim, refDigits]);
 
-      const effectiveReferredBy = referrerRes.rows.length > 0 
-        ? (referrerRes.rows[0].referral_code || referrerRes.rows[0].phone) 
-        : refCodeTrim;
+      if (referrerRes.rows.length === 0) {
+        return reply.status(400).send({
+          success: false,
+          error: `Wrong referral code "${refCodeTrim}". No user found with this referral code.`
+        });
+      }
+
+      const effectiveReferredBy = referrerRes.rows[0].referral_code || referrerRes.rows[0].phone;
 
       await query(`UPDATE users SET referred_by = $1 WHERE id = $2`, [effectiveReferredBy, u.id]);
 
