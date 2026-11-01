@@ -1263,14 +1263,39 @@ async function partnerRoutes(fastify, options) {
       const phoneParam = req.query.phone;
       let techId = req.query.technicianId;
 
-      if (!techId && phoneParam) {
-        const cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
+      if (techId && techId !== 'null' && techId !== 'undefined') {
+        const checkRes = await query(`
+          SELECT id FROM technicians 
+          WHERE id::text = $1 
+             OR REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+          LIMIT 1
+        `, [String(techId).trim()]);
+        if (checkRes.rows[0]) {
+          techId = checkRes.rows[0].id;
+        }
+      }
+
+      if ((!techId || techId === 'null' || techId === 'undefined') && phoneParam) {
+        const cleanPhone = String(phoneParam).replace(/[\s\-\(\)]/g, '');
+        const cleanDigits = String(phoneParam).replace(/\D/g, '').slice(-10);
         const techRes = await query(`
           SELECT id FROM technicians 
           WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1
+             OR id::text = $1
+             OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
           LIMIT 1
-        `, [cleanPhone]);
+        `, [cleanPhone, cleanDigits]);
         techId = techRes.rows[0]?.id;
+      }
+
+      // Never expose other technicians' settlement records if no specific technician is verified
+      if (!techId || techId === 'null' || techId === 'undefined') {
+        return {
+          success: true,
+          count: 0,
+          totalEarnings: 0,
+          jobs: []
+        };
       }
 
       let historySql = `
@@ -1282,15 +1307,11 @@ async function partnerRoutes(fastify, options) {
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN reviews r ON b.id = r.booking_id
+        WHERE b.technician_id = $1
+        ORDER BY b.created_at DESC 
+        LIMIT 50
       `;
-      const params = [];
-      if (techId) {
-        params.push(techId);
-        historySql += ` WHERE b.technician_id = $1`;
-      }
-      historySql += ` ORDER BY b.created_at DESC LIMIT 50`;
-
-      const res = await query(historySql, params);
+      const res = await query(historySql, [techId]);
 
       const feeConfig = await getLiveFeeSettings();
       const partnerRate = (100 - feeConfig.partnerCommPercent) / 100.0;

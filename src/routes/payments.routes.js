@@ -680,6 +680,351 @@ async function paymentsRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
+
+  // ==========================================
+  // DYNAMIC BUSINESS UPI QR PAYMENTS & OCR
+  // ==========================================
+
+  // 1. Get Payment Configuration (Active mode: DYNAMIC_QR vs RAZORPAY, Business VPA)
+  fastify.get('/payments/qr-config', async (req, reply) => {
+    try {
+      const sRes = await query(`
+        SELECT business_upi_id, business_merchant_name, payment_gateway_mode,
+               customer_platform_fee_percent, gateway_fee_percent
+        FROM platform_settings 
+        WHERE id = 'reward_settings' 
+        LIMIT 1
+      `);
+      const row = sRes.rows[0] || {};
+      return {
+        success: true,
+        businessUpiId: row.business_upi_id || process.env.BUSINESS_UPI_ID || 'shazuone.pay@icici',
+        businessMerchantName: row.business_merchant_name || process.env.BUSINESS_MERCHANT_NAME || 'Shazu One Home Services',
+        paymentGatewayMode: row.payment_gateway_mode || 'DYNAMIC_QR',
+        platformFeePercent: parseFloat(row.customer_platform_fee_percent || 2.0),
+        gatewayFeePercent: parseFloat(row.gateway_fee_percent || 2.0)
+      };
+    } catch (err) {
+      fastify.log.error('QR Config fetch error:', err);
+      return {
+        success: true,
+        businessUpiId: 'shazuone.pay@icici',
+        businessMerchantName: 'Shazu One Home Services',
+        paymentGatewayMode: 'DYNAMIC_QR'
+      };
+    }
+  });
+
+  // 2. Generate Dynamic UPI Intent & URI
+  fastify.get('/payments/qr-intent', async (req, reply) => {
+    try {
+      const { bookingId, amount, paymentType = 'ADVANCE_FEE' } = req.query;
+      if (!amount || parseFloat(amount) <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid amount is required' });
+      }
+
+      const sRes = await query(`
+        SELECT business_upi_id, business_merchant_name 
+        FROM platform_settings 
+        WHERE id = 'reward_settings' 
+        LIMIT 1
+      `);
+      const vpa = sRes.rows[0]?.business_upi_id || process.env.BUSINESS_UPI_ID || 'shazuone.pay@icici';
+      const merchantName = sRes.rows[0]?.business_merchant_name || 'Shazu One Home Services';
+
+      const cleanAmount = parseFloat(amount).toFixed(2);
+      const bId = bookingId || `SLM-${Date.now()}`;
+      const suffix = paymentType === 'FINAL_SETTLEMENT' ? 'FIN' : 'ADV';
+      const txnRef = `${bId}-${suffix}`;
+      const txnNote = `Shazu One Order ${bId}`;
+
+      // Standard Indian UPI Intent URI
+      const upiUri = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent(merchantName)}&am=${cleanAmount}&tr=${encodeURIComponent(txnRef)}&tn=${encodeURIComponent(txnNote)}&cu=INR`;
+
+      return {
+        success: true,
+        upiUri,
+        businessUpiId: vpa,
+        businessMerchantName: merchantName,
+        amount: parseFloat(cleanAmount),
+        transactionRef: txnRef,
+        transactionNote: txnNote
+      };
+    } catch (err) {
+      fastify.log.error('QR intent error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3. Submit Manual Dynamic QR Payment with Screenshot & UTR
+  fastify.post('/payments/submit-manual-qr', async (req, reply) => {
+    try {
+      const {
+        bookingId,
+        amount,
+        customerUtr,
+        screenshotUrl,
+        ocrDetectedUtr,
+        paymentType = 'ADVANCE_FEE',
+        notes
+      } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+      }
+      if (!amount || parseFloat(amount) <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid payment amount is required' });
+      }
+      const cleanUtr = String(customerUtr || '').trim().replace(/\s+/g, '');
+      if (!cleanUtr || cleanUtr.length < 6) {
+        return reply.status(400).send({ success: false, error: 'Please provide a valid transaction reference / UTR number (at least 6 characters)' });
+      }
+
+      // Check if booking exists
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const booking = bRes.rows[0];
+      const parsedAmount = parseFloat(amount);
+
+      // Check commission split
+      const invoice = calculateCommissionSplit(parsedAmount);
+      const techPayout = invoice.technicianPayout || (parsedAmount * 0.85);
+      const platformComm = invoice.platformCommission || (parsedAmount * 0.15);
+
+      const ledgerOrderId = `qr_ord_${bookingId}_${Date.now()}`;
+      const ledgerPaymentId = `qr_pay_${cleanUtr}_${Date.now()}`;
+
+      // Insert or update payment record
+      const insertRes = await query(`
+        INSERT INTO payments (
+          booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
+          tech_payout_amount, platform_commission, status, payment_method,
+          customer_utr, ocr_detected_utr, screenshot_url, verification_status,
+          created_at
+        ) VALUES (
+          $1, $2, $3, $4,
+          $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
+          $7, $8, $9, 'pending',
+          NOW()
+        )
+        RETURNING *;
+      `, [
+        bookingId,
+        ledgerOrderId,
+        ledgerPaymentId,
+        parsedAmount,
+        techPayout,
+        platformComm,
+        cleanUtr,
+        ocrDetectedUtr || null,
+        screenshotUrl || null
+      ]);
+
+      const isQuoteApproval = paymentType === 'FINAL_SETTLEMENT' || booking.status === 'quote_presented';
+      const nextBookingStatus = isQuoteApproval ? 'quote_approved' : (booking.status === 'created' ? 'matching' : booking.status);
+
+      await query(`
+        UPDATE bookings
+        SET status = $1
+        WHERE id = $2 AND status IN ('created', 'matching', 'quote_presented');
+      `, [nextBookingStatus, bookingId]);
+
+      // Insert audit log
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ($1, 'MANUAL_QR_PAYMENT_SUBMITTED', 'customer', 'customer', $2)
+        `, [
+          bookingId,
+          JSON.stringify({
+            amount: parsedAmount,
+            customerUtr: cleanUtr,
+            ocrDetectedUtr,
+            hasScreenshot: Boolean(screenshotUrl),
+            paymentType,
+            status: 'pending_admin_verification'
+          })
+        ]);
+      } catch (aErr) {}
+
+      return {
+        success: true,
+        message: 'Payment proof submitted successfully! Our central desk will verify your transaction.',
+        payment: insertRes.rows[0],
+        bookingId,
+        nextStatus: nextBookingStatus
+      };
+    } catch (err) {
+      fastify.log.error('Submit manual QR error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 4. Server-Side Regex & UTR Detection for screenshots
+  fastify.post('/payments/ocr-parse', async (req, reply) => {
+    try {
+      const { text = '', rawOcr = '' } = req.body || {};
+      const fullText = (text + ' ' + rawOcr).trim();
+
+      if (!fullText) {
+        return reply.status(400).send({ success: false, error: 'Text or OCR content is required' });
+      }
+
+      // 12-digit Indian UTR regex patterns
+      const utrPatterns = [
+        /(?:UPI\s*Ref(?:\s*No)?|UTR(?:\s*No)?|Ref\s*No|Transaction\s*ID|Txn\s*ID|Google\s*Transaction\s*ID)[\s:=]*([0-9]{12})/i,
+        /UPI\s*transaction\s*ID\s*[:=]?\s*([0-9]{12})/i,
+        /\b([0-9]{12})\b/
+      ];
+
+      let detectedUtr = null;
+      for (const pattern of utrPatterns) {
+        const m = fullText.match(pattern);
+        if (m && m[1]) {
+          detectedUtr = m[1];
+          break;
+        } else if (m && m[0] && m[0].length === 12 && /^\d+$/.test(m[0])) {
+          detectedUtr = m[0];
+          break;
+        }
+      }
+
+      // Amount extraction regex
+      const amountMatch = fullText.match(/(?:₹|INR|Rs\.?)\s*([0-9,]+(?:\.[0-9]{2})?)/i) || fullText.match(/\b([0-9]{2,5}(?:\.[0-9]{2})?)\b/);
+      const detectedAmount = amountMatch ? amountMatch[1].replace(/,/g, '') : null;
+
+      return {
+        success: true,
+        detectedUtr,
+        detectedAmount,
+        hasUtr: Boolean(detectedUtr)
+      };
+    } catch (err) {
+      fastify.log.error('OCR parse error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 5. Admin: List Pending QR Verifications
+  fastify.get('/admin/payments/pending-verifications', async (req, reply) => {
+    try {
+      const res = await query(`
+        SELECT 
+          p.id, p.booking_id, p.amount_total, p.customer_utr, p.ocr_detected_utr,
+          p.screenshot_url, p.verification_status, p.created_at, p.verified_at, p.verified_by,
+          p.rejection_reason, p.tech_payout_amount, p.platform_commission,
+          b.customer_name, b.customer_phone, b.status as booking_status, b.locality,
+          t.full_name as technician_name, t.phone as technician_phone
+        FROM payments p
+        LEFT JOIN bookings b ON p.booking_id = b.id
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE p.payment_method = 'DYNAMIC_UPI_QR'
+        ORDER BY p.created_at DESC
+        LIMIT 100;
+      `);
+
+      return {
+        success: true,
+        count: res.rows.length,
+        pendingCount: res.rows.filter(r => r.verification_status === 'pending').length,
+        payments: res.rows
+      };
+    } catch (err) {
+      fastify.log.error('Admin pending verifications error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 6. Admin: 1-Click Verify and Confirm Payment
+  fastify.post('/admin/payments/:id/verify', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { verifiedBy = 'Salem Operations Admin', adminNotes = '' } = req.body || {};
+
+      const pRes = await query('SELECT * FROM payments WHERE id::text = $1 OR customer_utr = $1', [id]);
+      if (pRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Payment not found' });
+      }
+      const payment = pRes.rows[0];
+
+      const updateRes = await query(`
+        UPDATE payments
+        SET verification_status = 'verified',
+            verified_by = $1,
+            verified_at = NOW(),
+            status = 'escrow_held'
+        WHERE id = $2
+        RETURNING *;
+      `, [verifiedBy, payment.id]);
+
+      // Audit log
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ($1, 'MANUAL_QR_PAYMENT_VERIFIED', $2, 'admin', $3)
+        `, [
+          payment.booking_id,
+          verifiedBy,
+          JSON.stringify({ paymentId: payment.id, customerUtr: payment.customer_utr, amount: payment.amount_total, adminNotes })
+        ]);
+      } catch (aErr) {}
+
+      return {
+        success: true,
+        message: `Payment with UTR ${payment.customer_utr} verified successfully. Escrow confirmed.`,
+        payment: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error('Payment verify error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 7. Admin: Flag / Reject Payment Proof
+  fastify.post('/admin/payments/:id/reject', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { rejectionReason = 'Invalid UTR or screenshot does not match bank record', verifiedBy = 'Salem Operations Admin' } = req.body || {};
+
+      const pRes = await query('SELECT * FROM payments WHERE id::text = $1', [id]);
+      if (pRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Payment not found' });
+      }
+      const payment = pRes.rows[0];
+
+      const updateRes = await query(`
+        UPDATE payments
+        SET verification_status = 'rejected',
+            rejection_reason = $1,
+            verified_by = $2,
+            verified_at = NOW()
+        WHERE id = $3
+        RETURNING *;
+      `, [rejectionReason, verifiedBy, payment.id]);
+
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ($1, 'MANUAL_QR_PAYMENT_REJECTED', $2, 'admin', $3)
+        `, [
+          payment.booking_id,
+          verifiedBy,
+          JSON.stringify({ paymentId: payment.id, rejectionReason })
+        ]);
+      } catch (aErr) {}
+
+      return {
+        success: true,
+        message: 'Payment flagged as rejected.',
+        payment: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error('Payment reject error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 }
 
 module.exports = paymentsRoutes;
