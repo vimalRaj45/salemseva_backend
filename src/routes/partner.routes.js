@@ -1011,6 +1011,90 @@ async function partnerRoutes(fastify, options) {
     }
   });
 
+  // 3a. Get Partner Profile directly from Neon PostgreSQL
+  fastify.get('/partner/profile', async (req, reply) => {
+    try {
+      const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
+      const techIdParam = (req.query?.technicianId || req.query?.id) ? String(req.query.technicianId || req.query.id).trim() : '';
+
+      if (!phoneParam && !techIdParam) {
+        return reply.status(401).send({ success: false, error: 'Technician phone or ID is required' });
+      }
+
+      const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
+
+      const techRes = await query(`
+        SELECT * FROM technicians 
+        WHERE ($1::text <> '' AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        ORDER BY created_at ASC 
+        LIMIT 1
+      `, [techIdParam, cleanDigits || '']);
+
+      const tech = techRes.rows[0];
+      if (!tech) {
+        return reply.status(404).send({ success: false, error: 'Technician not found in database' });
+      }
+
+      // Calculate real stats from bookings
+      const liveFees = await getLiveFeeSettings();
+      const partnerEarningsMultiplier = Math.max(0, (100 - liveFees.partnerCommPercent) / 100.0);
+      const statsRes = await query(`
+        SELECT 
+          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as total_earnings,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END)::int as completed_jobs_count,
+          COUNT(CASE WHEN status IN ('accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress') THEN 1 END)::int as active_jobs_count
+        FROM bookings WHERE technician_id = $1
+      `, [tech.id, partnerEarningsMultiplier]);
+
+      const techStats = statsRes.rows[0] || {};
+      const completedJobs = parseInt(techStats.completed_jobs_count || tech.jobs_completed_count || 0, 10);
+      const activeJobs = parseInt(techStats.active_jobs_count || 0, 10);
+      const todayEarnings = parseFloat(techStats.today_earnings || 0);
+      const totalEarnings = parseFloat(techStats.total_earnings || 0);
+
+      return {
+        success: true,
+        technician: {
+          ...tech,
+          id: tech.id,
+          name: tech.full_name,
+          fullName: tech.full_name,
+          phone: tech.phone,
+          trade: tech.primary_trade,
+          primaryTrade: tech.primary_trade,
+          secondaryTrades: tech.secondary_trades || [],
+          secondary_trades: tech.secondary_trades || [],
+          ratingAvg: parseFloat(tech.rating_avg || 5.0),
+          ratingCount: parseInt(tech.rating_count || 0, 10),
+          jobsCompleted: completedJobs,
+          jobs_completed_count: completedJobs,
+          activeJobs,
+          todayEarnings,
+          today_earnings: todayEarnings,
+          totalEarnings,
+          total_earnings: totalEarnings,
+          yearsExperience: parseInt(tech.years_experience || 5, 10),
+          isOnline: Boolean(tech.is_online),
+          isKycVerified: Boolean(tech.is_kyc_verified),
+          is_kyc_verified: Boolean(tech.is_kyc_verified),
+          aadhaarCardUrl: tech.aadhaar_card_url,
+          dailyJobCapacity: parseInt(tech.daily_job_capacity || 4, 10),
+          daily_job_capacity: parseInt(tech.daily_job_capacity || 4, 10),
+          assignedLocalities: tech.assigned_localities || ['Fairlands, Salem'],
+          assigned_localities: tech.assigned_localities || ['Fairlands, Salem'],
+          upiVpa: tech.upi_vpa,
+          upi_vpa: tech.upi_vpa,
+          payoutPhone: tech.upi_vpa ? tech.upi_vpa.replace(/@.*$/, '') : (tech.phone || '').replace(/[^0-9]/g, '').slice(-10)
+        }
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
   // 3b. Partner Profile & KYC Document Re-upload / Updation
   fastify.post('/partner/profile/update', async (req, reply) => {
     try {

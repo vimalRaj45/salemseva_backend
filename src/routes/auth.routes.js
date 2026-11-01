@@ -1608,6 +1608,146 @@ async function authRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: e.message });
     }
   });
+
+  // 15. Real Customer Profile Retrieval directly from PostgreSQL
+  fastify.get('/customer/profile', async (req, reply) => {
+    try {
+      const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
+      const idParam = req.query?.id ? String(req.query.id).trim() : '';
+      const cleanPhone = phoneParam.replace(/[^0-9]/g, '').slice(-10);
+
+      if (!cleanPhone && !idParam) {
+        return reply.status(400).send({ success: false, error: 'Customer phone number or user ID required' });
+      }
+
+      const userRes = await query(`
+        SELECT * FROM users
+        WHERE ($1::text <> '' AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+        ORDER BY created_at ASC
+        LIMIT 1
+      `, [idParam, cleanPhone]);
+
+      const u = userRes.rows[0];
+      if (!u) {
+        return reply.status(404).send({ success: false, error: 'Customer record not found' });
+      }
+
+      const userCleanPhone = (u.phone || '').replace(/[^0-9]/g, '').slice(-10);
+
+      // Fetch real aggregate stats from bookings
+      const bookingsCountRes = await query(`
+        SELECT 
+          COUNT(*)::int as total_bookings,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END)::int as completed_bookings,
+          COUNT(CASE WHEN status NOT IN ('completed', 'cancelled') THEN 1 END)::int as active_bookings
+        FROM bookings
+        WHERE RIGHT(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g'), 10) = $1
+      `, [userCleanPhone]);
+
+      const bStats = bookingsCountRes.rows[0] || { total_bookings: 0, completed_bookings: 0, active_bookings: 0 };
+
+      // Real referral count
+      const refCountRes = await query(`
+        SELECT COUNT(*)::int as count
+        FROM users
+        WHERE referred_by = $1 AND referral_code IS NOT NULL
+      `, [u.referral_code || '']);
+      const referralCount = refCountRes.rows[0]?.count || 0;
+
+      return {
+        success: true,
+        customer: {
+          id: u.id,
+          role: u.role || 'customer',
+          name: u.full_name || 'Customer',
+          fullName: u.full_name || 'Customer',
+          phone: u.phone,
+          rawPhone: userCleanPhone,
+          email: u.email || '',
+          locality: u.locality || 'Fairlands, Salem',
+          address: u.default_address || '',
+          defaultAddress: u.default_address || '',
+          walletBalance: parseFloat(u.wallet_balance || 0),
+          referralCode: u.referral_code || ('SEVA' + (userCleanPhone || '9999').slice(-4).toUpperCase()),
+          referredBy: u.referred_by || null,
+          totalBookings: parseInt(bStats.total_bookings, 10),
+          completedBookings: parseInt(bStats.completed_bookings, 10),
+          activeBookings: parseInt(bStats.active_bookings, 10),
+          referralCount: parseInt(referralCount, 10),
+          createdAt: u.created_at
+        }
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // 16. Update Customer Profile in PostgreSQL
+  fastify.post('/customer/profile/update', async (req, reply) => {
+    try {
+      const {
+        phone = '',
+        id = '',
+        fullName,
+        email,
+        locality,
+        address
+      } = req.body || {};
+
+      const cleanPhone = (phone || '').replace(/[^0-9]/g, '').slice(-10);
+      if (!cleanPhone && !id) {
+        return reply.status(400).send({ success: false, error: 'Customer phone or ID is required' });
+      }
+
+      const updateRes = await query(`
+        UPDATE users
+        SET
+          full_name = COALESCE($1, full_name),
+          email = COALESCE($2, email),
+          locality = COALESCE($3, locality),
+          default_address = COALESCE($4, default_address)
+        WHERE ($5::text <> '' AND id::text = $5)
+           OR ($6::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $6)
+        RETURNING *;
+      `, [
+        fullName ? fullName.trim() : null,
+        email ? email.trim() : null,
+        locality ? locality.trim() : null,
+        address ? address.trim() : null,
+        id || '',
+        cleanPhone || ''
+      ]);
+
+      const updated = updateRes.rows[0];
+      if (!updated) {
+        return reply.status(404).send({ success: false, error: 'Customer record not found for update' });
+      }
+
+      return {
+        success: true,
+        message: 'Customer profile updated successfully',
+        customer: {
+          id: updated.id,
+          role: updated.role || 'customer',
+          name: updated.full_name,
+          fullName: updated.full_name,
+          phone: updated.phone,
+          rawPhone: (updated.phone || '').replace(/[^0-9]/g, '').slice(-10),
+          email: updated.email || '',
+          locality: updated.locality,
+          address: updated.default_address,
+          defaultAddress: updated.default_address,
+          walletBalance: parseFloat(updated.wallet_balance || 0),
+          referralCode: updated.referral_code
+        }
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
 }
 
 module.exports = authRoutes;
