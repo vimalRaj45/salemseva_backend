@@ -22,10 +22,11 @@ async function couponsRoutes(fastify, options) {
       );
     `);
 
-    // Seed default coupons if none exist, or ensure SALEM100 exists
+    // Seed default coupons if none exist, or ensure default active codes exist
     await query(`
       INSERT INTO coupons (code, discount_type, discount_value, min_order_amount, description, is_active)
       VALUES 
+        ('REFERWAIVER50', 'flat', 50.00, 0.00, 'Referral Reward: Flat ₹50 waiver on service booking', TRUE),
         ('SALEM100', 'flat', 100.00, 0.00, 'INR 100 off on first home service in Salem', TRUE),
         ('SALEM50', 'flat', 50.00, 49.00, 'Flat INR 50 discount on doorstep inspection', TRUE),
         ('WELCOME20', 'percent', 20.00, 49.00, '20% off for new Salem customers (up to INR 60)', TRUE),
