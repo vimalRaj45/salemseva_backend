@@ -51,49 +51,6 @@ async function reviewsRoutes(fastify, options) {
         WHERE id = $1
       `, [bookingId]);
 
-      // Award credits strictly for BOOKING completion and REFERRAL
-      try {
-        const existingBookingReward = await query(`
-          SELECT id FROM wallet_transactions 
-          WHERE category = 'BOOKING_REWARD' AND description LIKE '%' || $1 || '%'
-        `, [bookingId]);
-
-        if (existingBookingReward.rows.length === 0) {
-          const settingsRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-          const bookingCredits = settingsRes.rows.length > 0 ? parseFloat(settingsRes.rows[0].review_reward_credits) : 25.00;
-
-          await query(`
-            UPDATE users
-            SET wallet_balance = wallet_balance + $1
-            WHERE id = (
-              SELECT id FROM users
-              WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
-                 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = (
-                      SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
-                      FROM bookings WHERE id = $2
-                    )
-              LIMIT 1
-            )
-          `, [bookingCredits, bookingId]);
-          
-          try {
-            await query(`
-              INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-              SELECT id, phone, 'Booking Completion Cashback', $1, 'CREDIT', 'BOOKING_REWARD', 'Credits earned for completing booking #' || $2
-              FROM users
-              WHERE id = (
-                SELECT id FROM users
-                WHERE id = (SELECT customer_id FROM bookings WHERE id = $2)
-                   OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = (
-                        SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
-                        FROM bookings WHERE id = $2
-                      )
-                LIMIT 1
-              )
-            `, [bookingCredits, bookingId]);
-          } catch (txErr) {}
-        }
-
         // Award technician +2 Star Points towards zero commission on completed job
         await query(`
           UPDATE technicians 
@@ -101,49 +58,40 @@ async function reviewsRoutes(fastify, options) {
           WHERE id = (SELECT technician_id FROM bookings WHERE id = $1)
         `, [bookingId]);
 
-          // Real Automated Referral Fulfillment: If this customer was referred by someone, reward the referrer
-          try {
-            const custRes = await query(`
-              SELECT u.id, u.full_name, u.locality, u.referred_by
-              FROM users u
-              WHERE u.id = (SELECT customer_id FROM bookings WHERE id = $1)
-                 OR RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10) = (
-                      SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
-                      FROM bookings WHERE id = $1
-                    )
-              LIMIT 1
-            `, [bookingId]);
-            if (custRes.rows.length > 0 && custRes.rows[0].referred_by) {
-              const refCode = custRes.rows[0].referred_by;
-              const referrerRes = await query(`SELECT id, phone, full_name FROM users WHERE referral_code = $1 LIMIT 1`, [refCode]);
-              if (referrerRes.rows.length > 0) {
-                const existingRef = await query(`
-                  SELECT id FROM wallet_transactions 
-                  WHERE user_id = $1 AND category = 'REFERRAL_REWARD' AND description LIKE '%' || $2 || '%'
-                `, [referrerRes.rows[0].id, custRes.rows[0].full_name]);
-                if (existingRef.rows.length === 0) {
-                  const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-                  const refCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].customer_referral_credits) : 50.00;
-                  await query(`UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2`, [refCredits, referrerRes.rows[0].id]);
-                  await query(`
-                    INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
-                    VALUES ($1, $2, 'Referral Reward: ' || $3, $4, 'CREDIT', 'REFERRAL_REWARD', 'Friend ' || $3 || ' completed first service in ' || $5 || ' (+' || $4 || ' Credits)')
-                  `, [referrerRes.rows[0].id, referrerRes.rows[0].phone, custRes.rows[0].full_name, refCredits, custRes.rows[0].locality || 'Salem']);
-                }
+        // Real Automated Referral Fulfillment: If this customer was referred by someone, reward the referrer directly
+        try {
+          const custRes = await query(`
+            SELECT u.id, u.full_name, u.locality, u.referred_by
+            FROM users u
+            WHERE u.id = (SELECT customer_id FROM bookings WHERE id = $1)
+               OR RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10) = (
+                    SELECT RIGHT(REGEXP_REPLACE(customer_phone, '\\D', '', 'g'), 10)
+                    FROM bookings WHERE id = $1
+                  )
+            LIMIT 1
+          `, [bookingId]);
+          if (custRes.rows.length > 0 && custRes.rows[0].referred_by) {
+            const refCode = custRes.rows[0].referred_by;
+            const referrerRes = await query(`SELECT id, phone, full_name FROM users WHERE referral_code = $1 LIMIT 1`, [refCode]);
+            if (referrerRes.rows.length > 0) {
+              const existingRef = await query(`
+                SELECT id FROM wallet_transactions 
+                WHERE user_id = $1 AND category = 'REFERRAL_REWARD' AND description LIKE '%' || $2 || '%'
+              `, [referrerRes.rows[0].id, custRes.rows[0].full_name]);
+              if (existingRef.rows.length === 0) {
+                const sRes = await query(`SELECT customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+                const refCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].customer_referral_credits) : 50.00;
+                await query(`UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2`, [refCredits, referrerRes.rows[0].id]);
+                await query(`
+                  INSERT INTO wallet_transactions (user_id, user_phone, title, amount, type, category, description)
+                  VALUES ($1, $2, 'Friend Referral Cash Reward', $3, 'CREDIT', 'REFERRAL_REWARD', 'Friend ' || $4 || ' completed first service! Direct ₹' || $3 || ' discount added for your next booking.')
+                `, [referrerRes.rows[0].id, referrerRes.rows[0].phone, refCredits, custRes.rows[0].full_name]);
               }
             }
-          } catch (refErr) {}
+          }
+        } catch (refErr) {}
         } catch (e) {}
       }
-
-    // Resolve booking cashback credits for response
-    let awardedCredits = 25.00;
-    try {
-      const sRes = await query(`SELECT review_reward_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-      awardedCredits = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].review_reward_credits) : 25.00;
-    } catch (e) {
-      awardedCredits = 25.00;
-    }
 
     return {
       success: true,
@@ -152,11 +100,11 @@ async function reviewsRoutes(fastify, options) {
         is_escalated: isBelow3Star
       },
       escalationStatus: isBelow3Star ? 'ESCALATED_TO_SALEM_OPS' : 'NORMAL_COMPLETED',
-      creditsAwarded: awardedCredits,
+      creditsAwarded: 0,
       techStarPointsAwarded: 2,
       customerBenefit: isBelow3Star 
         ? 'Eligible for 100% Free Warranty Revisit or Full Diagnostic Refund'
-        : `+${awardedCredits} Seva Credits Earned for Completed Booking`
+        : 'Service Completed & 100% Satisfaction Guaranteed'
     };
   });
 

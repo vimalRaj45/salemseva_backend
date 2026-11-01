@@ -1,6 +1,13 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
-const { getPlatformCommissionPercent, calculateCommissionSplit, getLiveFeeSettings, getCustomerPlatformFeePercent, getPaymentGatewayFeePercent } = require('../services/commission.service');
+const {
+  getPlatformCommissionPercent,
+  calculateCommissionSplit,
+  getLiveFeeSettings,
+  getCustomerPlatformFeePercent,
+  getPaymentGatewayFeePercent,
+  calculateDualCommissionInvoice
+} = require('../services/commission.service');
 
 async function adminRoutes(fastify, options) {
   // 1. Central Ops Dashboard Overview
@@ -596,7 +603,10 @@ async function adminRoutes(fastify, options) {
           p.status as payment_status,
           p.amount_total as payment_amount,
           p.tech_payout_amount as payment_tech_payout,
-          p.platform_commission as payment_platform_commission
+          p.platform_commission as payment_platform_commission,
+          p.payout_utr,
+          p.customer_utr,
+          p.settled_at
         FROM bookings b
         LEFT JOIN technicians t ON b.technician_id = t.id
         LEFT JOIN LATERAL (
@@ -708,7 +718,11 @@ async function adminRoutes(fastify, options) {
           serviceId: r.service_id || 'ac',
           technicianName: r.technician_name || (isCancelled ? 'None (Pre-Dispatch)' : 'Pending Allocation'),
           technicianTrade: r.technician_trade || '',
+          technicianPhone: r.technician_phone || '',
           technicianUpi: r.technician_upi || '',
+          payoutUtr: r.payout_utr || '',
+          customerUtr: r.customer_utr || '',
+          settledAt: r.settled_at || null,
           grossAmount: parseFloat(gross.toFixed(2)),
           razorpayFee: parseFloat(razorpayFee.toFixed(2)),
           techPayout: parseFloat(techPayout.toFixed(2)),
@@ -756,6 +770,95 @@ async function adminRoutes(fastify, options) {
         success: true,
         data: responsePayload,
         ...responsePayload
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9b. Update Manual Payout Transaction ID (UTR) for Technician Settlement
+  fastify.post('/admin/settlements/:bookingId/manual-payout-utr', async (req, reply) => {
+    try {
+      const { bookingId } = req.params;
+      const { utr, notes } = req.body || {};
+
+      if (!utr || !String(utr).trim()) {
+        return reply.status(400).send({ success: false, error: 'Valid Transaction ID / UTR is required' });
+      }
+
+      const cleanUtr = String(utr).trim().toUpperCase();
+
+      // 1. Fetch booking & technician info
+      const bRes = await query(`
+        SELECT b.*, t.phone as tech_phone, t.upi_vpa as tech_upi, t.full_name as tech_name
+        FROM bookings b
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE b.id = $1
+      `, [bookingId]);
+
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const booking = bRes.rows[0];
+
+      // 2. Update payments table
+      await query(`
+        UPDATE payments
+        SET payout_utr = $1,
+            status = CASE WHEN status = 'escrow_held' THEN 'settled' ELSE status END,
+            settled_at = COALESCE(settled_at, NOW())
+        WHERE booking_id = $2
+      `, [cleanUtr, bookingId]);
+
+      // 3. Update or Insert into technician_payouts table
+      const tpRes = await query(`
+        UPDATE technician_payouts
+        SET utr_ref = $1,
+            status = 'DISBURSED_100%'
+        WHERE (description LIKE '%' || $2 || '%' OR (technician_id = $3 AND technician_id IS NOT NULL))
+          AND created_at >= NOW() - INTERVAL '30 days'
+        RETURNING *;
+      `, [cleanUtr, bookingId, booking.technician_id]);
+
+      if (tpRes.rowCount === 0 && booking.technician_id) {
+        const feeSettings = await getLiveFeeSettings();
+        const gross = parseFloat(booking.final_amount || booking.quote_subtotal || 300);
+        const upfront = parseFloat(booking.visit_fee || 99);
+        const inv = calculateDualCommissionInvoice({
+          totalJobAmount: gross,
+          upfrontFeePaid: upfront,
+          customerFeePercent: feeSettings.customerFeePercent,
+          gatewayFeePercent: feeSettings.gatewayFeePercent,
+          partnerCommPercent: feeSettings.partnerCommPercent
+        });
+        const techPayout = inv.partnerDirectRouteTransfer;
+
+        await query(`
+          INSERT INTO technician_payouts (
+            technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at
+          ) VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+        `, [
+          booking.tech_phone || '',
+          booking.technician_id,
+          techPayout,
+          booking.tech_upi || '',
+          cleanUtr,
+          `Manual settlement payout for #${bookingId}`
+        ]);
+      }
+
+      // 4. Audit log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'MANUAL_PAYOUT_UTR_RECORDED', 'admin', 'admin', $2)
+      `, [bookingId, JSON.stringify({ utr: cleanUtr, notes: notes || 'Admin recorded manual transaction ID' })]);
+
+      return {
+        success: true,
+        message: 'Manual Transaction ID recorded and technician payout settled.',
+        bookingId,
+        utr: cleanUtr
       };
     } catch (err) {
       fastify.log.error(err);

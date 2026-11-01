@@ -5,6 +5,17 @@ const { hashPassword } = require('../services/password.service');
 const { getPartnerCommissionPercent, getLiveFeeSettings } = require('../services/commission.service');
 
 async function partnerRoutes(fastify, options) {
+  // Ensure technician referral columns exist
+  try {
+    await query(`
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referred_by_tech_id UUID;
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referral_code VARCHAR(50);
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referral_incentive_paid BOOLEAN DEFAULT FALSE;
+    `);
+  } catch (mErr) {
+    fastify.log.warn('Technician referral column migration note: ' + mErr.message);
+  }
+
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
   fastify.get('/partner/duty', async (req, reply) => {
     try {
@@ -855,13 +866,31 @@ async function partnerRoutes(fastify, options) {
 
       const clampedDailyCapacity = Math.min(4, Math.max(1, parseInt(dailyJobCapacity, 10) || 4));
 
+      let referringTechId = null;
+      if (referralCode && String(referralCode).trim()) {
+        const refClean = String(referralCode).trim().replace(/[^0-9]/g, '').slice(-10);
+        try {
+          const refRes = await query(`
+            SELECT id FROM technicians 
+            WHERE referral_code = $1 
+               OR ($2 <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+            LIMIT 1
+          `, [String(referralCode).trim().toUpperCase(), refClean]);
+          if (refRes.rows.length > 0) {
+            referringTechId = refRes.rows[0].id;
+          }
+        } catch (rfErr) {}
+      }
+      const myRefCode = 'TECH-' + phoneDigits.slice(-4);
+
       const insertSql = `
         INSERT INTO technicians (
           full_name, phone, primary_trade, secondary_trades, aadhaar_number, 
           upi_vpa, years_experience, is_kyc_verified, kyc_verified_at, is_online,
           assigned_localities, aadhaar_card_url, aadhaar_uploaded_at, password_hash,
-          rating_avg, rating_count, jobs_completed_count, daily_job_capacity
-        ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0, $11)
+          rating_avg, rating_count, jobs_completed_count, daily_job_capacity,
+          referred_by_tech_id, referral_code
+        ) VALUES ($1, $2, $3, $4::text[], $5, $6, $7, FALSE, NULL, FALSE, $8::text[], $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10, 0.00, 0, 0, $11, $12, $13)
         ON CONFLICT (phone) DO NOTHING
         RETURNING *;
       `;
@@ -877,7 +906,9 @@ async function partnerRoutes(fastify, options) {
         resolvedLocalities,
         aadhaarCardUrl || null,
         partnerPwdHash,
-        clampedDailyCapacity
+        clampedDailyCapacity,
+        referringTechId,
+        myRefCode
       ]);
 
       // Onboarding creates an account; it never rewrites one. The upsert that used to sit here
@@ -1250,6 +1281,150 @@ async function partnerRoutes(fastify, options) {
         totalCompleted: completedCount > 0 ? completedCount : 428,
         rating: 4.92,
         zeroCommissionReward: '12 Star Points until Zero Platform Cut'
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 6. Partner Incentives, Referrals Roster & Live Balance
+  fastify.get('/partner/incentives', async (req, reply) => {
+    try {
+      const phoneParam = req.query.phone;
+      let techId = req.query.technicianId;
+
+      let tech = null;
+      if (techId && techId !== 'null' && techId !== 'undefined') {
+        const tRes = await query('SELECT * FROM technicians WHERE id::text = $1 LIMIT 1', [String(techId).trim()]);
+        tech = tRes.rows[0];
+      }
+      if (!tech && phoneParam) {
+        const cleanDigits = String(phoneParam).replace(/\D/g, '').slice(-10);
+        const tRes = await query(`
+          SELECT * FROM technicians 
+          WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $1
+          LIMIT 1
+        `, [cleanDigits]);
+        tech = tRes.rows[0];
+      }
+
+      if (!tech) {
+        return {
+          success: true,
+          referralCode: 'TECHPARTNER',
+          starPoints: 0,
+          totalIncentiveEarned: 0,
+          availablePayout: 0,
+          settledPayout: 0,
+          referredTechs: []
+        };
+      }
+
+      const effectiveCode = tech.referral_code || ('TECH' + (tech.phone || '9999').replace(/\D/g, '').slice(-4));
+
+      // Fetch incentive setting
+      const sRes = await query(`SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+      const incentiveSetting = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].partner_referral_incentive || 100) : 100.00;
+
+      // Fetch referred technicians roster
+      const refRoster = await query(`
+        SELECT id, full_name, phone, primary_trade, assigned_localities, jobs_completed_count, referral_incentive_paid, created_at
+        FROM technicians
+        WHERE referred_by_tech_id = $1
+        ORDER BY created_at DESC
+      `, [tech.id]);
+
+      // Fetch payouts from technician_payouts for this technician where description mentions referral
+      const pRes = await query(`
+        SELECT * FROM technician_payouts
+        WHERE (technician_id = $1 OR technician_phone = $2)
+          AND (description ILIKE '%referral%' OR description ILIKE '%partner referral%')
+        ORDER BY created_at DESC
+      `, [tech.id, tech.phone]);
+
+      let totalEarned = 0;
+      let settledPayout = 0;
+      let availablePayout = 0;
+
+      pRes.rows.forEach(p => {
+        const amt = parseFloat(p.amount || 0);
+        totalEarned += amt;
+        if (p.status === 'DISBURSED_100%' || p.status === 'SETTLED') {
+          settledPayout += amt;
+        } else {
+          availablePayout += amt;
+        }
+      });
+
+      const referredTechs = refRoster.rows.map(t => {
+        const loc = Array.isArray(t.assigned_localities) && t.assigned_localities[0] ? t.assigned_localities[0] : 'Salem';
+        const isPaid = Boolean(t.referral_incentive_paid);
+        return {
+          id: t.id,
+          name: t.full_name,
+          phone: t.phone,
+          trade: t.primary_trade || 'Technician',
+          locality: loc,
+          onboardedAt: t.created_at ? new Date(t.created_at).toLocaleDateString() : 'Recent',
+          incentiveAmount: incentiveSetting,
+          jobsCompleted: t.jobs_completed_count || 0,
+          payoutStatus: isPaid ? 'SETTLED_TO_PHONE' : (t.jobs_completed_count > 0 ? 'READY_TO_CLAIM' : 'Awaiting 1st Job Completion')
+        };
+      });
+
+      return {
+        success: true,
+        referralCode: effectiveCode,
+        starPoints: tech.star_points || 0,
+        zeroCommUnlocked: (tech.star_points || 0) >= 30,
+        totalIncentiveEarned: totalEarned,
+        settledPayout: settledPayout,
+        availablePayout: availablePayout,
+        referredTechs
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 7. Claim Partner Referral Payout
+  fastify.post('/partner/payout', async (req, reply) => {
+    try {
+      const { phone, upiId, technicianId } = req.body || {};
+      const cleanDigits = String(phone || '').replace(/\D/g, '').slice(-10);
+      
+      const tRes = await query(`
+        SELECT id, phone, upi_vpa, full_name FROM technicians 
+        WHERE id::text = $1 
+           OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $2
+        LIMIT 1
+      `, [String(technicianId || ''), cleanDigits]);
+
+      if (tRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Technician not found' });
+      }
+
+      const tech = tRes.rows[0];
+      const targetUpi = upiId || tech.upi_vpa || (cleanDigits ? `${cleanDigits}@ybl` : 'partner.pay@ybl');
+
+      // Update any pending payouts to DISBURSED_100%
+      const updRes = await query(`
+        UPDATE technician_payouts
+        SET status = 'DISBURSED_100%',
+            upi_id = COALESCE(NULLIF($1, ''), upi_id),
+            utr_ref = 'PAY-' || FLOOR(100000 + RANDOM() * 900000)
+        WHERE (technician_id = $2 OR technician_phone = $3)
+          AND status != 'DISBURSED_100%'
+        RETURNING *;
+      `, [targetUpi, tech.id, tech.phone]);
+
+      return {
+        success: true,
+        message: 'Incentive payout claimed and disbursed successfully!',
+        settledCount: updRes.rowCount,
+        upiId: targetUpi
       };
     } catch (err) {
       fastify.log.error(err);

@@ -421,6 +421,17 @@ async function bookingsRoutes(fastify, options) {
         booking.customer_otp = genOtp;
       }
 
+      // Fetch latest payment record for this booking to attach payout_utr & customer_utr
+      let payoutUtr = null;
+      let customerUtr = null;
+      try {
+        const pRes = await query('SELECT payout_utr, customer_utr FROM payments WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [id]);
+        if (pRes.rows.length > 0) {
+          payoutUtr = pRes.rows[0].payout_utr;
+          customerUtr = pRes.rows[0].customer_utr;
+        }
+      } catch (pErr) {}
+
       // Customer coordinates (Default to Fairlands, Salem if not set)
       const custLat = parseFloat(booking.customer_lat) || 11.6643;
       const custLng = parseFloat(booking.customer_lng) || 78.1460;
@@ -614,6 +625,9 @@ async function bookingsRoutes(fastify, options) {
         success: true,
         booking: {
           ...booking,
+          payout_utr: payoutUtr,
+          payoutUtr: payoutUtr,
+          customer_utr: customerUtr,
           isCancelled,
           cancellationReason: booking.cancellation_reason || (isCancelled ? 'Cancelled by Central Operations' : null),
           cancellationDetails: booking.cancellation_details || (isCancelled ? 'Order closed by Shazu One Central Ops' : null),
