@@ -90,8 +90,7 @@ async function reviewsRoutes(fastify, options) {
             }
           }
         } catch (refErr) {}
-        } catch (e) {}
-      }
+    }
 
     return {
       success: true,
