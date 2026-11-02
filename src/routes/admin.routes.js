@@ -1905,10 +1905,10 @@ async function adminRoutes(fastify, options) {
     }
   });
 
-  // Truncate all transactional test data on demand (Preserving settings and admin data)
+  // Truncate full system data on demand (Preserving settings and admin data)
   fastify.post('/admin/database/truncate-test-data', async (req, reply) => {
     try {
-      console.log('Admin request: Truncating all transactional test data...');
+      console.log('Admin request: Executing full system truncate (preserving settings and admin)...');
 
       const tablesRes = await query(`
         SELECT table_name 
@@ -1917,7 +1917,7 @@ async function adminRoutes(fastify, options) {
       `);
       const allTables = tablesRes.rows.map(r => r.table_name);
 
-      const transactionalCandidateTables = [
+      const tablesToWipe = [
         'booking_reschedule_logs',
         'audit_logs',
         'reviews',
@@ -1930,28 +1930,29 @@ async function adminRoutes(fastify, options) {
         'technician_referrals',
         'technician_rejected_leads',
         'platform_feedback',
-        'wallet_transactions'
-      ];
+        'wallet_transactions',
+        'support_tickets',
+        'otp_verifications',
+        'push_subscriptions',
+        'passkey_credentials',
+        'technicians'
+      ].filter(t => allTables.includes(t));
 
-      const tablesToTruncate = transactionalCandidateTables.filter(t => allTables.includes(t));
-
-      if (tablesToTruncate.length > 0) {
-        await query(`TRUNCATE TABLE ${tablesToTruncate.join(', ')} RESTART IDENTITY CASCADE;`);
+      if (tablesToWipe.length > 0) {
+        await query(`TRUNCATE TABLE ${tablesToWipe.join(', ')} RESTART IDENTITY CASCADE;`);
       }
 
-      if (allTables.includes('technicians')) {
+      // Remove non-admin users from users table
+      if (allTables.includes('users')) {
         await query(`
-          UPDATE technicians 
-          SET is_online = TRUE, 
-              jobs_completed_count = 0,
-              referral_incentive_paid = FALSE 
-          WHERE id IS NOT NULL;
+          DELETE FROM users 
+          WHERE role NOT IN ('admin', 'ops_manager');
         `);
       }
 
       return {
         success: true,
-        message: 'All transactional data truncated. Database clean for manual testing. Settings and admin accounts preserved.'
+        message: 'Full system truncated successfully. All bookings, payments, technicians, and customer records wiped. Platform settings and admin data preserved.'
       };
     } catch (err) {
       fastify.log.error(err);
