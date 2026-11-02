@@ -8,23 +8,29 @@ const { query } = require('../db/db');
  * - PARTNER_COMMISSION_PERCENT (Default: 5.0%)
  */
 
-let cachedSettings = null;
-let lastCacheTime = 0;
-const CACHE_TTL_MS = 30000;
+// Real-time synchronization cache: mirrors the active platform_settings table row in PostgreSQL
+let latestSettings = {
+  customerFeePercent: 2.0,
+  gatewayFeePercent: 0.0,
+  partnerCommPercent: 2.0,
+  inspectionVisitFee: 99.0,
+  partnerReferralIncentive: 100.0,
+  refereeDiscountAmount: 50.0,
+  businessUpiId: 'shazuone.pay@icici',
+  businessMerchantName: 'Shazu One Home Services',
+  paymentGatewayMode: 'DYNAMIC_QR'
+};
 
 function getCustomerPlatformFeePercent() {
-  const envVal = parseFloat(process.env.CUSTOMER_PLATFORM_FEE_PERCENT);
-  return !isNaN(envVal) && envVal >= 0 && envVal <= 100 ? envVal : 2.0;
+  return latestSettings.customerFeePercent;
 }
 
 function getPaymentGatewayFeePercent() {
-  const envVal = parseFloat(process.env.PAYMENT_GATEWAY_FEE_PERCENT);
-  return !isNaN(envVal) && envVal >= 0 && envVal <= 100 ? envVal : 2.0;
+  return latestSettings.gatewayFeePercent;
 }
 
 function getPartnerCommissionPercent() {
-  const envVal = parseFloat(process.env.PARTNER_COMMISSION_PERCENT);
-  return !isNaN(envVal) && envVal >= 0 && envVal <= 100 ? envVal : 2.0;
+  return latestSettings.partnerCommPercent;
 }
 
 // Backward-compatibility alias
@@ -32,55 +38,72 @@ function getEnvCommissionPercent() {
   return getPartnerCommissionPercent();
 }
 
+/**
+ * Real-time query to PostgreSQL platform_settings table.
+ * Fetches the live configuration on every call without stale caching.
+ */
 async function getLiveFeeSettings() {
-  const now = Date.now();
-  if (cachedSettings !== null && (now - lastCacheTime) < CACHE_TTL_MS) {
-    return cachedSettings;
-  }
-
   try {
     const res = await query(`
-      SELECT customer_platform_fee_percent, payment_gateway_fee_percent, partner_commission_percent, platform_commission_percent, inspection_visit_fee 
+      SELECT 
+        customer_platform_fee_percent, 
+        payment_gateway_fee_percent, 
+        gateway_fee_percent,
+        partner_commission_percent, 
+        platform_commission_percent, 
+        inspection_visit_fee,
+        partner_referral_incentive,
+        referee_discount_amount,
+        business_upi_id,
+        business_merchant_name,
+        payment_gateway_mode
       FROM platform_settings 
       WHERE id = 'reward_settings' 
       LIMIT 1
     `);
     if (res.rows.length > 0) {
       const row = res.rows[0];
-      cachedSettings = {
-        customerFeePercent: row.customer_platform_fee_percent !== null && row.customer_platform_fee_percent !== undefined
-          ? parseFloat(row.customer_platform_fee_percent)
-          : getCustomerPlatformFeePercent(),
-        gatewayFeePercent: row.payment_gateway_fee_percent !== null && row.payment_gateway_fee_percent !== undefined
-          ? parseFloat(row.payment_gateway_fee_percent)
-          : getPaymentGatewayFeePercent(),
-        partnerCommPercent: row.partner_commission_percent !== null && row.partner_commission_percent !== undefined
-          ? parseFloat(row.partner_commission_percent)
-          : (row.platform_commission_percent !== null && row.platform_commission_percent !== undefined ? parseFloat(row.platform_commission_percent) : getPartnerCommissionPercent()),
-        inspectionVisitFee: row.inspection_visit_fee !== null && row.inspection_visit_fee !== undefined
-          ? parseFloat(row.inspection_visit_fee)
-          : 99.0
+      const custFee = row.customer_platform_fee_percent != null
+        ? parseFloat(row.customer_platform_fee_percent)
+        : (parseFloat(process.env.CUSTOMER_PLATFORM_FEE_PERCENT) || 2.0);
+      const gwFee = row.payment_gateway_fee_percent != null
+        ? parseFloat(row.payment_gateway_fee_percent)
+        : (row.gateway_fee_percent != null ? parseFloat(row.gateway_fee_percent) : (parseFloat(process.env.PAYMENT_GATEWAY_FEE_PERCENT) || 0.0));
+      const partComm = row.partner_commission_percent != null
+        ? parseFloat(row.partner_commission_percent)
+        : (row.platform_commission_percent != null ? parseFloat(row.platform_commission_percent) : (parseFloat(process.env.PARTNER_COMMISSION_PERCENT) || 2.0));
+      const visitFee = row.inspection_visit_fee != null
+        ? parseFloat(row.inspection_visit_fee)
+        : 99.0;
+      const refIncentive = row.partner_referral_incentive != null
+        ? parseFloat(row.partner_referral_incentive)
+        : 100.0;
+      const refDiscount = row.referee_discount_amount != null
+        ? parseFloat(row.referee_discount_amount)
+        : 50.0;
+
+      latestSettings = {
+        customerFeePercent: custFee,
+        gatewayFeePercent: gwFee,
+        partnerCommPercent: partComm,
+        inspectionVisitFee: visitFee,
+        partnerReferralIncentive: refIncentive,
+        refereeDiscountAmount: refDiscount,
+        businessUpiId: row.business_upi_id || 'shazuone.pay@icici',
+        businessMerchantName: row.business_merchant_name || 'Shazu One Home Services',
+        paymentGatewayMode: row.payment_gateway_mode || 'DYNAMIC_QR'
       };
-      lastCacheTime = now;
-      return cachedSettings;
+      return latestSettings;
     }
   } catch (err) {
-    // If database table is not yet migrated, fall back gracefully to environment variables
+    // If DB is temporarily recovering, serve latest in-memory row
   }
 
-  cachedSettings = {
-    customerFeePercent: getCustomerPlatformFeePercent(),
-    gatewayFeePercent: getPaymentGatewayFeePercent(),
-    partnerCommPercent: getPartnerCommissionPercent(),
-    inspectionVisitFee: 99.0
-  };
-  lastCacheTime = now;
-  return cachedSettings;
+  return latestSettings;
 }
 
 function invalidateCommissionCache() {
-  cachedSettings = null;
-  lastCacheTime = 0;
+  // Real-time queries bypass cache; kept for backward-compatibility call sites
 }
 
 /**

@@ -1512,8 +1512,9 @@ async function bookingsRoutes(fastify, options) {
 
       if (booking.status === 'cancelled') {
         const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-        const custFeeRate = getCustomerPlatformFeePercent();
-        const pgFeeRate = getPaymentGatewayFeePercent();
+        const liveFees = await getLiveFeeSettings();
+        const custFeeRate = liveFees.customerFeePercent;
+        const pgFeeRate = liveFees.gatewayFeePercent;
         const platformFeeDeduction = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
         const gatewayChargeDeduction = parseFloat((originalPaid * (pgFeeRate / 100.0)).toFixed(2));
         const refundAmount = parseFloat(Math.max(0, originalPaid - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
@@ -1531,7 +1532,7 @@ async function bookingsRoutes(fastify, options) {
             platformFeeRetained: platformFeeDeduction,
             gatewayChargeRetained: gatewayChargeDeduction,
             refundAmount,
-            policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% Razorpay service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
+            policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
             cancelledAt: booking.cancelled_at || new Date().toISOString()
           }
         };
@@ -1542,9 +1543,10 @@ async function bookingsRoutes(fastify, options) {
       const cancelReasonText = reason || 'Customer requested cancellation';
       const cancelDetailsText = reasonDetails || '';
 
-      // Platform Cut & Razorpay Gateway Processing Fee Retention (Configured via .env)
-      const custFeeRate = getCustomerPlatformFeePercent();
-      const pgFeeRate = getPaymentGatewayFeePercent();
+      // Platform Cut & Gateway Processing Fee Retention (Configured via platform_settings table in real-time)
+      const liveSettings = await getLiveFeeSettings();
+      const custFeeRate = liveSettings.customerFeePercent;
+      const pgFeeRate = liveSettings.gatewayFeePercent;
       const platformFeeDeduction = parseFloat((originalAmount * (custFeeRate / 100.0)).toFixed(2));
       const gatewayChargeDeduction = parseFloat((originalAmount * (pgFeeRate / 100.0)).toFixed(2));
       const totalDeductions = parseFloat((platformFeeDeduction + gatewayChargeDeduction).toFixed(2));

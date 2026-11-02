@@ -647,9 +647,9 @@ async function adminRoutes(fastify, options) {
           gross = 0;
         }
 
-        // Razorpay Gateway Fee: dynamic gateway fee + 18% GST on the fee
-        const pgFeeMultiplier = ((feeConfig.gatewayFeePercent || 2.0) * 1.18) / 100.0;
-        const razorpayFee = gross > 0 ? parseFloat((gross * pgFeeMultiplier).toFixed(2)) : 0.00;
+        // Payment Gateway Fee (0.00 since direct UPI QR mode is active, no Razorpay charges)
+        const pgFeeMultiplier = ((feeConfig.gatewayFeePercent || 0.0) * 1.18) / 100.0;
+        let razorpayFee = pgFeeMultiplier > 0 && gross > 0 ? parseFloat((gross * pgFeeMultiplier).toFixed(2)) : 0.00;
 
         // Technician Payout: 100% of visit travel fee + dynamic payout % of quote labor
         let techPayout = 0;
@@ -697,7 +697,7 @@ async function adminRoutes(fastify, options) {
         regionMap[loc].platformCut += platformCut;
 
         // Daily Breakdown
-        const dateKey = new Date(r.created_at).toISOString().split('T')[0];
+        const dateKey = r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
         if (!dailyMap[dateKey]) {
           dailyMap[dateKey] = { date: dateKey, gross: 0, techPayout: 0, razorpayFee: 0, platformCut: 0, orders: 0 };
         }
@@ -729,7 +729,7 @@ async function adminRoutes(fastify, options) {
           platformCut: parseFloat(platformCut.toFixed(2)),
           customerRefund: parseFloat(refund.toFixed(2)),
           paymentMethod: r.payment_method || 'UPI (Razorpay Escrow)',
-          razorpayPaymentId: r.razorpay_payment_id || `pay_${r.booking_id.substring(0, 8)}`,
+          razorpayPaymentId: r.razorpay_payment_id || `pay_${String(r.booking_id || '').substring(0, 8)}`,
           status: isCancelled ? 'REFUNDED' : (isCompleted ? 'SETTLED' : 'ESCROW_HELD')
         };
       });
@@ -858,6 +858,327 @@ async function adminRoutes(fastify, options) {
         success: true,
         message: 'Manual Transaction ID recorded and technician payout settled.',
         bookingId,
+        utr: cleanUtr
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9c. Get All Cancellation Refunds Needing Settlement
+  fastify.get('/admin/settlements/cancellation-refunds', async (req, reply) => {
+    try {
+      const liveSettings = await getLiveFeeSettings();
+      const custFeeRate = liveSettings.customerFeePercent;
+
+      const sql = `
+        SELECT 
+          b.id as booking_id,
+          b.customer_name,
+          b.customer_phone,
+          b.locality,
+          b.service_id,
+          b.final_amount,
+          b.visit_fee,
+          b.cancelled_at,
+          b.cancelled_by,
+          b.cancellation_reason,
+          b.cancellation_details,
+          b.refund_amount,
+          b.refund_platform_fee,
+          b.refund_gateway_fee,
+          b.refund_status,
+          b.refunded_at,
+          p.id as payment_id,
+          p.payment_method,
+          p.amount_total as paid_amount,
+          p.customer_utr,
+          p.payout_utr as refund_utr
+        FROM bookings b
+        LEFT JOIN LATERAL (
+          SELECT * FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+        ) p ON true
+        WHERE b.status = 'cancelled'
+        ORDER BY b.cancelled_at DESC NULLS LAST, b.created_at DESC
+        LIMIT 200
+      `;
+
+      const result = await query(sql);
+      const refunds = (result.rows || []).map(r => {
+        const originalPaid = parseFloat(r.paid_amount || r.final_amount || r.visit_fee || 99.00);
+        const platformRetention = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
+        const gatewayRetention = 0.00;
+        const calculatedRefund = parseFloat(Math.max(0, originalPaid - (platformRetention + gatewayRetention)).toFixed(2));
+        const finalRefund = r.refund_amount != null ? parseFloat(r.refund_amount) : calculatedRefund;
+        const isRefunded = r.refund_status === 'REFUNDED' || Boolean(r.refund_utr) || Boolean(r.refunded_at);
+
+        return {
+          bookingId: r.booking_id,
+          customerName: r.customer_name || 'Customer',
+          customerPhone: r.customer_phone || '',
+          locality: r.locality || 'Fairlands',
+          serviceId: r.service_id || 'home_service',
+          originalPaid,
+          platformRetention,
+          gatewayRetention,
+          refundAmount: finalRefund,
+          cancelledAt: r.cancelled_at || null,
+          cancelledBy: r.cancelled_by || 'customer',
+          cancellationReason: r.cancellation_reason || 'Customer requested cancellation',
+          cancellationDetails: r.cancellation_details || '',
+          refundStatus: isRefunded ? 'REFUNDED' : (r.refund_status || 'REFUND_PENDING'),
+          refundUtr: r.refund_utr || '',
+          refundedAt: r.refunded_at || null,
+          customerUtr: r.customer_utr || '',
+          paymentMethod: r.payment_method || 'UPI QR'
+        };
+      });
+
+      return {
+        success: true,
+        count: refunds.length,
+        refunds
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9d. Process and Record Customer Cancellation Refund UTR
+  fastify.post('/admin/settlements/:bookingId/process-refund', async (req, reply) => {
+    try {
+      const { bookingId } = req.params;
+      const { refundUtr, refundNotes, refundAmount } = req.body || {};
+
+      if (!refundUtr || !String(refundUtr).trim()) {
+        return reply.status(400).send({ success: false, error: 'Valid Refund Transaction ID / UTR is required' });
+      }
+
+      const cleanUtr = String(refundUtr).trim().toUpperCase();
+      const liveSettings = await getLiveFeeSettings();
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: `Booking #${bookingId} not found` });
+      }
+      const booking = bRes.rows[0];
+
+      const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
+      const platformFee = parseFloat((originalPaid * (liveSettings.customerFeePercent / 100.0)).toFixed(2));
+      const finalRefundAmt = refundAmount != null ? parseFloat(refundAmount) : parseFloat(Math.max(0, originalPaid - platformFee).toFixed(2));
+
+      await query(`
+        UPDATE bookings
+        SET refund_status = 'REFUNDED',
+            refund_amount = $1,
+            refund_platform_fee = $2,
+            refund_gateway_fee = 0.00,
+            refunded_at = NOW()
+        WHERE id = $3
+      `, [finalRefundAmt, platformFee, bookingId]);
+
+      const pRes = await query(`
+        UPDATE payments
+        SET payout_utr = $1,
+            status = 'refunded',
+            settled_at = NOW()
+        WHERE booking_id = $2
+        RETURNING id
+      `, [cleanUtr, bookingId]);
+
+      if (pRes.rowCount === 0) {
+        await query(`
+          INSERT INTO payments (
+            booking_id, amount_total, pg_fee, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at
+          ) VALUES ($1, $2, 0.00, 0.00, $3, 'refunded', 'upi', $4, NOW())
+        `, [bookingId, originalPaid, platformFee, cleanUtr]);
+      }
+
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'CUSTOMER_CANCELLATION_REFUND_PROCESSED', 'admin', 'admin', $2)
+      `, [bookingId, JSON.stringify({
+        refundUtr: cleanUtr,
+        refundAmount: finalRefundAmt,
+        platformFeeRetained: platformFee,
+        notes: refundNotes || 'Customer refund processed via UPI/Netbanking'
+      })]);
+
+      return {
+        success: true,
+        message: `Customer refund of ₹${finalRefundAmt} successfully recorded for #${bookingId}.`,
+        bookingId,
+        refundUtr: cleanUtr,
+        refundAmount: finalRefundAmt
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9e. Get All Technician Referral Incentives
+  fastify.get('/admin/settlements/referral-incentives', async (req, reply) => {
+    try {
+      const liveSettings = await getLiveFeeSettings();
+      const standardIncentive = liveSettings.partnerReferralIncentive || 100.00;
+
+      const sql = `
+        SELECT 
+          t.id as referee_id,
+          t.full_name as referee_name,
+          t.phone as referee_phone,
+          t.primary_trade as referee_trade,
+          t.jobs_completed_count as referee_jobs_count,
+          t.referral_incentive_paid,
+          t.created_at as referee_joined_at,
+          r.id as referrer_id,
+          r.full_name as referrer_name,
+          r.phone as referrer_phone,
+          r.upi_vpa as referrer_upi
+        FROM technicians t
+        INNER JOIN technicians r ON t.referred_by_tech_id = r.id
+        WHERE t.referred_by_tech_id IS NOT NULL
+        ORDER BY t.jobs_completed_count DESC, t.created_at DESC
+      `;
+
+      const result = await query(sql);
+      const rows = result.rows || [];
+
+      const incentives = rows.map(row => {
+        const isQualified = parseInt(row.referee_jobs_count || 0, 10) >= 1;
+        const isPaid = Boolean(row.referral_incentive_paid);
+
+        return {
+          refereeId: row.referee_id,
+          refereeName: row.referee_name,
+          refereePhone: row.referee_phone,
+          refereeTrade: (row.referee_trade || 'Tech').toUpperCase(),
+          refereeJobsCount: parseInt(row.referee_jobs_count || 0, 10),
+          refereeJoinedAt: row.referee_joined_at,
+          referrerId: row.referrer_id,
+          referrerName: row.referrer_name,
+          referrerPhone: row.referrer_phone,
+          referrerUpi: row.referrer_upi || '',
+          incentiveAmount: standardIncentive,
+          isQualified,
+          isPaid,
+          status: isPaid ? 'PAID' : (isQualified ? 'PENDING_DISBURSAL' : 'IN_PROGRESS')
+        };
+      });
+
+      return {
+        success: true,
+        count: incentives.length,
+        standardIncentive,
+        incentives
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9f. Disburse & Record Technician Referral Incentive UTR
+  fastify.post('/admin/settlements/referrals/:refereeTechId/disburse-incentive', async (req, reply) => {
+    try {
+      const { refereeTechId } = req.params;
+      const { utr, notes } = req.body || {};
+
+      if (!utr || !String(utr).trim()) {
+        return reply.status(400).send({ success: false, error: 'Transaction ID / UTR is required' });
+      }
+
+      const cleanUtr = String(utr).trim().toUpperCase();
+      const liveSettings = await getLiveFeeSettings();
+      const incentiveAmt = liveSettings.partnerReferralIncentive || 100.00;
+
+      const techRes = await query(`
+        SELECT t.*, r.full_name as referrer_name, r.phone as referrer_phone, r.upi_vpa as referrer_upi
+        FROM technicians t
+        LEFT JOIN technicians r ON t.referred_by_tech_id = r.id
+        WHERE t.id = $1::uuid
+      `, [refereeTechId]);
+
+      if (techRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Technician record not found' });
+      }
+      const tech = techRes.rows[0];
+
+      if (!tech.referred_by_tech_id) {
+        return reply.status(400).send({ success: false, error: 'This technician has no referring technician' });
+      }
+
+      await query(`
+        UPDATE technicians
+        SET referral_incentive_paid = TRUE
+        WHERE id = $1::uuid
+      `, [refereeTechId]);
+
+      await query(`
+        INSERT INTO audit_logs (event_type, actor_id, actor_type, metadata)
+        VALUES ('TECHNICIAN_REFERRAL_INCENTIVE_PAID', 'admin', 'admin', $1)
+      `, [JSON.stringify({
+        refereeId: refereeTechId,
+        refereeName: tech.full_name,
+        referrerId: tech.referred_by_tech_id,
+        referrerName: tech.referrer_name,
+        referrerUpi: tech.referrer_upi,
+        incentiveAmount: incentiveAmt,
+        utr: cleanUtr,
+        notes: notes || 'Technician referral reward disbursed'
+      })]);
+
+      return {
+        success: true,
+        message: `Referral incentive of ₹${incentiveAmt} successfully recorded for referring specialist ${tech.referrer_name || 'Partner'}.`,
+        utr: cleanUtr,
+        incentiveAmount: incentiveAmt
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 9g. Batch Disburse Technician Settlement for Multiple Bookings
+  fastify.post('/admin/settlements/batch-payout', async (req, reply) => {
+    try {
+      const { technicianId, bookingIds = [], utr, notes } = req.body || {};
+
+      if (!utr || !String(utr).trim()) {
+        return reply.status(400).send({ success: false, error: 'Transaction ID / UTR is required' });
+      }
+      if (!Array.isArray(bookingIds) || bookingIds.length === 0) {
+        return reply.status(400).send({ success: false, error: 'At least one booking ID is required for batch disbursal' });
+      }
+
+      const cleanUtr = String(utr).trim().toUpperCase();
+
+      await query(`
+        UPDATE payments
+        SET payout_utr = $1,
+            status = 'settled',
+            settled_at = NOW()
+        WHERE booking_id = ANY($2::text[])
+      `, [cleanUtr, bookingIds]);
+
+      await query(`
+        INSERT INTO audit_logs (event_type, actor_id, actor_type, metadata)
+        VALUES ('BATCH_TECHNICIAN_SETTLEMENT_DISBURSED', 'admin', 'admin', $1)
+      `, [JSON.stringify({
+        technicianId,
+        bookingIds,
+        utr: cleanUtr,
+        notes: notes || `Batch technician settlement for ${bookingIds.length} completed jobs`
+      })]);
+
+      return {
+        success: true,
+        message: `Batch settlement of ${bookingIds.length} bookings successfully marked as SETTLED.`,
+        bookingIds,
         utr: cleanUtr
       };
     } catch (err) {
@@ -1021,8 +1342,9 @@ async function adminRoutes(fastify, options) {
         : (reasonDetails || 'Customer did not respond to technician/ops attempts. Technician released by central dispatch.');
 
       const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-      const custFeeRate = getCustomerPlatformFeePercent();
-      const pgFeeRate = getPaymentGatewayFeePercent();
+      const liveFeeConf = await getLiveFeeSettings();
+      const custFeeRate = liveFeeConf.customerFeePercent;
+      const pgFeeRate = liveFeeConf.gatewayFeePercent;
       let platformFeeDeduction = 0.00;
       let gatewayChargeDeduction = 0.00;
       let refundAmount = 0.00;
@@ -1166,8 +1488,9 @@ async function adminRoutes(fastify, options) {
       ].filter(Boolean).join(' ').trim() || 'Cancelled by Shazu One Central Operations admin.';
 
       const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-      const custFeeRate = getCustomerPlatformFeePercent();
-      const pgFeeRate = getPaymentGatewayFeePercent();
+      const liveFeeConf = await getLiveFeeSettings();
+      const custFeeRate = liveFeeConf.customerFeePercent;
+      const pgFeeRate = liveFeeConf.gatewayFeePercent;
       let platformFeeDeduction = 0.00;
       let gatewayChargeDeduction = 0.00;
       let refundAmount = 0.00;

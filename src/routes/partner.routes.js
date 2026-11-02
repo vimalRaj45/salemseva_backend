@@ -1489,10 +1489,14 @@ async function partnerRoutes(fastify, options) {
         id: t.id,
         role: 'technician',
         name: t.full_name,
+        full_name: t.full_name,
         phone: t.phone,
         rawPhone: (t.phone || '').replace(/[\s\-]/g, ''),
         email: t.email || `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@shazuone.in`,
         trade: t.primary_trade,
+        primary_trade: t.primary_trade,
+        secondary_trades: t.secondary_trades || [],
+        secondaryTrades: t.secondary_trades || [],
         tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
         experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
         status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
@@ -1501,14 +1505,20 @@ async function partnerRoutes(fastify, options) {
         aadhaarCardUrl: t.aadhaar_card_url || null,
         aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
         isOnline: Boolean(t.is_online),
-        ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 0.0,
+        is_online: Boolean(t.is_online),
+        ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
+        rating_avg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
         ratingCount: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
+        rating_count: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
         jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+        jobs_completed_count: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
         todayEarnings: 0,
         today_earnings: 0,
         starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
         serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-        assignedLocalities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands']
+        assignedLocalities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
+        assigned_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
+        working_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands']
       }));
 
       return {
