@@ -1287,11 +1287,10 @@ async function partnerRoutes(fastify, options) {
         ]);
       }
 
-      // Update Booking Quote Subtotal & Status in DB
+      // Update Booking Quote Subtotal & Status in DB (Option A: Keep advance_amount_paid intact)
       const updateRes = await query(`
         UPDATE bookings 
         SET quote_subtotal = $1, 
-            final_amount = $1, 
             parts_mode = $2, 
             status = 'quote_presented', 
             quote_presented_at = NOW() 

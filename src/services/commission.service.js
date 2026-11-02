@@ -107,48 +107,74 @@ function invalidateCommissionCache() {
 }
 
 /**
- * Core Dual-Commission Invoice Calculation:
- * Example:
- * Total Bill = ₹1,000, Upfront Fee Paid = ₹99
- * Remaining Work = ₹901
- * Customer Platform Fee (2%) = ₹18.02
- * Payment Gateway Surcharge (2%) = ₹18.38
- * Customer Net Checkout = ₹937.40
+ * Core Dual-Commission Invoice Calculation (Option A: Advance Adjustment Model)
  *
- * Partner Gross = ₹1,000
- * Partner Commission (5%) = ₹50.00
- * Partner Net Total = ₹950.00
- * Direct Route Transfer to Partner Bank = ₹950 - ₹99 = ₹851.00
+ * In this model:
+ * 1. Customer pays an upfront advance (e.g., visit fee ₹99 - coupon ₹50 = ₹49 paid).
+ * 2. Technician performs work and quotes total job/labour (e.g., ₹500).
+ * 3. Customer's final bill:
+ *    - Quoted Labour: ₹500
+ *    - Less Advance Paid at Booking: -₹49 (The ACTUAL cash collected from customer)
+ *    - Remaining Balance Work: ₹500 - ₹49 = ₹451
+ *    - Customer Platform Fee: % of Remaining Balance Work (from platform_settings)
+ *    - Payment Gateway Fee: 0% (Direct Business UPI QR)
+ *    - Total Remaining Due: Remaining Balance Work + Customer Platform Fee
+ * 4. Partner (Technician) Payout:
+ *    - Quoted Labour: ₹500
+ *    - Partner Platform Commission: % of Total Job Amount (e.g., 5% = ₹25)
+ *    - Partner Guaranteed Earnings: Total Job Amount - Partner Commission = ₹475
+ *    - Net Direct Transfer:
+ *      - Online / UPI QR: Full ₹475 transferred to technician (since platform collected all funds).
+ *      - Cash on Delivery: ₹475 - cash collected at doorstep.
+ *
+ * Result: Zero financial deficit, zero mismatch, full fair pay for technician and platform.
  */
 function calculateDualCommissionInvoice({
   totalJobAmount,
-  upfrontFeePaid = 99,
+  upfrontFeePaid,
+  actualAdvancePaid,
+  couponDiscount = 0,
   customerFeePercent = getCustomerPlatformFeePercent(),
   gatewayFeePercent = getPaymentGatewayFeePercent(),
-  partnerCommPercent = getPartnerCommissionPercent()
+  partnerCommPercent = getPartnerCommissionPercent(),
+  paymentMethod = 'online'
 }) {
   const total = Math.max(0, parseFloat(totalJobAmount) || 0);
-  const upfront = Math.min(total, Math.max(0, parseFloat(upfrontFeePaid) || 0));
-  const remainingWork = Math.max(0, total - upfront);
 
-  // 1. Customer-side surcharges
+  // Option A: Advance Credit is the ACTUAL cash amount paid by customer upfront
+  const advancePaid = actualAdvancePaid !== undefined
+    ? Math.max(0, parseFloat(actualAdvancePaid) || 0)
+    : Math.max(0, parseFloat(upfrontFeePaid !== undefined ? upfrontFeePaid : 99) || 0);
+
+  // Advance credit applied to the final bill, capped at total job amount
+  const upfrontCredit = Math.min(total, advancePaid);
+  const remainingWork = Math.max(0, Math.round((total - upfrontCredit) * 100) / 100);
+
+  // 1. Customer-side surcharges on remaining work
   const customerPlatformFee = Math.round(((remainingWork * customerFeePercent) / 100) * 100) / 100;
   const taxableBase = remainingWork + customerPlatformFee;
   const paymentGatewayFee = Math.round(((taxableBase * gatewayFeePercent) / 100) * 100) / 100;
   const customerFinalPayable = Math.round((remainingWork + customerPlatformFee + paymentGatewayFee) * 100) / 100;
 
-  // 2. Partner-side commission & payout
+  // 2. Partner-side commission & guaranteed earnings
   const partnerCommissionAmount = Math.round(((total * partnerCommPercent) / 100) * 100) / 100;
-  const partnerNetEarnings = Math.round((total - partnerCommissionAmount) * 100) / 100;
-  // Since platform collected upfront fee, partner direct transfer from checkout is:
-  const partnerDirectRouteTransfer = Math.max(0, Math.round((partnerNetEarnings - upfront) * 100) / 100);
+  const partnerNetEarnings = Math.max(0, Math.round((total - partnerCommissionAmount) * 100) / 100);
+
+  // In cashless direct Business UPI QR payments, SalemSeva collects all customer funds online.
+  // Therefore the platform disburses the technician's full partnerNetEarnings (e.g. ₹475).
+  // If paymentMethod is cash/COD, the customer handed the remaining work balance in cash to the technician.
+  const cashCollectedByTech = (paymentMethod === 'cash' || paymentMethod === 'cod') ? remainingWork : 0;
+  const partnerDirectRouteTransfer = Math.max(0, Math.round((partnerNetEarnings - cashCollectedByTech) * 100) / 100);
 
   // 3. Platform total earnings retained
-  const platformTotalRetained = Math.round((upfront + customerPlatformFee + partnerCommissionAmount) * 100) / 100;
+  // Platform net profit = customerPlatformFee + partnerCommissionAmount
+  const platformTotalRetained = Math.round((customerPlatformFee + partnerCommissionAmount) * 100) / 100;
 
   return {
     totalJobAmount: total,
-    upfrontFeePaid: upfront,
+    upfrontFeePaid: upfrontCredit,
+    actualAdvancePaid: advancePaid,
+    advanceCouponDiscount: parseFloat(couponDiscount) || 0,
     remainingWorkAmount: remainingWork,
     customerFeePercent,
     customerPlatformFee,

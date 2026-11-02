@@ -636,13 +636,14 @@ async function adminRoutes(fastify, options) {
 
       const transactions = rows.map(r => {
         const visitFee = parseFloat(r.visit_fee) || 49.00;
+        const advancePaid = parseFloat(r.advance_amount_paid !== null && r.advance_amount_paid !== undefined ? r.advance_amount_paid : Math.max(0, visitFee - (parseFloat(r.coupon_discount) || 0)));
         const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
         const isCancelled = r.booking_status === 'cancelled';
         const isCompleted = r.booking_status === 'completed';
         const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(r.booking_status) || (isCancelled && r.final_amount > 0);
 
-        // Gross inflow from customer
-        let gross = parseFloat(r.payment_amount) || parseFloat(r.final_amount) || (isPaid ? (visitFee + quoteSubtotal) : visitFee);
+        // Gross inflow from customer (Option A: If quote completed, customer paid total quote; if booking, advance paid)
+        let gross = parseFloat(r.payment_amount) || (quoteSubtotal > 0 && isCompleted ? quoteSubtotal : advancePaid);
         if (isCancelled && !r.payment_amount && !r.final_amount) {
           gross = 0;
         }
@@ -651,20 +652,20 @@ async function adminRoutes(fastify, options) {
         const pgFeeMultiplier = ((feeConfig.gatewayFeePercent || 0.0) * 1.18) / 100.0;
         let razorpayFee = pgFeeMultiplier > 0 && gross > 0 ? parseFloat((gross * pgFeeMultiplier).toFixed(2)) : 0.00;
 
-        // Technician Payout: 100% of visit travel fee + dynamic payout % of quote labor
+        // Technician Payout:
         let techPayout = 0;
         if (isCompleted) {
-          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((visitFee + quoteSubtotal * partnerPayoutRate).toFixed(2));
+          techPayout = parseFloat(r.payment_tech_payout) || parseFloat(((quoteSubtotal > 0 ? quoteSubtotal : advancePaid) * partnerPayoutRate).toFixed(2));
         } else if (isPaid && !isCancelled) {
-          techPayout = visitFee; // Visit fee travel allocation
+          techPayout = parseFloat((advancePaid * partnerPayoutRate).toFixed(2));
         } else if (isCancelled && r.technician_name) {
-          techPayout = visitFee; // Travel disbursal if cancelled after technician dispatch
+          techPayout = advancePaid; // Travel disbursal if cancelled after technician dispatch
         }
 
         // Platform Commission: configured % of quote labor OR retained cancellation fee
         let platformCut = 0;
         if (isCompleted) {
-          platformCut = parseFloat(r.payment_platform_commission) || parseFloat((quoteSubtotal * platformCommRate).toFixed(2));
+          platformCut = parseFloat(r.payment_platform_commission) || parseFloat(((quoteSubtotal > 0 ? quoteSubtotal : advancePaid) * platformCommRate).toFixed(2));
         } else if (isCancelled && r.refund_platform_fee) {
           platformCut = parseFloat(r.refund_platform_fee);
         }
@@ -823,14 +824,15 @@ async function adminRoutes(fastify, options) {
 
       if (tpRes.rowCount === 0 && booking.technician_id) {
         const feeSettings = await getLiveFeeSettings();
-        const gross = parseFloat(booking.final_amount || booking.quote_subtotal || 300);
-        const upfront = parseFloat(booking.visit_fee || 99);
+        const gross = parseFloat(booking.quote_subtotal || booking.final_amount || 300);
+        const actualAdvance = parseFloat(booking.advance_amount_paid ?? (Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))));
         const inv = calculateDualCommissionInvoice({
           totalJobAmount: gross,
-          upfrontFeePaid: upfront,
+          actualAdvancePaid: actualAdvance,
           customerFeePercent: feeSettings.customerFeePercent,
           gatewayFeePercent: feeSettings.gatewayFeePercent,
-          partnerCommPercent: feeSettings.partnerCommPercent
+          partnerCommPercent: feeSettings.partnerCommPercent,
+          paymentMethod: booking.payment_method || 'online'
         });
         const techPayout = inv.partnerDirectRouteTransfer;
 
@@ -1897,6 +1899,60 @@ async function adminRoutes(fastify, options) {
       const { id } = req.params;
       await query(`DELETE FROM admin_team WHERE id = $1`, [id]);
       return { success: true, message: 'Member deleted successfully' };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // Truncate all transactional test data on demand (Preserving settings and admin data)
+  fastify.post('/admin/database/truncate-test-data', async (req, reply) => {
+    try {
+      console.log('Admin request: Truncating all transactional test data...');
+
+      const tablesRes = await query(`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+      `);
+      const allTables = tablesRes.rows.map(r => r.table_name);
+
+      const transactionalCandidateTables = [
+        'booking_reschedule_logs',
+        'audit_logs',
+        'reviews',
+        'payments',
+        'quote_items',
+        'bookings',
+        'chat_messages',
+        'call_logs',
+        'technician_payouts',
+        'technician_referrals',
+        'technician_rejected_leads',
+        'platform_feedback',
+        'wallet_transactions'
+      ];
+
+      const tablesToTruncate = transactionalCandidateTables.filter(t => allTables.includes(t));
+
+      if (tablesToTruncate.length > 0) {
+        await query(`TRUNCATE TABLE ${tablesToTruncate.join(', ')} RESTART IDENTITY CASCADE;`);
+      }
+
+      if (allTables.includes('technicians')) {
+        await query(`
+          UPDATE technicians 
+          SET is_online = TRUE, 
+              jobs_completed_count = 0,
+              referral_incentive_paid = FALSE 
+          WHERE id IS NOT NULL;
+        `);
+      }
+
+      return {
+        success: true,
+        message: 'All transactional data truncated. Database clean for manual testing. Settings and admin accounts preserved.'
+      };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });

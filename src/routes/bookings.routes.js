@@ -32,6 +32,9 @@ async function bookingsRoutes(fastify, options) {
         reason TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_amount_paid NUMERIC(10,2) DEFAULT 0.00;
+      ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_coupon_discount NUMERIC(10,2) DEFAULT 0.00;
     `);
   } catch (schemaErr) {
     fastify.log.warn('Reschedule schema init: ' + schemaErr.message);
@@ -386,8 +389,9 @@ async function bookingsRoutes(fastify, options) {
           customer_lat, customer_lng,
           is_urgent_dispatch, urgent_surge_fee, visit_fee,
           coupon_discount, coupon_code, final_amount, status, technician_id, scheduled_slot,
-          customer_otp, booking_type, voice_note_url
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+          customer_otp, booking_type, voice_note_url,
+          advance_amount_paid, advance_coupon_discount
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
         RETURNING *;
       `;
 
@@ -413,7 +417,9 @@ async function bookingsRoutes(fastify, options) {
         scheduledSlot || '10:00 AM - 12:00 PM',
         customerOtp,
         'scheduled',
-        finalVoiceNote
+        finalVoiceNote,
+        finalAmount, // advance_amount_paid (actual cash collected from customer upfront)
+        couponDiscount // advance_coupon_discount (actual discount applied at booking)
       ]);
 
       // Audit Log
@@ -1463,16 +1469,34 @@ async function bookingsRoutes(fastify, options) {
 
       const calculatedSubtotal = items.reduce((s, i) => s + i.price * (i.qty || 1), 0);
       const subtotal = booking && parseFloat(booking.quote_subtotal) > 0 ? parseFloat(booking.quote_subtotal) : calculatedSubtotal;
-      const upfrontVisitFee = booking ? parseFloat(booking.visit_fee || 99) : 99;
+
+      // Option A: Actual cash advance paid by customer at booking time
+      let actualAdvancePaid = 0.00;
+      let couponDiscountApplied = 0.00;
+      if (booking) {
+        if (booking.advance_amount_paid !== null && booking.advance_amount_paid !== undefined) {
+          actualAdvancePaid = parseFloat(booking.advance_amount_paid);
+          couponDiscountApplied = parseFloat(booking.advance_coupon_discount || booking.coupon_discount || 0);
+        } else {
+          const vFee = parseFloat(booking.visit_fee || 99);
+          const cDiscount = parseFloat(booking.coupon_discount || 0);
+          actualAdvancePaid = Math.max(0, vFee - cDiscount);
+          couponDiscountApplied = cDiscount;
+        }
+      } else {
+        actualAdvancePaid = 99.00;
+      }
 
       // Compute dynamic dual-commission invoice breakdown from live platform_settings
       const feeSettings = await getLiveFeeSettings();
       const invoice = calculateDualCommissionInvoice({
         totalJobAmount: subtotal,
-        upfrontFeePaid: upfrontVisitFee,
+        actualAdvancePaid,
+        couponDiscount: couponDiscountApplied,
         customerFeePercent: feeSettings.customerFeePercent,
         gatewayFeePercent: feeSettings.gatewayFeePercent,
-        partnerCommPercent: feeSettings.partnerCommPercent
+        partnerCommPercent: feeSettings.partnerCommPercent,
+        paymentMethod: booking?.payment_method || 'online'
       });
 
       return {

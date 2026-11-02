@@ -395,15 +395,16 @@ async function paymentsRoutes(fastify, options) {
           `, [nextStatus, bookingId]);
 
           const quoteSub = parseFloat(currentB.quote_subtotal) || parsedAmount;
-          const visit = parseFloat(currentB.visit_fee) || 99.00;
+          const actualAdvance = parseFloat(currentB.advance_amount_paid ?? (Math.max(0, parseFloat(currentB.visit_fee || 99) - parseFloat(currentB.coupon_discount || 0))));
           const settings = await getLiveFeeSettings();
 
           dualInvoice = calculateDualCommissionInvoice({
             totalJobAmount: quoteSub,
-            upfrontFeePaid: visit,
+            actualAdvancePaid: actualAdvance,
             customerFeePercent: settings.customerFeePercent,
             gatewayFeePercent: settings.gatewayFeePercent,
-            partnerCommPercent: settings.partnerCommPercent
+            partnerCommPercent: settings.partnerCommPercent,
+            paymentMethod: currentB.payment_method || 'online'
           });
 
           // Razorpay Route Automated Split to Partner Account
@@ -575,15 +576,16 @@ async function paymentsRoutes(fastify, options) {
 
       const targetId = booking.id;
       const quoteSubtotal = parseFloat(booking.quote_subtotal) || 250.00;
-      const visitFee = parseFloat(booking.visit_fee) || 99.00;
+      const actualAdvance = parseFloat(booking.advance_amount_paid ?? (Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))));
       const settings = await getLiveFeeSettings();
 
       const invoice = calculateDualCommissionInvoice({
         totalJobAmount: quoteSubtotal,
-        upfrontFeePaid: visitFee,
+        actualAdvancePaid: actualAdvance,
         customerFeePercent: settings.customerFeePercent,
         gatewayFeePercent: settings.gatewayFeePercent,
-        partnerCommPercent: settings.partnerCommPercent
+        partnerCommPercent: settings.partnerCommPercent,
+        paymentMethod: booking.payment_method || 'online'
       });
 
       const totalTechPayout = invoice.partnerDirectRouteTransfer;
@@ -624,7 +626,7 @@ async function paymentsRoutes(fastify, options) {
         totalTechPayout,
         techUpi,
         utrNumber,
-        `Instant cashless escrow release for #${targetId} (₹${invoice.totalJobAmount} total - ₹${invoice.partnerCommissionAmount} partner comm - ₹${invoice.upfrontFeePaid} advance = ₹${totalTechPayout})`
+        `Instant cashless escrow release for #${targetId} (₹${invoice.totalJobAmount} total labor - ₹${invoice.partnerCommissionAmount} partner comm = ₹${totalTechPayout})`
       ]);
 
       if (techId) {
@@ -883,13 +885,14 @@ async function paymentsRoutes(fastify, options) {
         try {
           const feeSettings = await getLiveFeeSettings();
           const targetTotal = parseFloat(booking.quote_subtotal || parsedAmount);
-          const upfrontPaid = parseFloat(booking.visit_fee || 99);
+          const actualAdvance = parseFloat(booking.advance_amount_paid ?? (Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))));
           const inv = calculateDualCommissionInvoice({
             totalJobAmount: targetTotal,
-            upfrontFeePaid: upfrontPaid,
+            actualAdvancePaid: actualAdvance,
             customerFeePercent: feeSettings.customerFeePercent,
             gatewayFeePercent: feeSettings.gatewayFeePercent,
-            partnerCommPercent: feeSettings.partnerCommPercent
+            partnerCommPercent: feeSettings.partnerCommPercent,
+            paymentMethod: booking.payment_method || 'online'
           });
 
           const totalTechPayout = inv.partnerDirectRouteTransfer;
