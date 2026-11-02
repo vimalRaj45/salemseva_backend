@@ -160,7 +160,7 @@ function calculateDualCommissionInvoice({
   const partnerCommissionAmount = Math.round(((total * partnerCommPercent) / 100) * 100) / 100;
   const partnerNetEarnings = Math.max(0, Math.round((total - partnerCommissionAmount) * 100) / 100);
 
-  // In cashless direct Business UPI QR payments, SalemSeva collects all customer funds online.
+  // In cashless direct Business UPI QR payments, Shazu One collects all customer funds online.
   // Therefore the platform disburses the technician's full partnerNetEarnings (e.g. ₹475).
   // If paymentMethod is cash/COD, the customer handed the remaining work balance in cash to the technician.
   const cashCollectedByTech = (paymentMethod === 'cash' || paymentMethod === 'cod') ? remainingWork : 0;

@@ -275,7 +275,7 @@ async function couponsRoutes(fastify, options) {
             success: false,
             valid: false,
             discountAmount: 0,
-            error: 'REFERWAIVER50 is a referral-exclusive waiver. It activates only when you are referred by a friend or refer a friend to Salem Seva.'
+            error: 'REFERWAIVER50 is a referral-exclusive waiver. It activates only when you are referred by a friend or refer a friend to Shazu One.'
           });
         }
       }

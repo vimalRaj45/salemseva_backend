@@ -311,7 +311,7 @@ async function ragRoutes(fastify, options) {
 
       const ragContext = contextBlocks.length > 0 
         ? contextBlocks.join('\n\n')
-        : 'No specific matching database records found for this query in Salem Seva.';
+        : 'No specific matching database records found for this query in Shazu One.';
 
       return {
         success: true,
