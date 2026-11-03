@@ -487,16 +487,18 @@ async function paymentsRoutes(fastify, options) {
     }
   });
 
-  // 3. Dynamic Dual-Commission & Razorpay Route Split Calculation
+  // 3. Dynamic Dual-Commission & Partner Split Calculation
   fastify.post('/payments/calculate-split', async (req, reply) => {
-    const { grossAmount, visitFee = 99.00 } = req.body || {};
+    const { grossAmount, visitFee = 99.00, actualAdvancePaid } = req.body || {};
     const total = parseFloat(grossAmount) || 1000.00;
     const upfront = parseFloat(visitFee) || 99.00;
+    const adv = actualAdvancePaid !== undefined ? parseFloat(actualAdvancePaid) : upfront;
     const settings = await getLiveFeeSettings();
 
     const invoice = calculateDualCommissionInvoice({
       totalJobAmount: total,
       upfrontFeePaid: upfront,
+      actualAdvancePaid: adv,
       customerFeePercent: settings.customerFeePercent,
       gatewayFeePercent: settings.gatewayFeePercent,
       partnerCommPercent: settings.partnerCommPercent
@@ -529,21 +531,21 @@ async function paymentsRoutes(fastify, options) {
           amount: invoice.platformTotalRetained
         },
         pgFee: invoice.paymentGatewayFee,
-        escrowNodalAccount: 'acc_RazorpayEscrow_Shazu One'
+        settlementAccount: 'acc_SalemSeva_Main'
       }
     };
   });
 
-  // 4. Customer Confirms Work Finished & Releases Escrow to Technician UPI
+  // 4. Customer Confirms Work Finished & Authorizes Partner Settlement
   fastify.post('/payments/escrow/release', async (req, reply) => {
     try {
       const { bookingId, customerOtp, rating = 5, reviewComment } = req.body;
 
       if (!bookingId) {
-        return reply.status(400).send({ success: false, error: 'Booking ID is required to release escrow.' });
+        return reply.status(400).send({ success: false, error: 'Booking ID is required to authorize partner settlement.' });
       }
 
-      // Releasing escrow moves money to the partner, so it must be tied to one booking that
+      // Releasing payment moves funds to the partner, so it must be tied to one booking that
       // the customer has actually accepted. The old version released the newest booking when
       // the supplied id did not match, and never checked the completion OTP.
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
@@ -556,14 +558,14 @@ async function paymentsRoutes(fastify, options) {
       if (!booking.customer_otp) {
         return reply.status(409).send({
           success: false,
-          error: 'This booking has no completion OTP on file, so escrow cannot be released.'
+          error: 'This booking has no completion OTP on file, so partner settlement cannot be authorized.'
         });
       }
 
       if (!customerOtp || !secureEqual(String(customerOtp).trim(), String(booking.customer_otp).trim())) {
         return reply.status(403).send({
           success: false,
-          error: 'A valid completion OTP is required to release escrow.'
+          error: 'A valid completion OTP is required to authorize settlement.'
         });
       }
 
@@ -571,7 +573,7 @@ async function paymentsRoutes(fastify, options) {
         SELECT 1 FROM payments WHERE booking_id = $1 AND status = 'settled' LIMIT 1
       `, [booking.id]);
       if (alreadySettled.rows.length > 0) {
-        return reply.status(409).send({ success: false, error: 'Escrow for this booking has already been released.' });
+        return reply.status(409).send({ success: false, error: 'Settlement for this booking has already been processed.' });
       }
 
       const targetId = booking.id;
@@ -648,7 +650,7 @@ async function paymentsRoutes(fastify, options) {
             amount_total = $2,
             tech_payout_amount = $3,
             platform_commission = $4,
-            payment_method = 'UPI Escrow (Pending Admin Disbursal)',
+            payment_method = 'UPI (Pending Partner Disbursal)',
             payout_utr = NULL,
             settled_at = NULL
         WHERE id = (
@@ -660,7 +662,7 @@ async function paymentsRoutes(fastify, options) {
       if (settledRes.rowCount === 0) {
         await query(`
           INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-          VALUES ($1, $2, $3, $4, 'escrow_held', 'UPI Escrow (Pending Admin Disbursal)', NULL, NULL)
+          VALUES ($1, $2, $3, $4, 'escrow_held', 'UPI (Pending Partner Disbursal)', NULL, NULL)
         `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut]);
       }
 
@@ -683,7 +685,7 @@ async function paymentsRoutes(fastify, options) {
 
       return {
         success: true,
-        message: 'Customer confirmed work completion. Payment captured in escrow and queued for Admin settlement confirmation.',
+        message: 'Customer confirmed work completion. Payment captured and queued for partner contractor settlement.',
         booking: completedBooking,
         settlement: {
           totalAmount: invoice.totalJobAmount,
