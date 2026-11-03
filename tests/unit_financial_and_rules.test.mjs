@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SHAZU ONE / SALEMSEVA: UNIT TEST SUITE
+ * SHAZU ONE: UNIT TEST SUITE
  * Financial Escrow Splits, Coupon Rules, Cancellation Policies & State Machine
  * ============================================================================
  * Uses Node.js native test runner (node:test & node:assert/strict).
@@ -309,8 +309,9 @@ describe('Unit Test: Dual-Commission Split & Razorpay Route Engine', () => {
     assert.equal(inv.customerFinalPayable, 937.40); // 901 + 18.02 + 18.38
     assert.equal(inv.partnerCommissionAmount, 50.00); // 1000 * 5%
     assert.equal(inv.partnerNetEarnings, 950.00); // 1000 - 50
-    assert.equal(inv.partnerDirectRouteTransfer, 851.00); // 950 - 99
-    assert.equal(inv.platformTotalRetained, 167.02); // 99 + 18.02 + 50
+    // In cashless UPI QR, platform collects all funds online and transfers full net earnings:
+    assert.equal(inv.partnerDirectRouteTransfer, 950.00);
+    assert.equal(inv.platformTotalRetained, 68.02); // customerPlatformFee (18.02) + partnerCommission (50)
   });
 
   it('should dynamically update when commission percentages are overridden or configured via .env', () => {
@@ -329,23 +330,22 @@ describe('Unit Test: Dual-Commission Split & Razorpay Route Engine', () => {
     assert.equal(inv.customerFinalPayable, 1997.19);
     assert.equal(inv.partnerCommissionAmount, 160.00); // 2000 * 8%
     assert.equal(inv.partnerNetEarnings, 1840.00);
-    assert.equal(inv.partnerDirectRouteTransfer, 1741.00); // 1840 - 99
-    assert.equal(inv.platformTotalRetained, 316.03); // 99 + 57.03 + 160
+    assert.equal(inv.partnerDirectRouteTransfer, 1840.00);
+    assert.equal(inv.platformTotalRetained, 217.03); // customerPlatformFee (57.03) + partnerCommission (160)
   });
 
-  it('should handle small job where total amount equals upfront fee without negative partner transfer', () => {
+  it('should deduct cash kept by technician on COD bookings', () => {
     const inv = calculateDualCommissionInvoice({
-      totalJobAmount: 99,
+      totalJobAmount: 1000,
       upfrontFeePaid: 99,
+      paymentMethod: 'cash',
       customerFeePercent: 2.0,
       gatewayFeePercent: 2.0,
       partnerCommPercent: 5.0
     });
 
-    assert.equal(inv.remainingWorkAmount, 0);
-    assert.equal(inv.customerPlatformFee, 0);
-    assert.equal(inv.paymentGatewayFee, 0);
-    assert.equal(inv.customerFinalPayable, 0);
-    assert.equal(inv.partnerDirectRouteTransfer, 0); // No negative payout
+    // Net earnings = 950, customer paid remaining 901 in cash directly to tech:
+    assert.equal(inv.partnerNetEarnings, 950.00);
+    assert.equal(inv.partnerDirectRouteTransfer, 49.00); // 950 - 901
   });
 });

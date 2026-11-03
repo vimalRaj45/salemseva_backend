@@ -1417,10 +1417,16 @@ async function partnerRoutes(fastify, options) {
           b.id, b.customer_name, b.locality, b.service_address, b.created_at, b.status,
           b.final_amount, b.visit_fee, b.quote_subtotal, b.is_urgent_dispatch,
           s.name_en as service_name, s.name_ta as service_name_ta,
-          r.rating as customer_rating, r.comment as customer_review
+          r.rating as customer_rating, r.comment as customer_review,
+          p.status as payment_status, p.payout_utr, p.settled_at,
+          t.upi_vpa as tech_upi_vpa
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN reviews r ON b.id = r.booking_id
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        LEFT JOIN LATERAL (
+          SELECT status, payout_utr, settled_at FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+        ) p ON true
         WHERE b.technician_id = $1
         ORDER BY b.created_at DESC 
         LIMIT 50
@@ -1438,6 +1444,17 @@ async function partnerRoutes(fastify, options) {
         const techShare = visitFee + (laborAndParts * partnerRate) + (row.is_urgent_dispatch ? 40 : 0);
         const platformCut = (laborAndParts * platformRate) + (row.is_urgent_dispatch ? 10 : 0);
 
+        let settlementStatus = 'ESCROW_HELD';
+        if (row.status === 'completed') {
+          if (row.payout_utr && row.payment_status === 'settled') {
+            settlementStatus = 'SETTLED_TO_BANK';
+          } else {
+            settlementStatus = 'PAYMENT_PENDING';
+          }
+        } else if (row.status === 'cancelled') {
+          settlementStatus = 'TRAVEL_FEE_DISBURSED';
+        }
+
         return {
           id: row.id,
           customerName: row.customer_name || 'Customer',
@@ -1447,20 +1464,25 @@ async function partnerRoutes(fastify, options) {
           grossAmount: gross,
           techPayout: parseFloat(techShare.toFixed(2)),
           platformCommission: parseFloat(platformCut.toFixed(2)),
-          settlementStatus: row.status === 'completed' ? 'SETTLED_TO_BANK' : (row.status === 'cancelled' ? 'TRAVEL_FEE_DISBURSED' : 'ESCROW_HELD'),
+          settlementStatus,
           settlementUpi: row.tech_upi_vpa || 'Direct Bank Settlement',
-          bankRef: `TXN-${row.id.replace('SLM-', '')}-NEON`,
+          bankRef: row.payout_utr || 'Pending Admin Disbursal',
           rating: row.customer_rating ? parseFloat(row.customer_rating) : 5.0,
           customerReview: row.customer_review,
           status: row.status,
-          completedAt: row.created_at
+          completedAt: row.created_at,
+          settledAt: row.settled_at || null
         };
       });
+
+      const settledTotal = jobs.filter(j => j.settlementStatus === 'SETTLED_TO_BANK').reduce((sum, j) => sum + j.techPayout, 0);
+      const pendingTotal = jobs.filter(j => j.settlementStatus === 'PAYMENT_PENDING').reduce((sum, j) => sum + j.techPayout, 0);
 
       return {
         success: true,
         count: jobs.length,
-        totalEarnings: jobs.reduce((sum, j) => sum + j.techPayout, 0),
+        totalEarnings: parseFloat(settledTotal.toFixed(2)),
+        pendingPayout: parseFloat(pendingTotal.toFixed(2)),
         jobs
       };
     } catch (err) {

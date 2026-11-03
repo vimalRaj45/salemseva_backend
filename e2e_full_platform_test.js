@@ -7,7 +7,7 @@
  * it makes now fails with 401. It is kept only as a record of the earlier flow.
  * ============================================================================
  *
- * SALEMSEVA: FULL PLATFORM END-TO-END (E2E) AUTOMATED TEST SUITE
+ * SHAZU ONE: FULL PLATFORM END-TO-END (E2E) AUTOMATED TEST SUITE
  * ============================================================================
  * Scope: Complete end-to-end operational verification across all subsystems:
  *   1. System Health & Dual-Language Services Catalog
@@ -58,10 +58,10 @@ function assertTest(name, condition, details = '') {
   STATS.total++;
   if (condition) {
     STATS.passed++;
-    console.log(`  ${COLORS.green}✔ PASS:${COLORS.reset} ${name} ${details ? `${COLORS.dim}(${details})${COLORS.reset}` : ''}`);
+    console.log(`  ${COLORS.green}[PASS]:${COLORS.reset} ${name} ${details ? `${COLORS.dim}(${details})${COLORS.reset}` : ''}`);
   } else {
     STATS.failed++;
-    console.log(`  ${COLORS.red}✘ FAIL:${COLORS.reset} ${name} ${details ? `${COLORS.yellow}[${details}]${COLORS.reset}` : ''}`);
+    console.log(`  ${COLORS.red}[FAIL]:${COLORS.reset} ${name} ${details ? `${COLORS.yellow}[${details}]${COLORS.reset}` : ''}`);
   }
 }
 
@@ -83,7 +83,7 @@ async function api(path, options = {}) {
 async function runFullE2ETest() {
   console.log(`${COLORS.bold}${COLORS.blue}`);
   console.log(`╔══════════════════════════════════════════════════════════════════════╗`);
-  console.log(`║           SALEMSEVA FULL-PLATFORM E2E OPERATION SUITE                ║`);
+  console.log(`║           SHAZU ONE FULL-PLATFORM E2E OPERATION SUITE                ║`);
   console.log(`║          Target Target Backend: ${BASE_URL_OVERRIDE.padEnd(36)} ║`);
   console.log(`╚══════════════════════════════════════════════════════════════════════╝${COLORS.reset}`);
 
@@ -440,10 +440,10 @@ async function runFullE2ETest() {
   console.log(`${COLORS.bold}${COLORS.cyan}======================================================================${COLORS.reset}`);
 
   if (STATS.failed === 0) {
-    console.log(`\n${COLORS.bold}${COLORS.green}🎉 ALL END-TO-END TESTS PASSED! THE SALEMSEVA PLATFORM IS 100% OPERATIONAL.${COLORS.reset}\n`);
+    console.log(`\n${COLORS.bold}${COLORS.green}ALL END-TO-END TESTS PASSED! THE SHAZU ONE PLATFORM IS 100% OPERATIONAL.${COLORS.reset}\n`);
     process.exit(0);
   } else {
-    console.log(`\n${COLORS.bold}${COLORS.red}⚠ SOME TESTS FAILED. PLEASE REVIEW THE LOGS ABOVE.${COLORS.reset}\n`);
+    console.log(`\n${COLORS.bold}${COLORS.red}SOME TESTS FAILED. PLEASE REVIEW THE LOGS ABOVE.${COLORS.reset}\n`);
     process.exit(1);
   }
 }

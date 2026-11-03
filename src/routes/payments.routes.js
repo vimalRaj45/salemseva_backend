@@ -590,7 +590,6 @@ async function paymentsRoutes(fastify, options) {
 
       const totalTechPayout = invoice.partnerDirectRouteTransfer;
       const platformCut = invoice.partnerCommissionAmount + invoice.customerPlatformFee;
-      const utrNumber = 'UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS';
 
       // 1. Update booking status to completed
       const upRes = await query(`
@@ -616,17 +615,16 @@ async function paymentsRoutes(fastify, options) {
         }
       }
 
-      // 3. Record Payout Disbursal in DB
+      // 3. Queue Technician Payout as PENDING_DISBURSAL (No fake UTR, awaiting manual Admin settlement)
       await query(`
         INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
-        VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+        VALUES ($1, $2, $3, $4, 'PENDING_DISBURSAL', NULL, $5, NOW())
       `, [
         techPhone,
         techId,
         totalTechPayout,
         techUpi,
-        utrNumber,
-        `Instant cashless escrow release for #${targetId} (₹${invoice.totalJobAmount} total labor - ₹${invoice.partnerCommissionAmount} partner comm = ₹${totalTechPayout})`
+        `Pending Admin settlement for #${targetId} (₹${invoice.totalJobAmount} labor - ₹${invoice.partnerCommissionAmount} partner comm = ₹${totalTechPayout})`
       ]);
 
       if (techId) {
@@ -643,29 +641,27 @@ async function paymentsRoutes(fastify, options) {
         }
       }
 
-      // 4. Record Settled Payments in payments table
-      // This is the same money as the escrow row taken at payment time, so it is updated in
-      // place instead of duplicated. A booking that never had an escrow row still gets one.
+      // 4. Record Payment in payments table as escrow_held (awaiting Admin disbursal confirmation)
       const settledRes = await query(`
         UPDATE payments
-        SET status = 'settled',
+        SET status = 'escrow_held',
             amount_total = $2,
             tech_payout_amount = $3,
             platform_commission = $4,
-            payment_method = 'UPI (Instant Escrow Released)',
-            payout_utr = $5,
-            settled_at = NOW()
+            payment_method = 'UPI Escrow (Pending Admin Disbursal)',
+            payout_utr = NULL,
+            settled_at = NULL
         WHERE id = (
           SELECT id FROM payments WHERE booking_id = $1
           ORDER BY created_at DESC NULLS LAST LIMIT 1
         )
-      `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut, utrNumber]);
+      `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut]);
 
       if (settledRes.rowCount === 0) {
         await query(`
           INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-          VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant Escrow Released)', $5, NOW())
-        `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut, utrNumber]);
+          VALUES ($1, $2, $3, $4, 'escrow_held', 'UPI Escrow (Pending Admin Disbursal)', NULL, NULL)
+        `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut]);
       }
 
       // 5. Record Review if provided
@@ -682,20 +678,20 @@ async function paymentsRoutes(fastify, options) {
       // 7. Audit Log
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
-        VALUES ($1, 'SERVICE_COMPLETED_ESCROW_SETTLED', 'customer', 'customer', $2)
-      `, [targetId, JSON.stringify({ totalTechPayout, utrNumber, techUpi, status: 'completed' })]);
+        VALUES ($1, 'SERVICE_COMPLETED_PAYOUT_PENDING_ADMIN', 'customer', 'customer', $2)
+      `, [targetId, JSON.stringify({ totalTechPayout, techUpi, status: 'completed', payoutStatus: 'PENDING_DISBURSAL' })]);
 
       return {
         success: true,
-        message: 'Customer confirmed work completion. Instant settlement disbursed to technician UPI!',
+        message: 'Customer confirmed work completion. Payment captured in escrow and queued for Admin settlement confirmation.',
         booking: completedBooking,
         settlement: {
           totalAmount: invoice.totalJobAmount,
           technicianPayout: totalTechPayout,
           platformCommission: platformCut,
           techUpi,
-          utrNumber,
-          settledAt: new Date().toISOString()
+          payoutStatus: 'PENDING_DISBURSAL',
+          status: 'PENDING_ADMIN_CONFIRMATION'
         }
       };
     } catch (err) {
@@ -896,7 +892,6 @@ async function paymentsRoutes(fastify, options) {
           });
 
           const totalTechPayout = inv.partnerDirectRouteTransfer;
-          const utrNumber = cleanUtr || ('UPI-' + Math.floor(1000000 + Math.random() * 9000000) + '-OKAXIS');
           let techId = booking.technician_id;
           let techPhone = '';
           let techUpi = '';
@@ -908,14 +903,13 @@ async function paymentsRoutes(fastify, options) {
             }
             await query(`
               INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
-              VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+              VALUES ($1, $2, $3, $4, 'PENDING_DISBURSAL', NULL, $5, NOW())
             `, [
               techPhone,
               techId,
               totalTechPayout,
               techUpi,
-              utrNumber,
-              `Instant settlement for #${bookingId} (Final Bill Paid via Direct QR)`
+              `Pending Admin settlement for #${bookingId} (Final Bill Paid via Direct QR)`
             ]);
             await query(`
               UPDATE technicians 

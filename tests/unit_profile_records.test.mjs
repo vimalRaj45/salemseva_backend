@@ -90,7 +90,7 @@ describe('Unit Test: Customer and Technician Real Database Profile System', () =
     assert.equal(techProfile.isKycVerified, true);
   });
 
-  it('should clamp technician daily capacity between 1 and 4 per Salem Seva ops rules', () => {
+  it('should clamp technician daily capacity between 1 and 4 per Shazu One ops rules', () => {
     const clampCapacity = (input) => {
       const val = parseInt(input, 10);
       return isNaN(val) ? 4 : Math.min(4, Math.max(1, val));

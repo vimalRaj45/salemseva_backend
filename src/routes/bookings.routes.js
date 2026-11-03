@@ -1139,6 +1139,17 @@ async function bookingsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Cannot advance a cancelled booking' });
       }
 
+      // Technicians cannot unilaterally mark a job completed; only the customer or authorized admin can
+      if (status === 'completed') {
+        const actor = req.body?.actor || req.headers['x-actor-role'];
+        if (actor === 'technician' || (req.body?.technicianId && !req.body?.adminConfirmed && actor !== 'customer' && actor !== 'admin')) {
+          return reply.status(403).send({
+            success: false,
+            error: 'Technicians cannot unilaterally mark a job as completed. Only the customer can inspect the work and confirm job completion.'
+          });
+        }
+      }
+
       const targetServiceId = booking?.service_id || 'ac';
 
       // If valid UUID passed, use it; otherwise query by technicianId or technicianPhone
@@ -1305,6 +1316,131 @@ async function bookingsRoutes(fastify, options) {
 
   fastify.post('/bookings/:id/status', handleUpdateStatus);
   fastify.patch('/bookings/:id/status', handleUpdateStatus);
+
+  // 4.0a Customer Inspects & Confirms Work Completion
+  fastify.post('/bookings/:id/customer-complete', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { rating, reviewComment } = req.body || {};
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      const booking = bRes.rows[0];
+      if (!booking) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      if (booking.status === 'completed') {
+        return { success: true, message: 'Job already completed', booking };
+      }
+      if (booking.status === 'cancelled') {
+        return reply.status(400).send({ success: false, error: 'Cannot complete a cancelled booking' });
+      }
+
+      // 1. Mark booking completed
+      const upRes = await query(`
+        UPDATE bookings 
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW())
+        WHERE id = $1
+        RETURNING *
+      `, [id]);
+      const updatedBooking = upRes.rows[0] || booking;
+
+      // 2. Queue technician payout as PENDING_DISBURSAL (No fake UTR, no auto-settle)
+      if (updatedBooking.technician_id) {
+        try {
+          const feeSettings = await getLiveFeeSettings();
+          const targetTotal = parseFloat(updatedBooking.quote_subtotal || updatedBooking.final_amount || 300);
+          const actualAdvance = parseFloat(updatedBooking.advance_amount_paid ?? (Math.max(0, parseFloat(updatedBooking.visit_fee || 99) - parseFloat(updatedBooking.coupon_discount || 0))));
+          const inv = calculateDualCommissionInvoice({
+            totalJobAmount: targetTotal,
+            actualAdvancePaid: actualAdvance,
+            customerFeePercent: feeSettings.customerFeePercent,
+            gatewayFeePercent: feeSettings.gatewayFeePercent,
+            partnerCommPercent: feeSettings.partnerCommPercent,
+            paymentMethod: updatedBooking.payment_method || 'online'
+          });
+          const techPayout = inv.partnerDirectRouteTransfer;
+
+          const tRes = await query('SELECT phone, upi_vpa FROM technicians WHERE id = $1', [updatedBooking.technician_id]);
+          const techPhone = tRes.rows[0]?.phone || '';
+          const techUpi = tRes.rows[0]?.upi_vpa || '';
+
+          const existPayout = await query(
+            'SELECT id FROM technician_payouts WHERE (description LIKE $1 OR technician_id = $2) AND status = $3 LIMIT 1',
+            [`%${id}%`, updatedBooking.technician_id, 'PENDING_DISBURSAL']
+          );
+          if (existPayout.rows.length === 0) {
+            await query(`
+              INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
+              VALUES ($1, $2, $3, $4, 'PENDING_DISBURSAL', NULL, $5, NOW())
+            `, [
+              techPhone,
+              updatedBooking.technician_id,
+              techPayout,
+              techUpi,
+              `Pending Admin settlement for #${id} (Customer marked work completed)`
+            ]);
+          }
+
+          await query(`
+            UPDATE technicians 
+            SET jobs_completed_count = (
+              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+            )
+            WHERE id = $1
+          `, [updatedBooking.technician_id]);
+        } catch (syncErr) {
+          fastify.log.warn('Could not sync technician payout queue or jobs count on customer complete: ' + syncErr.message);
+        }
+      }
+
+      // 3. Customer Review
+      if (rating && updatedBooking.technician_id) {
+        try {
+          await query(`
+            INSERT INTO reviews (booking_id, technician_id, rating, comment, created_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT DO NOTHING
+          `, [id, updatedBooking.technician_id, parseFloat(rating), reviewComment || 'Excellent work. Verified and confirmed.']);
+        } catch (revErr) {
+          fastify.log.warn('Review save error: ' + revErr.message);
+        }
+      }
+
+      // 4. Audit Log
+      await query(`
+        INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+        VALUES ($1, 'CUSTOMER_MARKED_JOB_COMPLETED', $2, 'customer', $3)
+      `, [id, booking.customer_phone || 'customer', JSON.stringify({ completedAt: new Date().toISOString() })]);
+
+      // 5. Notify Technician that customer confirmed work
+      try {
+        pushService.sendPushToBookingParty({
+          bookingId: id,
+          targetRole: 'technician',
+          payload: {
+            title: 'Customer Marked Job Complete',
+            body: `Customer confirmed service for #${id}. Payment of ₹${updatedBooking.quote_subtotal || updatedBooking.final_amount || ''} is queued for Admin settlement confirmation.`,
+            tag: `order-${id}-completed`,
+            type: 'order_status',
+            status: 'completed',
+            bookingId: id
+          }
+        });
+      } catch (notifyErr) {
+        fastify.log.warn('Push notification warning: ' + notifyErr.message);
+      }
+
+      return {
+        success: true,
+        message: 'Work completion confirmed successfully. Payment is queued for Admin settlement disbursal.',
+        booking: updatedBooking
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 
   // 4.0 Customer Approves Digital Quote
   fastify.post('/bookings/:id/approve-quote', async (req, reply) => {

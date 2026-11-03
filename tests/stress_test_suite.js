@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SHAZU ONE / SALEMSEVA: HIGH-CONCURRENCY STRESS & LOAD TEST SUITE
+ * SHAZU ONE: HIGH-CONCURRENCY STRESS & LOAD TEST SUITE
  * ============================================================================
  * Evaluates performance under concurrent load, race condition handling,
  * coupon redemption limits, and database connection pool resilience.
@@ -64,7 +64,7 @@ async function api(path, options = {}) {
 
 async function runStressTestSuite() {
   console.log(c.bold('======================================================================'));
-  console.log(c.bold(c.cyan(' SHAZU ONE / SALEMSEVA: HIGH-CONCURRENCY STRESS & LOAD TEST SUITE')));
+  console.log(c.bold(c.cyan(' SHAZU ONE: HIGH-CONCURRENCY STRESS & LOAD TEST SUITE')));
   console.log(` Target Server: ${c.yellow(BASE_URL)}`);
   console.log(c.bold('======================================================================\n'));
 

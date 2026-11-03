@@ -731,7 +731,7 @@ async function adminRoutes(fastify, options) {
           customerRefund: parseFloat(refund.toFixed(2)),
           paymentMethod: r.payment_method || 'UPI (Razorpay Escrow)',
           razorpayPaymentId: r.razorpay_payment_id || `pay_${String(r.booking_id || '').substring(0, 8)}`,
-          status: isCancelled ? 'REFUNDED' : (isCompleted ? 'SETTLED' : 'ESCROW_HELD')
+          status: isCancelled ? 'REFUNDED' : (isCompleted ? (r.payout_utr ? 'SETTLED' : 'ESCROW_HELD') : 'ESCROW_HELD')
         };
       });
 
@@ -855,6 +855,24 @@ async function adminRoutes(fastify, options) {
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'MANUAL_PAYOUT_UTR_RECORDED', 'admin', 'admin', $2)
       `, [bookingId, JSON.stringify({ utr: cleanUtr, notes: notes || 'Admin recorded manual transaction ID' })]);
+
+      // 5. Notify Technician of Disbursal
+      try {
+        pushService.sendPushToBookingParty({
+          bookingId,
+          targetRole: 'technician',
+          payload: {
+            title: 'Settlement Disbursed to Bank',
+            body: `Admin confirmed payout for #${bookingId}. Bank Ref / UTR: ${cleanUtr}. Funds credited to your UPI.`,
+            tag: `payout-${bookingId}`,
+            type: 'payout_settled',
+            status: 'settled',
+            bookingId
+          }
+        });
+      } catch (pushErr) {
+        fastify.log.warn('Could not send technician payout push: ' + pushErr.message);
+      }
 
       return {
         success: true,
@@ -1166,6 +1184,22 @@ async function adminRoutes(fastify, options) {
             settled_at = NOW()
         WHERE booking_id = ANY($2::text[])
       `, [cleanUtr, bookingIds]);
+
+      await query(`
+        UPDATE technician_payouts
+        SET utr_ref = $1,
+            status = 'DISBURSED_100%'
+        WHERE (
+          status IN ('PENDING_DISBURSAL', 'PENDING_APPROVAL')
+          OR utr_ref IS NULL
+        )
+        AND (
+          technician_id = $2
+          OR EXISTS (
+            SELECT 1 FROM unnest($3::text[]) bid WHERE description LIKE '%' || bid || '%'
+          )
+        )
+      `, [cleanUtr, technicianId || null, bookingIds]);
 
       await query(`
         INSERT INTO audit_logs (event_type, actor_id, actor_type, metadata)

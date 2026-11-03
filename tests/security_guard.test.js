@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SALEMSEVA / SHAZU ONE - SECURITY GUARD TEST
+ * SHAZU ONE - SECURITY GUARD TEST
  * ============================================================================
  *
  * Proves the controls that were added to close the "API accepts anything" class:

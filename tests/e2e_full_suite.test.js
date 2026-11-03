@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SALEMSEVA: MASTER END-TO-END (E2E) TEST SUITE
+ * SHAZU ONE: MASTER END-TO-END (E2E) TEST SUITE
  * ============================================================================
  * Comprehensive operational test suite covering all core flows and edge cases:
  *
@@ -76,7 +76,7 @@ async function api(path, options = {}) {
 
 async function runMasterE2ETestSuite() {
   console.log('----------------------------------------------------------------------');
-  console.log(' SALEMSEVA FULL-STACK AUTOMATED E2E VERIFICATION SUITE');
+  console.log(' SHAZU ONE FULL-STACK AUTOMATED E2E VERIFICATION SUITE');
   console.log(` Target Server: ${BASE_URL}`);
   console.log('----------------------------------------------------------------------');
 

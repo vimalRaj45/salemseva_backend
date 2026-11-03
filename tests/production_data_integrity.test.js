@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SALEMSEVA / SHAZU ONE - PRODUCTION DATA INTEGRITY TEST
+ * SHAZU ONE - PRODUCTION DATA INTEGRITY TEST
  * ============================================================================
  *
  * Answers one question for every write flow in the platform:
