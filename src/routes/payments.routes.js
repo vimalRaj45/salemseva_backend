@@ -831,10 +831,33 @@ async function paymentsRoutes(fastify, options) {
       }
       const booking = bRes.rows[0];
 
-      // Check commission split
-      const invoice = calculateCommissionSplit(parsedAmount);
-      const techPayout = invoice.technicianPayout || (parsedAmount * 0.85);
-      const platformComm = invoice.platformCommission || (parsedAmount * 0.15);
+      const isFinalSettlement = paymentType === 'FINAL_SETTLEMENT' || booking.status === 'quote_approved' || booking.status === 'quote_presented';
+      const feeSettings = await getLiveFeeSettings();
+
+      const advancePaid = parseFloat(
+        booking.advance_amount_paid !== null && booking.advance_amount_paid !== undefined
+          ? booking.advance_amount_paid
+          : Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))
+      );
+
+      // Total job amount is the full quote (including the booking fee)
+      const targetJobTotal = isFinalSettlement
+        ? parseFloat(booking.quote_subtotal || (parsedAmount + advancePaid))
+        : parsedAmount;
+
+      const inv = calculateDualCommissionInvoice({
+        totalJobAmount: targetJobTotal,
+        actualAdvancePaid: advancePaid,
+        customerFeePercent: feeSettings.customerFeePercent,
+        gatewayFeePercent: feeSettings.gatewayFeePercent,
+        partnerCommPercent: feeSettings.partnerCommPercent,
+        paymentMethod: booking.payment_method || 'online'
+      });
+
+      // Total customer payment across advance booking fee + final step
+      const totalCustomerPaid = isFinalSettlement ? (advancePaid + parsedAmount) : parsedAmount;
+      const techPayout = isFinalSettlement ? inv.partnerDirectRouteTransfer : parseFloat((parsedAmount * (100 - feeSettings.partnerCommPercent) / 100).toFixed(2));
+      const platformComm = isFinalSettlement ? inv.platformTotalRetained : parseFloat((parsedAmount * (feeSettings.partnerCommPercent / 100)).toFixed(2));
 
       const ledgerOrderId = `qr_ord_${bookingId}_${Date.now()}`;
       const ledgerPaymentId = `qr_pay_${cleanUtr}_${Date.now()}`;
@@ -857,7 +880,7 @@ async function paymentsRoutes(fastify, options) {
         bookingId,
         ledgerOrderId,
         ledgerPaymentId,
-        parsedAmount,
+        totalCustomerPaid,
         techPayout,
         platformComm,
         cleanUtr,
@@ -865,7 +888,6 @@ async function paymentsRoutes(fastify, options) {
         screenshotUrl || null
       ]);
 
-      const isFinalSettlement = paymentType === 'FINAL_SETTLEMENT' || booking.status === 'quote_approved' || booking.status === 'quote_presented';
       const nextBookingStatus = isFinalSettlement ? 'completed' : (booking.status === 'created' ? 'matching' : booking.status);
 
       if (isFinalSettlement) {
@@ -873,24 +895,12 @@ async function paymentsRoutes(fastify, options) {
           UPDATE bookings
           SET status = 'completed',
               completed_at = NOW(),
-              final_amount = COALESCE(quote_subtotal, $1)
+              final_amount = $1
           WHERE id = $2;
-        `, [parsedAmount, bookingId]);
+        `, [targetJobTotal, bookingId]);
 
         // Disburse technician payout in database
         try {
-          const feeSettings = await getLiveFeeSettings();
-          const targetTotal = parseFloat(booking.quote_subtotal || parsedAmount);
-          const actualAdvance = parseFloat(booking.advance_amount_paid ?? (Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))));
-          const inv = calculateDualCommissionInvoice({
-            totalJobAmount: targetTotal,
-            actualAdvancePaid: actualAdvance,
-            customerFeePercent: feeSettings.customerFeePercent,
-            gatewayFeePercent: feeSettings.gatewayFeePercent,
-            partnerCommPercent: feeSettings.partnerCommPercent,
-            paymentMethod: booking.payment_method || 'online'
-          });
-
           const totalTechPayout = inv.partnerDirectRouteTransfer;
           let techId = booking.technician_id;
           let techPhone = '';
@@ -909,7 +919,7 @@ async function paymentsRoutes(fastify, options) {
               techId,
               totalTechPayout,
               techUpi,
-              `Pending Admin settlement for #${bookingId} (Final Bill Paid via Direct QR)`
+              `Pending Admin settlement for #${bookingId} (Total Job: ₹${targetJobTotal} incl booking fee - ₹${inv.partnerCommissionAmount} partner comm = ₹${totalTechPayout})`
             ]);
             await query(`
               UPDATE technicians 

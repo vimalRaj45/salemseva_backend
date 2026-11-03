@@ -1419,13 +1419,17 @@ async function partnerRoutes(fastify, options) {
           s.name_en as service_name, s.name_ta as service_name_ta,
           r.rating as customer_rating, r.comment as customer_review,
           p.status as payment_status, p.payout_utr, p.settled_at,
+          p.tech_payout_amount as payment_tech_payout,
+          p.platform_commission as payment_platform_commission,
+          p.amount_total as payment_amount_total,
           t.upi_vpa as tech_upi_vpa
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN reviews r ON b.id = r.booking_id
         LEFT JOIN technicians t ON b.technician_id = t.id
         LEFT JOIN LATERAL (
-          SELECT status, payout_utr, settled_at FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+          SELECT status, payout_utr, settled_at, tech_payout_amount, platform_commission, amount_total 
+          FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
         ) p ON true
         WHERE b.technician_id = $1
         ORDER BY b.created_at DESC 
@@ -1438,11 +1442,20 @@ async function partnerRoutes(fastify, options) {
       const platformRate = feeConfig.partnerCommPercent / 100.0;
 
       const jobs = res.rows.map(row => {
-        const gross = parseFloat(row.final_amount) || 899.00;
-        const visitFee = parseFloat(row.visit_fee) || 99.00;
-        const laborAndParts = Math.max(0, gross - visitFee);
-        const techShare = visitFee + (laborAndParts * partnerRate) + (row.is_urgent_dispatch ? 40 : 0);
-        const platformCut = (laborAndParts * platformRate) + (row.is_urgent_dispatch ? 10 : 0);
+        // Total job includes the advance booking fee + quoted work
+        const totalJob = parseFloat(row.quote_subtotal || row.final_amount || 150.00);
+
+        let techShare = 0;
+        let platformCut = 0;
+
+        if (row.payment_tech_payout !== null && row.payment_tech_payout !== undefined && parseFloat(row.payment_tech_payout) > 0) {
+          techShare = parseFloat(row.payment_tech_payout);
+          platformCut = parseFloat(row.payment_platform_commission || (totalJob - techShare).toFixed(2));
+        } else {
+          // Booking fee is fully included in the partner's total job payout; deduct only partner commission %
+          platformCut = parseFloat(((totalJob * feeConfig.partnerCommPercent) / 100).toFixed(2));
+          techShare = parseFloat((totalJob - platformCut).toFixed(2));
+        }
 
         let settlementStatus = 'ESCROW_HELD';
         if (row.status === 'completed') {
@@ -1461,7 +1474,7 @@ async function partnerRoutes(fastify, options) {
           locality: row.locality || 'Fairlands, Salem',
           serviceName: row.service_name || 'Home Services & Diagnostic',
           serviceNameTa: row.service_name_ta || 'வீட்டு சேவை',
-          grossAmount: gross,
+          grossAmount: totalJob,
           techPayout: parseFloat(techShare.toFixed(2)),
           platformCommission: parseFloat(platformCut.toFixed(2)),
           settlementStatus,
