@@ -16,7 +16,7 @@ async function adminRoutes(fastify, options) {
       const [bookingsCount, onlineTechs, paymentsSum, reviewsCount, recentBookings, techsList] = await Promise.all([
         query(`SELECT status, count(*) as count FROM bookings GROUP BY status`),
         query(`SELECT count(*) as count FROM technicians WHERE is_online = TRUE`),
-        query(`SELECT COALESCE(SUM(amount_total), 0) as total_revenue, COALESCE(SUM(tech_payout_amount), 0) as total_payouts, COALESCE(SUM(platform_commission), 0) as total_commission FROM payments`),
+        query(`SELECT COALESCE(SUM(amount_total), 0) as total_revenue, COALESCE(SUM(tech_payout_amount), 0) as total_payouts, COALESCE(SUM(platform_commission), 0) as total_commission FROM payments WHERE status != 'failed'`),
         query(`SELECT count(*) as count FROM reviews WHERE is_below_3_star = TRUE`),
         query(`
           SELECT 
@@ -597,20 +597,37 @@ async function adminRoutes(fastify, options) {
           t.phone as technician_phone,
           t.primary_trade as technician_trade,
           t.upi_vpa as technician_upi,
-          p.id as payment_id,
+          p.payment_id,
           p.razorpay_payment_id,
           p.payment_method,
-          p.status as payment_status,
-          p.amount_total as payment_amount,
-          p.tech_payout_amount as payment_tech_payout,
-          p.platform_commission as payment_platform_commission,
+          p.payment_status,
+          p.payment_amount,
+          p.payment_tech_payout,
+          p.payment_platform_commission,
           p.payout_utr,
           p.customer_utr,
-          p.settled_at
+          p.settled_at,
+          p.successful_payments_count,
+          p.failed_payments_count,
+          p.failed_payments_amount
         FROM bookings b
         LEFT JOIN technicians t ON b.technician_id = t.id
         LEFT JOIN LATERAL (
-          SELECT * FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+          SELECT 
+            COALESCE(SUM(amount_total) FILTER (WHERE status != 'failed'), 0) as payment_amount,
+            COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as payment_tech_payout,
+            COALESCE(SUM(platform_commission) FILTER (WHERE status != 'failed'), 0) as payment_platform_commission,
+            MAX(id::text) as payment_id,
+            MAX(razorpay_payment_id) as razorpay_payment_id,
+            MAX(payment_method) as payment_method,
+            MAX(status::text) as payment_status,
+            MAX(payout_utr) as payout_utr,
+            MAX(customer_utr) as customer_utr,
+            MAX(settled_at) as settled_at,
+            COUNT(*) FILTER (WHERE status != 'failed') as successful_payments_count,
+            COUNT(*) FILTER (WHERE status = 'failed') as failed_payments_count,
+            COALESCE(SUM(amount_total) FILTER (WHERE status = 'failed'), 0) as failed_payments_amount
+          FROM payments WHERE booking_id = b.id
         ) p ON true
         ${whereClause}
         ORDER BY b.created_at DESC
@@ -620,68 +637,88 @@ async function adminRoutes(fastify, options) {
       const result = await query(sql, params);
       const rows = result.rows || [];
 
-      // Calculate end-to-end financial aggregations
+      // Calculate end-to-end financial aggregations (strictly non-failed funds)
       let totalGross = 0;
-      let totalRazorpayFee = 0;
+      let totalCustomerPlatformFees = 0;
+      let totalGatewayFees = 0;
+      let totalPartnerCommissionCut = 0;
       let totalTechPayout = 0;
       let totalPlatformCut = 0;
       let totalCustomerRefunds = 0;
+      let totalFailedPaymentsAmount = 0;
+      let totalFailedPaymentsCount = 0;
       let completedCount = 0;
 
       const regionMap = {};
       const dailyMap = {};
       const feeConfig = await getLiveFeeSettings();
-      const partnerPayoutRate = (100 - feeConfig.partnerCommPercent) / 100.0;
-      const platformCommRate = feeConfig.partnerCommPercent / 100.0;
+      const customerFeePercent = feeConfig.customerFeePercent ?? 2.0;
+      const gatewayFeePercent = feeConfig.gatewayFeePercent ?? 1.0;
+      const partnerCommPercent = feeConfig.partnerCommPercent ?? 5.0;
+      const partnerPayoutRate = Math.max(0, (100 - partnerCommPercent) / 100.0);
+      const platformCommRate = partnerCommPercent / 100.0;
 
       const transactions = rows.map(r => {
-        const visitFee = parseFloat(r.visit_fee) || 49.00;
-        const advancePaid = parseFloat(r.advance_amount_paid !== null && r.advance_amount_paid !== undefined ? r.advance_amount_paid : Math.max(0, visitFee - (parseFloat(r.coupon_discount) || 0)));
-        const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
         const isCancelled = r.booking_status === 'cancelled';
         const isCompleted = r.booking_status === 'completed';
-        const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(r.booking_status) || (isCancelled && r.final_amount > 0);
+        const isCreated = r.booking_status === 'created';
 
-        // Gross inflow from customer (Option A: If quote completed, customer paid total quote; if booking, advance paid)
-        let gross = parseFloat(r.payment_amount) || (quoteSubtotal > 0 && isCompleted ? quoteSubtotal : advancePaid);
-        if (isCancelled && !r.payment_amount && !r.final_amount) {
-          gross = 0;
+        const failedAmountForRow = parseFloat(r.failed_payments_amount || 0.00);
+        const failedCountForRow = parseInt(r.failed_payments_count || 0, 10);
+        totalFailedPaymentsAmount += failedAmountForRow;
+        totalFailedPaymentsCount += failedCountForRow;
+
+        // Strictly exclude failed payments. If booking is in 'created' status and no successful payment occurred, gross is 0.00
+        const recordedPaymentAmount = parseFloat(r.payment_amount || 0.00);
+        const successfulCount = parseInt(r.successful_payments_count || 0, 10);
+
+        let gross = 0.00;
+        if (successfulCount > 0 && recordedPaymentAmount > 0) {
+          gross = recordedPaymentAmount;
+        } else if (!isCreated && !isCancelled) {
+          const visitFee = parseFloat(r.visit_fee) || 49.00;
+          const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
+          gross = isCompleted && quoteSubtotal > 0 ? quoteSubtotal : visitFee;
         }
 
-        // Payment Gateway Fee (0.00 since direct UPI QR mode is active, no Razorpay charges)
-        const pgFeeMultiplier = ((feeConfig.gatewayFeePercent || 0.0) * 1.18) / 100.0;
-        let razorpayFee = pgFeeMultiplier > 0 && gross > 0 ? parseFloat((gross * pgFeeMultiplier).toFixed(2)) : 0.00;
+        // Customer cutoff calculations
+        const customerPlatformCut = gross > 0 ? parseFloat(((gross * customerFeePercent) / 100).toFixed(2)) : 0.00;
+        const gatewayFee = gross > 0 ? parseFloat(((gross * gatewayFeePercent) / 100).toFixed(2)) : 0.00;
 
-        // Technician Payout:
-        let techPayout = 0;
-        if (isCompleted) {
-          techPayout = parseFloat(r.payment_tech_payout) || parseFloat(((quoteSubtotal > 0 ? quoteSubtotal : advancePaid) * partnerPayoutRate).toFixed(2));
-        } else if (isPaid && !isCancelled) {
-          techPayout = parseFloat((advancePaid * partnerPayoutRate).toFixed(2));
-        } else if (isCancelled && r.technician_name) {
-          techPayout = advancePaid; // Travel disbursal if cancelled after technician dispatch
+        // Technician cutoff & payout calculations
+        let techCommissionCut = 0.00;
+        let techPayout = 0.00;
+        if (isCompleted && gross > 0) {
+          techCommissionCut = parseFloat(r.payment_platform_commission) || parseFloat(((gross * platformCommRate)).toFixed(2));
+          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((gross - techCommissionCut).toFixed(2));
+        } else if (gross > 0 && !isCancelled) {
+          techCommissionCut = parseFloat(((gross * platformCommRate)).toFixed(2));
+          techPayout = parseFloat((gross - techCommissionCut).toFixed(2));
+        } else if (isCancelled && r.technician_name && r.technician_name !== 'None (Pre-Dispatch)') {
+          techPayout = gross; // Travel fuel compensation if dispatched
         }
 
-        // Platform Commission: configured % of quote labor OR retained cancellation fee
+        // Platform Commission / Retained fees
         let platformCut = 0;
-        if (isCompleted) {
-          platformCut = parseFloat(r.payment_platform_commission) || parseFloat(((quoteSubtotal > 0 ? quoteSubtotal : advancePaid) * platformCommRate).toFixed(2));
+        if (isCompleted && gross > 0) {
+          platformCut = parseFloat((customerPlatformCut + techCommissionCut).toFixed(2));
         } else if (isCancelled && r.refund_platform_fee) {
           platformCut = parseFloat(r.refund_platform_fee);
+        } else if (gross > 0) {
+          platformCut = parseFloat((customerPlatformCut + techCommissionCut).toFixed(2));
         }
 
         // Customer Refund & Gateway Fee Retention
         let refund = 0;
         if (isCancelled) {
           refund = parseFloat(r.refund_amount !== null && r.refund_amount !== undefined ? r.refund_amount : ((r.cancellation_reason?.includes('customer') || !r.technician_name) ? gross : 0));
-          if (r.refund_gateway_fee) {
-            razorpayFee = parseFloat(r.refund_gateway_fee);
-          }
         }
 
-        // Update overall summary
+        // Update overall summary with strictly confirmed amounts
         totalGross += gross;
-        totalRazorpayFee += razorpayFee;
+        totalCustomerPlatformFees += customerPlatformCut;
+        totalGatewayFees += gatewayFee;
+        totalPartnerCommissionCut += techCommissionCut;
         totalTechPayout += techPayout;
         totalPlatformCut += platformCut;
         totalCustomerRefunds += refund;
@@ -704,7 +741,7 @@ async function adminRoutes(fastify, options) {
         }
         dailyMap[dateKey].gross += gross;
         dailyMap[dateKey].techPayout += techPayout;
-        dailyMap[dateKey].razorpayFee += razorpayFee;
+        dailyMap[dateKey].razorpayFee += gatewayFee;
         dailyMap[dateKey].platformCut += platformCut;
         dailyMap[dateKey].orders += 1;
 
@@ -725,13 +762,21 @@ async function adminRoutes(fastify, options) {
           customerUtr: r.customer_utr || '',
           settledAt: r.settled_at || null,
           grossAmount: parseFloat(gross.toFixed(2)),
-          razorpayFee: parseFloat(razorpayFee.toFixed(2)),
+          customerGross: parseFloat(gross.toFixed(2)),
+          customerPlatformFee: parseFloat(customerPlatformCut.toFixed(2)),
+          customerFeePercent: customerFeePercent,
+          gatewayFee: parseFloat(gatewayFee.toFixed(2)),
+          gatewayFeePercent: gatewayFeePercent,
+          techCommissionCut: parseFloat(techCommissionCut.toFixed(2)),
+          techCommissionPercent: partnerCommPercent,
           techPayout: parseFloat(techPayout.toFixed(2)),
           platformCut: parseFloat(platformCut.toFixed(2)),
           customerRefund: parseFloat(refund.toFixed(2)),
-          paymentMethod: r.payment_method || 'UPI (Razorpay Escrow)',
+          failedAmount: failedAmountForRow,
+          failedCount: failedCountForRow,
+          paymentMethod: r.payment_method || 'UPI (Direct Business QR)',
           razorpayPaymentId: r.razorpay_payment_id || `pay_${String(r.booking_id || '').substring(0, 8)}`,
-          status: isCancelled ? 'REFUNDED' : (isCompleted ? (r.payout_utr ? 'SETTLED' : 'ESCROW_HELD') : 'ESCROW_HELD')
+          status: isCancelled ? 'REFUNDED' : (isCompleted ? (r.payout_utr ? 'SETTLED' : 'ESCROW_HELD') : (gross > 0 ? 'ESCROW_HELD' : 'UNPAID'))
         };
       });
 
@@ -754,11 +799,18 @@ async function adminRoutes(fastify, options) {
       const responsePayload = {
         summary: {
           totalGross: parseFloat(totalGross.toFixed(2)),
-          totalRazorpayFee: parseFloat(totalRazorpayFee.toFixed(2)),
+          totalCustomerPlatformFees: parseFloat(totalCustomerPlatformFees.toFixed(2)),
+          customerFeePercent: customerFeePercent,
+          totalGatewayFees: parseFloat(totalGatewayFees.toFixed(2)),
+          gatewayFeePercent: gatewayFeePercent,
+          totalPartnerCommissionCut: parseFloat(totalPartnerCommissionCut.toFixed(2)),
+          partnerCommPercent: partnerCommPercent,
           totalTechPayout: parseFloat(totalTechPayout.toFixed(2)),
           totalPlatformCut: parseFloat(totalPlatformCut.toFixed(2)),
           totalCustomerRefunds: parseFloat(totalCustomerRefunds.toFixed(2)),
-          netPlatformEarnings: parseFloat((totalPlatformCut - totalRazorpayFee).toFixed(2)),
+          netPlatformEarnings: parseFloat((totalPlatformCut - totalGatewayFees).toFixed(2)),
+          totalFailedPaymentsAmount: parseFloat(totalFailedPaymentsAmount.toFixed(2)),
+          totalFailedPaymentsCount: totalFailedPaymentsCount,
           totalTransactions: transactions.length,
           completedOrders: completedCount
         },

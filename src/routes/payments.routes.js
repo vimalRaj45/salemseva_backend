@@ -390,9 +390,9 @@ async function paymentsRoutes(fastify, options) {
 
           await query(`
             UPDATE bookings 
-            SET status = $1
+            SET status = $1, advance_amount_paid = COALESCE(advance_amount_paid, 0) + $3
             WHERE id = $2 AND status IN ('created', 'accepted', 'matching', 'quote_presented')
-          `, [nextStatus, bookingId]);
+          `, [nextStatus, bookingId, parsedAmount]);
 
           const quoteSub = parseFloat(currentB.quote_subtotal) || parsedAmount;
           const actualAdvance = parseFloat(currentB.advance_amount_paid ?? (Math.max(0, parseFloat(currentB.visit_fee || 99) - parseFloat(currentB.coupon_discount || 0))));
@@ -890,7 +890,11 @@ async function paymentsRoutes(fastify, options) {
         screenshotUrl || null
       ]);
 
-      const nextBookingStatus = isFinalSettlement ? 'completed' : (booking.status === 'created' ? 'matching' : booking.status);
+      const nextBookingStatus = isFinalSettlement
+        ? 'completed'
+        : (booking.status === 'created'
+            ? (booking.technician_id ? 'accepted' : 'matching')
+            : booking.status);
 
       if (isFinalSettlement) {
         await query(`
@@ -940,9 +944,35 @@ async function paymentsRoutes(fastify, options) {
       } else {
         await query(`
           UPDATE bookings
-          SET status = $1
-          WHERE id = $2 AND status IN ('created', 'matching');
-        `, [nextBookingStatus, bookingId]);
+          SET status = $1, advance_amount_paid = COALESCE(advance_amount_paid, 0) + $2
+          WHERE id = $3 AND status IN ('created', 'matching');
+        `, [nextBookingStatus, parsedAmount, bookingId]);
+
+        // If booking had an assigned technician and was waiting for advance payment, dispatch high-priority push now
+        if (booking.technician_id && booking.status === 'created') {
+          try {
+            const pushService = require('../services/pushNotification.service');
+            const tRes = await query('SELECT phone, full_name FROM technicians WHERE id = $1', [booking.technician_id]);
+            if (tRes.rows.length > 0) {
+              pushService.sendPushToPhone({
+                phone: tRes.rows[0].phone,
+                role: 'technician',
+                payload: {
+                  title: `New Service Assigned: ${booking.service_id ? booking.service_id.toUpperCase() : 'Home Service'}`,
+                  body: `Customer paid advance inspection fee for #${bookingId} in ${booking.locality || 'Salem'}. Tap to review.`,
+                  tag: `job-${bookingId}`,
+                  type: 'new_job',
+                  bookingId: bookingId,
+                  role: 'technician',
+                  url: '/partner'
+                },
+                options: { urgency: 'high', TTL: 1800 }
+              }).catch(e => fastify.log.warn('Paid booking tech push note: ' + e.message));
+            }
+          } catch (pErr) {
+            fastify.log.warn('Push dispatch error on paid QR: ' + pErr.message);
+          }
+        }
       }
 
       // Insert audit log

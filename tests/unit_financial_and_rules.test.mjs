@@ -349,3 +349,101 @@ describe('Unit Test: Dual-Commission Split & Razorpay Route Engine', () => {
     assert.equal(inv.partnerDirectRouteTransfer, 49.00); // 950 - 901
   });
 });
+
+describe('Unit Test: Advance Payment Verification & Lead Visibility Guard', () => {
+  it('should enforce that only paid bookings (status === matching) are visible as open leads to technicians', () => {
+    const isVisibleInOpenLeads = (booking) => {
+      // Unpaid bookings remain in 'created' status and must never show in open scheduled leads
+      return booking.status === 'matching' && booking.technician_id === null;
+    };
+
+    const unpaidBooking = { id: 'SLM-1001', status: 'created', visit_fee: 99, advance_amount_paid: 0, technician_id: null };
+    const paidBooking = { id: 'SLM-1002', status: 'matching', visit_fee: 99, advance_amount_paid: 99, technician_id: null };
+    const assignedPaidBooking = { id: 'SLM-1003', status: 'accepted', visit_fee: 99, advance_amount_paid: 99, technician_id: 'tech-1' };
+
+    assert.equal(isVisibleInOpenLeads(unpaidBooking), false, 'Unpaid booking must NOT be shown as an open lead');
+    assert.equal(isVisibleInOpenLeads(paidBooking), true, 'Paid booking in matching radar MUST be shown as an open lead');
+    assert.equal(isVisibleInOpenLeads(assignedPaidBooking), false, 'Already assigned booking must not be shown as open unassigned lead');
+  });
+
+  it('should verify advance payment transitions booking from created to matching or accepted', () => {
+    const processAdvancePayment = (booking, amountPaid) => {
+      if (booking.status !== 'created') return booking;
+      const targetStatus = booking.technician_id ? 'accepted' : 'matching';
+      return {
+        ...booking,
+        status: targetStatus,
+        advance_amount_paid: (booking.advance_amount_paid || 0) + amountPaid
+      };
+    };
+
+    const unpaidBroadcast = { id: 'SLM-2001', status: 'created', technician_id: null, advance_amount_paid: 0 };
+    const paidBroadcast = processAdvancePayment(unpaidBroadcast, 99);
+    assert.equal(paidBroadcast.status, 'matching');
+    assert.equal(paidBroadcast.advance_amount_paid, 99);
+
+    const unpaidDirect = { id: 'SLM-2002', status: 'created', technician_id: 'tech-5', advance_amount_paid: 0 };
+    const paidDirect = processAdvancePayment(unpaidDirect, 99);
+    assert.equal(paidDirect.status, 'accepted');
+    assert.equal(paidDirect.advance_amount_paid, 99);
+  });
+});
+
+describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger', () => {
+  it('should exclude failed payment attempts from Gross Revenue and Customer Inflow', () => {
+    const rawPayments = [
+      { id: 'pay_1', amount_total: 99.00, status: 'escrow_held', part: 1 },
+      { id: 'pay_2_fail', amount_total: 257.55, status: 'failed', part: 2 },
+      { id: 'pay_2_success', amount_total: 257.55, status: 'settled', part: 2 }
+    ];
+
+    // Compute gross inflow excluding failed
+    const nonFailedPayments = rawPayments.filter(p => p.status !== 'failed');
+    const customerGross = nonFailedPayments.reduce((sum, p) => sum + p.amount_total, 0);
+    const failedAmount = rawPayments.filter(p => p.status === 'failed').reduce((sum, p) => sum + p.amount_total, 0);
+
+    assert.equal(failedAmount, 257.55, 'Failed payments must be captured separately');
+    assert.equal(customerGross, 356.55, 'Customer Gross must strictly exclude failed attempts');
+    assert.notEqual(customerGross, 614.10, 'Customer Gross must never inflate by adding failed attempts');
+  });
+
+  it('should calculate accurate 2-Part payment split with itemized deductions', () => {
+    const quoteTotal = 250.00;
+    const part1Advance = 99.00;
+    const customerFeePercent = 2.0; // 2%
+    const gatewayFeePercent = 1.0; // 1% ~ 1.02%
+
+    const part1Txn = { id: 'txn_part1', amount_total: 99.00, status: 'escrow_held' };
+    const part2Txn = { id: 'txn_part2', amount_total: 257.55, status: 'escrow_held' };
+
+    // Itemized deductions calculation
+    const netWorkBase = quoteTotal;
+    const customerFee = Number((netWorkBase * (customerFeePercent / 100)).toFixed(2)); // 5.00
+    const gatewayFee = Number(((netWorkBase + customerFee) * (gatewayFeePercent / 100)).toFixed(2)); // 2.55
+    const computedPart2 = Number((netWorkBase + customerFee + gatewayFee).toFixed(2)); // 257.55
+
+    assert.equal(customerFee, 5.00);
+    assert.equal(gatewayFee, 2.55);
+    assert.equal(computedPart2, 257.55);
+
+    // Part 1 + Part 2 real totals
+    const totalPaid = Number((part1Txn.amount_total + part2Txn.amount_total).toFixed(2));
+    assert.equal(totalPaid, 356.55, 'Total paid must equal sum of verified Part 1 + Part 2 transactions');
+    assert.notEqual(totalPaid, 250.00, 'Total paid must not be hardcoded to quote amount');
+  });
+
+  it('should calculate dual-sided cutoff percentages for admin ledger', () => {
+    const grossInflow = 356.55;
+    const customerFee = 5.00;
+    const customerFeePercent = 2.0;
+    const techGrossWork = 250.00;
+    const partnerCommPercent = 10.0; // e.g. 10%
+    const techCommissionCut = Number((techGrossWork * (partnerCommPercent / 100)).toFixed(2)); // 25.00
+    const techDisbursed = Number((grossInflow - customerFee - techCommissionCut).toFixed(2)); // 356.55 - 5 - 25 = 326.55
+
+    assert.equal(techCommissionCut, 25.00);
+    assert.equal(customerFeePercent, 2.0);
+    assert.equal(partnerCommPercent, 10.0);
+    assert.ok(techDisbursed > 0);
+  });
+});

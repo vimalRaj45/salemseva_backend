@@ -60,7 +60,7 @@ async function partnerRoutes(fastify, options) {
         FROM bookings 
         WHERE technician_id = $1 
           AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
-          AND status != 'cancelled'
+          AND status NOT IN ('cancelled', 'created')
       `, [tech.id]);
       const jobsTakenToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
       const canTakeMoreJobsToday = jobsTakenToday < techDailyCapacity;
@@ -221,10 +221,11 @@ async function partnerRoutes(fastify, options) {
         adminRequested: true
       } : null;
 
-      // Get technician's past and upcoming assigned appointments across all dates
+      // Get technician's past and upcoming assigned appointments across all dates (strictly confirmed and paid)
       const myScheduledRes = await query(`
         SELECT * FROM bookings
         WHERE technician_id = $1
+          AND status != 'created'
         ORDER BY created_at DESC
         LIMIT 100
       `, [tech.id]);
@@ -379,8 +380,7 @@ async function partnerRoutes(fastify, options) {
         }
       }
 
-      // Exclude customer bookings this technician rejected for the current day. Other requests remain unaffected!
-      // Strictly filter by technician's chosen assigned_localities (e.g. Fairlands, Junction)
+      // Open scheduled leads strictly require customer to have paid their advance inspection fee (status = 'matching')
       const scheduledRes = await query(`
         SELECT 
           id, service_id, selected_issue_id, custom_issue_description,
@@ -391,7 +391,7 @@ async function partnerRoutes(fastify, options) {
         FROM bookings
         WHERE (service_id = ANY($1::text[]) OR $1::text[] IS NULL)
           AND (technician_id IS NULL)
-          AND (status IN ('created', 'matching'))
+          AND (status = 'matching')
           AND (booking_type = 'scheduled' OR scheduled_slot IS NOT NULL)
           AND (
             $4::text[] IS NULL OR cardinality($4::text[]) = 0 OR
@@ -520,7 +520,7 @@ async function partnerRoutes(fastify, options) {
         FROM bookings 
         WHERE technician_id = $1 
           AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
-          AND status != 'cancelled'
+          AND status NOT IN ('cancelled', 'created')
       `, [tech.id]);
       const currentJobsToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
       if (currentJobsToday >= maxDailyCap) {
@@ -1432,6 +1432,7 @@ async function partnerRoutes(fastify, options) {
           FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
         ) p ON true
         WHERE b.technician_id = $1
+          AND b.status != 'created'
         ORDER BY b.created_at DESC 
         LIMIT 50
       `;
@@ -1610,6 +1611,7 @@ async function partnerRoutes(fastify, options) {
         FROM bookings b
         LEFT JOIN technicians t ON b.technician_id = t.id
         WHERE (b.booking_type = 'scheduled' OR b.scheduled_slot IS NOT NULL OR b.technician_id IS NOT NULL)
+          AND b.status != 'created'
       `;
       const params = [];
       if (technicianId) {

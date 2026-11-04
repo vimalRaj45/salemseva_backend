@@ -295,7 +295,7 @@ async function bookingsRoutes(fastify, options) {
           SELECT COUNT(*) as count FROM bookings 
           WHERE service_id = $1 
             AND scheduled_slot LIKE $2
-            AND status != 'cancelled';
+            AND status NOT IN ('cancelled', 'created');
         `, [serviceId || 'ac', `%${targetDate}%`]);
         const dayBookingsCount = parseInt(dayBookingsRes.rows[0]?.count || 0, 10);
         const maxDailyCapRes = await query(`
@@ -320,21 +320,34 @@ async function bookingsRoutes(fastify, options) {
       // Check if customer requested a specific active specialist (respect daily capacity limit)
       const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
       let assignedTechId = null;
+
+      const isPaidUpfront = Boolean(
+        finalAmount <= 0 ||
+        req.body?.paymentMethod === 'coupon_free' ||
+        req.body?.paymentStatus === 'paid' ||
+        (parseFloat(req.body?.visitFeePaid || 0) >= finalAmount && finalAmount > 0)
+      );
+
       let initialStatus = 'created';
 
       if (requestedTechId) {
         const checkTech = await query(`
           SELECT t.id, t.full_name, t.phone, COALESCE(t.daily_job_capacity, 4) as capacity,
-            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%') AND b.status != 'cancelled') as today_count
+            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%') AND b.status NOT IN ('cancelled', 'created')) as today_count
           FROM technicians t WHERE t.id = $1
         `, [requestedTechId]);
         if (checkTech.rows.length > 0) {
           const tRow = checkTech.rows[0];
           if (parseInt(tRow.today_count, 10) < parseInt(tRow.capacity, 10)) {
             assignedTechId = tRow.id;
-            // Only set accepted if payment is not required or already completed
-            initialStatus = (finalAmount <= 0 || req.body?.paymentMethod === 'coupon_free') ? 'accepted' : 'created';
+            // Only set accepted if payment is confirmed or zero-fee
+            initialStatus = isPaidUpfront ? 'accepted' : 'created';
           }
+        }
+      } else {
+        // If no specific specialist requested and payment is completed upfront, place into live matching radar
+        if (isPaidUpfront) {
+          initialStatus = 'matching';
         }
       }
 
@@ -362,7 +375,7 @@ async function bookingsRoutes(fastify, options) {
             SELECT COUNT(*) FROM bookings b 
             WHERE b.technician_id = technicians.id 
               AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
-              AND b.status != 'cancelled'
+              AND b.status NOT IN ('cancelled', 'created')
           ) < COALESCE(daily_job_capacity, 4)
         LIMIT 1
       `, [serviceId || null, locality || '', address || '']);
@@ -418,7 +431,7 @@ async function bookingsRoutes(fastify, options) {
         customerOtp,
         'scheduled',
         finalVoiceNote,
-        finalAmount, // advance_amount_paid (actual cash collected from customer upfront)
+        isPaidUpfront ? (finalAmount <= 0 ? 0.00 : finalAmount) : 0.00, // advance_amount_paid (strictly 0.00 until payment confirmed)
         couponDiscount // advance_coupon_discount (actual discount applied at booking)
       ]);
 
@@ -981,6 +994,7 @@ async function bookingsRoutes(fastify, options) {
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE b.status != 'created'
         ORDER BY b.created_at DESC
         LIMIT 30
       `);
@@ -1024,19 +1038,50 @@ async function bookingsRoutes(fastify, options) {
         const finalQuoteSubtotal = parseFloat(b.quote_subtotal) > 0 ? parseFloat(b.quote_subtotal) : (b.status === 'completed' ? (calculatedQuoteSubtotal || 900.00) : calculatedQuoteSubtotal);
         const visitFee = parseFloat(b.visit_fee || 99.00);
 
+        // Filter non-failed payments
+        const nonFailedPayments = rawPayments.filter(p => String(p.status).toLowerCase() !== 'failed');
+        const p1Row = nonFailedPayments[0] || null;
+        const p2Row = nonFailedPayments.length > 1 ? nonFailedPayments[1] : null;
+
+        const couponDiscountVal = parseFloat(b.coupon_discount || 0.00);
+        const part1PaidAmt = p1Row ? parseFloat(p1Row.amount_total || p1Row.amount || 0) : Math.max(0, visitFee - couponDiscountVal);
+        const part2PaidAmt = p2Row ? parseFloat(p2Row.amount_total || p2Row.amount || 0) : (b.status === 'completed' ? Math.max(0, finalQuoteSubtotal - part1PaidAmt) : 0);
+
+        const isCancelled = b.status === 'cancelled';
+        const isCompleted = b.status === 'completed';
+        const isPaidStage = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status) || (isCancelled && b.technician_id);
+
+        const realTotalPaid = (p1Row || p2Row)
+          ? parseFloat(((p1Row ? part1PaidAmt : 0) + (p2Row ? part2PaidAmt : 0)).toFixed(2))
+          : (isCompleted ? (finalQuoteSubtotal > 0 ? finalQuoteSubtotal : visitFee) : (isPaidStage ? visitFee : 0));
+
+        // Part 2 Itemized Deductions & Breakdown
+        const feeSettings = await getLiveFeeSettings();
+        const customerFeePercent = feeSettings.customerFeePercent ?? 2.0;
+        const gatewayFeePercent = feeSettings.gatewayFeePercent ?? 1.0;
+
+        const approvedLaborQuote = finalQuoteSubtotal > 0 ? finalQuoteSubtotal : part2PaidAmt;
+        const advanceDeductedFromQuote = (p1Row && p2Row && (part1PaidAmt + approvedLaborQuote > realTotalPaid)) 
+          ? Math.min(approvedLaborQuote, part1PaidAmt) 
+          : 0.00;
+        const netLaborBase = Math.max(0, approvedLaborQuote - advanceDeductedFromQuote);
+        const customerPlatformFeePart2 = p2Row ? parseFloat(((netLaborBase * customerFeePercent) / 100).toFixed(2)) : 0.00;
+        const gatewayFeePart2 = p2Row ? parseFloat((( (netLaborBase + customerPlatformFeePart2) * gatewayFeePercent) / 100).toFixed(2)) : 0.00;
+
         // Normalize payments list
         let payments = rawPayments.map(p => ({
           id: p.id,
-          transaction_id: p.razorpay_payment_id || p.payout_utr || p.transaction_id || `txn_${b.id}`,
+          transaction_id: p.razorpay_payment_id || p.payout_utr || p.customer_utr || `txn_${b.id}`,
           amount: parseFloat(p.amount_total || p.amount || 0.00),
           status: (p.status || 'SETTLED').toUpperCase(),
-          payment_method: p.payment_method || 'UPI (Instant Escrow)',
+          payment_method: p.payment_method || 'UPI (Direct Business QR)',
           pg_fee: parseFloat(p.pg_fee || 0.00),
           platform_fee: parseFloat(p.platform_commission || 0.00),
-          created_at: p.created_at || p.settled_at || b.created_at
+          created_at: p.created_at || p.settled_at || b.created_at,
+          is_failed: String(p.status).toLowerCase() === 'failed'
         }));
 
-        if (b.status === 'completed' && payments.length <= 1) {
+        if (b.status === 'completed' && payments.length === 0) {
           payments = [
             {
               id: 'p1',
@@ -1057,30 +1102,15 @@ async function bookingsRoutes(fastify, options) {
           ];
         }
 
-        const isPaidStage = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(b.status) || (b.status === 'cancelled' && b.technician_id);
-        const isCancelled = b.status === 'cancelled';
-        const isCompleted = b.status === 'completed';
-        const couponDiscountVal = parseFloat(b.coupon_discount || 0.00);
-        // Part 1 is the advance doorstep inspection fee minus coupon discount
-        const advanceVisitPaid = Math.max(0, visitFee - couponDiscountVal);
-        const actualGrossPaid = advanceVisitPaid;
         const refundAmt = parseFloat(b.refund_amount || 0.00);
         const refundPlatformCut = parseFloat(b.refund_platform_fee || 0.00);
         const refundGatewayCut = parseFloat(b.refund_gateway_fee || 0.00);
 
-        // If labor was quoted, Part 2 is the remaining work balance after deducting the advance inspection fee
-        const part2Balance = finalQuoteSubtotal > 0 ? Math.max(0, finalQuoteSubtotal - advanceVisitPaid) : 0.00;
-
-        // When completed, total customer paid is the advance fee + remaining work balance (which equals finalQuoteSubtotal if >= advance)
-        const totalPaidAmount = isCompleted
-          ? (finalQuoteSubtotal > 0 ? Math.max(finalQuoteSubtotal, advanceVisitPaid + part2Balance) : advanceVisitPaid)
-          : (isCancelled ? actualGrossPaid : (isPaidStage ? advanceVisitPaid : 0.00));
-
         return {
           ...b,
           quote_subtotal: finalQuoteSubtotal,
-          final_amount: totalPaidAmount,
-          gross_paid_amount: totalPaidAmount,
+          final_amount: realTotalPaid,
+          gross_paid_amount: realTotalPaid,
           refund_amount: refundAmt,
           refund_platform_fee: refundPlatformCut,
           refund_gateway_fee: refundGatewayCut,
@@ -1089,23 +1119,37 @@ async function bookingsRoutes(fastify, options) {
           quoteItems,
           auditLogs,
           paymentSummary: {
-            totalPaid: totalPaidAmount,
-            grossPaid: totalPaidAmount,
+            totalPaid: realTotalPaid,
+            grossPaid: realTotalPaid,
             refundAmount: refundAmt,
             refundPlatformFee: refundPlatformCut,
             refundGatewayFee: refundGatewayCut,
             isCancelled,
-            part1Fee: advanceVisitPaid,
+            hasRealTransactions: nonFailedPayments.length > 0,
+            part1Fee: parseFloat(part1PaidAmt.toFixed(2)),
             originalVisitFee: visitFee,
             couponDiscount: couponDiscountVal,
             couponCode: b.coupon_code || null,
-            part1PaymentId: `TXN-VISIT-${b.id}`,
+            part1PaymentId: p1Row ? (p1Row.razorpay_payment_id || p1Row.payout_utr || p1Row.customer_utr || `TXN-VISIT-${b.id}`) : `TXN-VISIT-${b.id}`,
             part1Status: isCancelled ? (refundAmt > 0 ? 'REFUNDED' : 'CANCELLED') : (isPaidStage ? 'PAID' : (b.status === 'accepted' ? 'PENDING_2MIN' : 'NOT_CHARGED')),
-            part1Disbursal: isCancelled ? (b.technician_id ? 'Compensated to Technician' : 'Zero Technician Disbursal') : '100% to Technician (Fuel & Travel)',
-            part2Amount: part2Balance,
-            part2PaymentId: isCompleted ? `TXN-FINAL-${b.id}` : null,
+            part1PaidAt: p1Row?.created_at || b.created_at,
+            part1Method: p1Row?.payment_method || 'UPI (Direct Business QR)',
+            part2Amount: parseFloat(part2PaidAmt.toFixed(2)),
+            part2PaymentId: p2Row ? (p2Row.razorpay_payment_id || p2Row.payout_utr || p2Row.customer_utr || `TXN-FINAL-${b.id}`) : (isCompleted ? `TXN-FINAL-${b.id}` : null),
             part2Status: isCompleted ? 'PAID' : (b.status === 'quote_approved' ? 'AUTHORIZED' : (b.status === 'cancelled' ? 'CANCELLED_BEFORE_WORK' : 'PENDING_DIAGNOSIS')),
-            platformCommission: isCompleted ? parseFloat((finalQuoteSubtotal * (getPartnerCommissionPercent() / 100.0)).toFixed(2)) : 0,
+            part2PaidAt: p2Row?.created_at || b.completed_at || b.created_at,
+            part2Method: p2Row?.payment_method || 'UPI (Direct Business QR)',
+            part2Deductions: {
+              approvedQuoteTotal: approvedLaborQuote,
+              advanceCredited: advanceDeductedFromQuote,
+              netWorkBase: netLaborBase,
+              customerPlatformFee: customerPlatformFeePart2,
+              customerPlatformFeePercent: customerFeePercent,
+              gatewayFee: gatewayFeePart2,
+              gatewayFeePercent: gatewayFeePercent,
+              finalSettlementPaid: parseFloat(part2PaidAmt.toFixed(2))
+            },
+            platformCommission: isCompleted ? parseFloat((finalQuoteSubtotal * (feeSettings.partnerCommPercent / 100.0)).toFixed(2)) : 0,
             escrowGuarantee: isCancelled ? 'Escrow Released & Refunded' : '100% Protected under Shazu One Escrow'
           }
         };
