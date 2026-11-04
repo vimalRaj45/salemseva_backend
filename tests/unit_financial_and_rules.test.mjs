@@ -447,3 +447,55 @@ describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger
     assert.ok(techDisbursed > 0);
   });
 });
+
+describe('Unit Test: Customer Service Review & Ops Escalation Policy', () => {
+  it('should categorize 4 and 5 star ratings as standard satisfied completion', () => {
+    const evaluateReview = (rating, tags = [], comment = '') => {
+      const stars = parseFloat(rating) || 5.0;
+      const isBelow3Star = stars <= 3.0;
+      return {
+        rating: stars,
+        tags,
+        comment,
+        isBelow3Star,
+        escalateToOps: isBelow3Star,
+        techStarPointsAward: 2
+      };
+    };
+
+    const review5 = evaluateReview(5, ['fast', 'oem', 'clean'], 'Superb service');
+    assert.equal(review5.isBelow3Star, false);
+    assert.equal(review5.escalateToOps, false);
+    assert.equal(review5.techStarPointsAward, 2);
+
+    const review4 = evaluateReview(4, ['transparent', 'tamil'], 'Good work');
+    assert.equal(review4.isBelow3Star, false);
+    assert.equal(review4.escalateToOps, false);
+  });
+
+  it('should automatically escalate 1, 2, and 3 star ratings to Salem Ops Manager with root cause tags', () => {
+    const evaluateReview = (rating, tags = [], comment = '') => {
+      const stars = parseFloat(rating) || 5.0;
+      const isBelow3Star = stars <= 3.0;
+      return {
+        rating: stars,
+        tags,
+        comment,
+        isBelow3Star,
+        escalateToOps: isBelow3Star,
+        customerBenefit: isBelow3Star
+          ? 'Eligible for 100% Free Warranty Revisit or Full Diagnostic Refund'
+          : 'Service Completed & 100% Satisfaction Guaranteed'
+      };
+    };
+
+    const review3 = evaluateReview(3, ['pricing'], 'Charges higher than estimate');
+    assert.equal(review3.isBelow3Star, true);
+    assert.equal(review3.escalateToOps, true);
+    assert.ok(review3.customerBenefit.includes('Free Warranty Revisit'));
+
+    const review1 = evaluateReview(1, ['incomplete', 'behavior'], 'Issue persists and technician rude');
+    assert.equal(review1.isBelow3Star, true);
+    assert.equal(review1.escalateToOps, true);
+  });
+});

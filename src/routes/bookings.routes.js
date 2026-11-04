@@ -539,6 +539,15 @@ async function bookingsRoutes(fastify, options) {
         }
       } catch (pErr) {}
 
+      // Fetch customer review if recorded for this booking
+      let existingReview = null;
+      try {
+        const revRes = await query('SELECT * FROM reviews WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [id]);
+        if (revRes.rows.length > 0) {
+          existingReview = revRes.rows[0];
+        }
+      } catch (rErr) {}
+
       // Customer coordinates (Default to Fairlands, Salem if not set)
       const custLat = parseFloat(booking.customer_lat) || 11.6643;
       const custLng = parseFloat(booking.customer_lng) || 78.1460;
@@ -741,6 +750,7 @@ async function bookingsRoutes(fastify, options) {
           cancelledBy: booking.cancelled_by || null,
           cancelledAt: booking.cancelled_at || null
         },
+        review: existingReview,
         isCancelled,
         cancellationReason: booking.cancellation_reason || (isCancelled ? 'Cancelled by Central Operations' : null),
         cancellationDetails: booking.cancellation_details || (isCancelled ? 'Order closed by Shazu One Central Ops' : null),
@@ -1001,15 +1011,17 @@ async function bookingsRoutes(fastify, options) {
 
       // Enrich each booking with payments, quote items, and audit logs
       const enrichedBookings = await Promise.all(res.rows.map(async (b) => {
-        const [paymentsRes, quoteRes, auditRes] = await Promise.all([
+        const [paymentsRes, quoteRes, auditRes, reviewRes] = await Promise.all([
           query('SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
           query('SELECT * FROM quote_items WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
-          query('SELECT * FROM audit_logs WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] }))
+          query('SELECT * FROM audit_logs WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
+          query('SELECT * FROM reviews WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [b.id]).catch(() => ({ rows: [] }))
         ]);
 
         let rawPayments = paymentsRes.rows || [];
         let rawQuoteItems = quoteRes.rows || [];
         const auditLogs = auditRes.rows || [];
+        const existingBookingReview = reviewRes.rows[0] || null;
 
         // Normalize quote items
         let quoteItems = rawQuoteItems.map(qi => ({
@@ -1118,6 +1130,7 @@ async function bookingsRoutes(fastify, options) {
           payments,
           quoteItems,
           auditLogs,
+          review: existingBookingReview,
           paymentSummary: {
             totalPaid: realTotalPaid,
             grossPaid: realTotalPaid,

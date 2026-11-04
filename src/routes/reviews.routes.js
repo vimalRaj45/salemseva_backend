@@ -20,28 +20,41 @@ async function reviewsRoutes(fastify, options) {
       return reply.status(400).send({ success: false, error: 'Booking ID is required to submit a review' });
     }
 
-    const bCheck = await query('SELECT id FROM bookings WHERE id = $1', [bookingId]);
+    const bCheck = await query('SELECT id, technician_id FROM bookings WHERE id = $1', [bookingId]);
     if (bCheck.rows.length === 0) {
       return reply.status(404).send({ success: false, error: 'Booking not found' });
     }
+    const techId = bCheck.rows[0].technician_id;
 
-    const insertSql = `
-      INSERT INTO reviews (
-        booking_id, rating, comment, tags, is_below_3_star, 
-        root_cause_tags, ops_manager_escalated
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-      RETURNING *;
-    `;
-
-    const result = await query(insertSql, [
-      bookingId,
-      stars,
-      userComment,
-      tags,
-      isBelow3Star,
-      rootCauseTags,
-      isBelow3Star // Automatically escalates to Salem Ops Manager Anand if <= 3 stars
-    ]);
+    // Check if review already exists for this booking to update rather than duplicate
+    const existing = await query('SELECT id FROM reviews WHERE booking_id = $1', [bookingId]);
+    let result;
+    if (existing.rows.length > 0) {
+      result = await query(`
+        UPDATE reviews 
+        SET rating = $1, comment = $2, tags = $3, is_below_3_star = $4, root_cause_tags = $5, ops_manager_escalated = $6
+        WHERE booking_id = $7
+        RETURNING *;
+      `, [stars, userComment, tags, isBelow3Star, rootCauseTags, isBelow3Star, bookingId]);
+    } else {
+      const insertSql = `
+        INSERT INTO reviews (
+          booking_id, technician_id, rating, comment, tags, is_below_3_star, 
+          root_cause_tags, ops_manager_escalated
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING *;
+      `;
+      result = await query(insertSql, [
+        bookingId,
+        techId,
+        stars,
+        userComment,
+        tags,
+        isBelow3Star,
+        rootCauseTags,
+        isBelow3Star
+      ]);
+    }
 
     // Mark the booking as completed in database
     if (bookingId) {
@@ -51,12 +64,20 @@ async function reviewsRoutes(fastify, options) {
         WHERE id = $1
       `, [bookingId]);
 
-        // Award technician +2 Star Points towards zero commission on completed job
-        await query(`
-          UPDATE technicians 
-          SET star_points = star_points + 2 
-          WHERE id = (SELECT technician_id FROM bookings WHERE id = $1)
-        `, [bookingId]);
+      // Award technician +2 Star Points and update average rating stats
+      if (techId) {
+        try {
+          await query(`
+            UPDATE technicians 
+            SET star_points = star_points + 2,
+                rating_avg = ROUND(COALESCE((SELECT AVG(rating)::numeric FROM reviews WHERE technician_id = $1), 5.0), 1),
+                rating_count = (SELECT count(*)::int FROM reviews WHERE technician_id = $1)
+            WHERE id = $1
+          `, [techId]);
+        } catch (tErr) {
+          fastify.log.warn('Technician rating update notice: ' + tErr.message);
+        }
+      }
 
         // Real Automated Referral Fulfillment: If this customer was referred by someone, reward the referrer directly
         try {
