@@ -3,6 +3,7 @@ const { query } = require('../db/db');
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
 const { getPartnerCommissionPercent, getLiveFeeSettings, calculateDualCommissionInvoice } = require('../services/commission.service');
+const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/privacy');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -1414,7 +1415,7 @@ async function partnerRoutes(fastify, options) {
 
       let historySql = `
         SELECT 
-          b.id, b.customer_name, b.locality, b.service_address, b.created_at, b.status,
+          b.id, b.customer_name, b.customer_phone, b.locality, b.service_address, b.created_at, b.status,
           b.final_amount, b.visit_fee, b.quote_subtotal, b.advance_amount_paid, b.coupon_discount, b.is_urgent_dispatch,
           s.name_en as service_name, s.name_ta as service_name_ta,
           r.rating as customer_rating, r.comment as customer_review,
@@ -1488,9 +1489,14 @@ async function partnerRoutes(fastify, options) {
           settlementStatus = 'TRAVEL_FEE_DISBURSED';
         }
 
+        const directCallAllowed = canDirectCall(row.status);
+
         return {
           id: row.id,
           customerName: row.customer_name || 'Customer',
+          customerPhone: directCallAllowed ? row.customer_phone : maskPhoneNumber(row.customer_phone),
+          canDirectCall: directCallAllowed,
+          helpdeskPhone: HELPDESK_PHONE,
           locality: row.locality || 'Fairlands, Salem',
           serviceName: row.service_name || 'Home Services & Diagnostic',
           serviceNameTa: row.service_name_ta || 'வீட்டு சேவை',

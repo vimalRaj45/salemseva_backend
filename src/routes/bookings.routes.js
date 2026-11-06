@@ -7,6 +7,12 @@ const {
   getPaymentGatewayFeePercent,
   getLiveFeeSettings
 } = require('../services/commission.service');
+const {
+  maskPhoneNumber,
+  canDirectCall,
+  HELPDESK_PHONE,
+  sanitizePhoneForDialer
+} = require('../utils/privacy');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -737,6 +743,17 @@ async function bookingsRoutes(fastify, options) {
 
       const isCancelled = booking.status === 'cancelled';
 
+      // Smart Privacy Guard: Redact direct phone number when job is completed or cancelled
+      if (technician) {
+        const directCallAllowed = canDirectCall(booking.status);
+        technician = {
+          ...technician,
+          phone: directCallAllowed ? technician.phone : maskPhoneNumber(technician.phone),
+          canDirectCall: directCallAllowed,
+          helpdeskPhone: HELPDESK_PHONE
+        };
+      }
+
       return {
         success: true,
         booking: {
@@ -1128,8 +1145,14 @@ async function bookingsRoutes(fastify, options) {
         const refundPlatformCut = parseFloat(b.refund_platform_fee || 0.00);
         const refundGatewayCut = parseFloat(b.refund_gateway_fee || 0.00);
 
+        const directCallAllowed = canDirectCall(b.status);
+
         return {
           ...b,
+          technician_phone: directCallAllowed ? b.technician_phone : maskPhoneNumber(b.technician_phone),
+          customer_phone: directCallAllowed ? b.customer_phone : maskPhoneNumber(b.customer_phone),
+          canDirectCall: directCallAllowed,
+          helpdeskPhone: HELPDESK_PHONE,
           quote_subtotal: finalQuoteSubtotal,
           final_amount: realTotalPaid,
           gross_paid_amount: realTotalPaid,
