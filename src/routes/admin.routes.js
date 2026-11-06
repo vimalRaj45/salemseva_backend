@@ -585,6 +585,8 @@ async function adminRoutes(fastify, options) {
           b.final_amount,
           b.visit_fee,
           b.quote_subtotal,
+          b.advance_amount_paid,
+          b.coupon_discount,
           b.booking_type,
           b.scheduled_slot,
           b.cancelled_at,
@@ -681,31 +683,46 @@ async function adminRoutes(fastify, options) {
           gross = isCompleted && quoteSubtotal > 0 ? quoteSubtotal : visitFee;
         }
 
-        // Customer cutoff calculations
-        const customerPlatformCut = gross > 0 ? parseFloat(((gross * customerFeePercent) / 100).toFixed(2)) : 0.00;
-        const gatewayFee = gross > 0 ? parseFloat(((gross * gatewayFeePercent) / 100).toFixed(2)) : 0.00;
-
-        // Technician cutoff & payout calculations
+        // Customer and Technician cutoff calculations via Central Dual-Commission Engine
+        let customerPlatformCut = 0.00;
+        let gatewayFee = 0.00;
         let techCommissionCut = 0.00;
         let techPayout = 0.00;
-        if (isCompleted && gross > 0) {
-          techCommissionCut = parseFloat(r.payment_platform_commission) || parseFloat(((gross * platformCommRate)).toFixed(2));
-          techPayout = parseFloat(r.payment_tech_payout) || parseFloat((gross - techCommissionCut).toFixed(2));
+        let platformCut = 0.00;
+
+        const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
+        const advanceAmount = parseFloat(r.advance_amount_paid !== null && r.advance_amount_paid !== undefined
+          ? r.advance_amount_paid
+          : Math.max(0, parseFloat(r.visit_fee || 99) - parseFloat(r.coupon_discount || 0)));
+
+        if (isCompleted && quoteSubtotal > 0) {
+          const inv = calculateDualCommissionInvoice({
+            totalJobAmount: quoteSubtotal,
+            actualAdvancePaid: advanceAmount,
+            customerFeePercent,
+            gatewayFeePercent,
+            partnerCommPercent,
+            paymentMethod: r.payment_method || 'online'
+          });
+
+          customerPlatformCut = inv.customerPlatformFee;
+          gatewayFee = inv.paymentGatewayFee;
+          techCommissionCut = inv.partnerCommissionAmount;
+          techPayout = parseFloat(r.payment_tech_payout) || inv.partnerDirectRouteTransfer;
+          platformCut = inv.platformTotalRetained;
         } else if (gross > 0 && !isCancelled) {
+          customerPlatformCut = parseFloat(((gross * customerFeePercent) / 100).toFixed(2));
+          gatewayFee = parseFloat(((gross * gatewayFeePercent) / 100).toFixed(2));
           techCommissionCut = parseFloat(((gross * platformCommRate)).toFixed(2));
           techPayout = parseFloat((gross - techCommissionCut).toFixed(2));
-        } else if (isCancelled && r.technician_name && r.technician_name !== 'None (Pre-Dispatch)') {
-          techPayout = gross; // Travel fuel compensation if dispatched
-        }
-
-        // Platform Commission / Retained fees
-        let platformCut = 0;
-        if (isCompleted && gross > 0) {
           platformCut = parseFloat((customerPlatformCut + techCommissionCut).toFixed(2));
-        } else if (isCancelled && r.refund_platform_fee) {
-          platformCut = parseFloat(r.refund_platform_fee);
-        } else if (gross > 0) {
-          platformCut = parseFloat((customerPlatformCut + techCommissionCut).toFixed(2));
+        } else if (isCancelled) {
+          if (r.technician_name && r.technician_name !== 'None (Pre-Dispatch)') {
+            techPayout = gross; // Travel fuel compensation if dispatched
+          }
+          if (r.refund_platform_fee) {
+            platformCut = parseFloat(r.refund_platform_fee);
+          }
         }
 
         // Customer Refund & Gateway Fee Retention

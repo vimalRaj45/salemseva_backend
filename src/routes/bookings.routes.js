@@ -1067,18 +1067,28 @@ async function bookingsRoutes(fastify, options) {
           ? parseFloat(((p1Row ? part1PaidAmt : 0) + (p2Row ? part2PaidAmt : 0)).toFixed(2))
           : (isCompleted ? (finalQuoteSubtotal > 0 ? finalQuoteSubtotal : visitFee) : (isPaidStage ? visitFee : 0));
 
-        // Part 2 Itemized Deductions & Breakdown
+        // Part 2 Itemized Deductions & Breakdown via Central Dual-Commission Engine
         const feeSettings = await getLiveFeeSettings();
         const customerFeePercent = feeSettings.customerFeePercent ?? 2.0;
-        const gatewayFeePercent = feeSettings.gatewayFeePercent ?? 1.0;
+        const gatewayFeePercent = feeSettings.gatewayFeePercent ?? 0.0;
+        const partnerCommPercent = feeSettings.partnerCommPercent ?? 7.0;
 
         const approvedLaborQuote = finalQuoteSubtotal > 0 ? finalQuoteSubtotal : part2PaidAmt;
-        const advanceDeductedFromQuote = (p1Row && p2Row && (part1PaidAmt + approvedLaborQuote > realTotalPaid)) 
-          ? Math.min(approvedLaborQuote, part1PaidAmt) 
-          : 0.00;
-        const netLaborBase = Math.max(0, approvedLaborQuote - advanceDeductedFromQuote);
-        const customerPlatformFeePart2 = p2Row ? parseFloat(((netLaborBase * customerFeePercent) / 100).toFixed(2)) : 0.00;
-        const gatewayFeePart2 = p2Row ? parseFloat((( (netLaborBase + customerPlatformFeePart2) * gatewayFeePercent) / 100).toFixed(2)) : 0.00;
+        const advPaidAtBooking = parseFloat(b.advance_amount_paid !== null && b.advance_amount_paid !== undefined ? b.advance_amount_paid : part1PaidAmt);
+
+        const dualInv = calculateDualCommissionInvoice({
+          totalJobAmount: approvedLaborQuote,
+          actualAdvancePaid: advPaidAtBooking,
+          customerFeePercent,
+          gatewayFeePercent,
+          partnerCommPercent,
+          paymentMethod: b.payment_method || 'online'
+        });
+
+        const advanceDeductedFromQuote = p1Row ? dualInv.upfrontFeePaid : 0.00;
+        const netLaborBase = dualInv.remainingWorkAmount;
+        const customerPlatformFeePart2 = dualInv.customerPlatformFee;
+        const gatewayFeePart2 = dualInv.paymentGatewayFee;
 
         // Normalize payments list
         let payments = rawPayments.map(p => ({

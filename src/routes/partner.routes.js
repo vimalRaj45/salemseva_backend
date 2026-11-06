@@ -2,7 +2,7 @@ const { query } = require('../db/db');
 // Password hashing lives in one place so onboarding and sign-in agree on the format.
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
-const { getPartnerCommissionPercent, getLiveFeeSettings } = require('../services/commission.service');
+const { getPartnerCommissionPercent, getLiveFeeSettings, calculateDualCommissionInvoice } = require('../services/commission.service');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -1415,21 +1415,27 @@ async function partnerRoutes(fastify, options) {
       let historySql = `
         SELECT 
           b.id, b.customer_name, b.locality, b.service_address, b.created_at, b.status,
-          b.final_amount, b.visit_fee, b.quote_subtotal, b.is_urgent_dispatch,
+          b.final_amount, b.visit_fee, b.quote_subtotal, b.advance_amount_paid, b.coupon_discount, b.is_urgent_dispatch,
           s.name_en as service_name, s.name_ta as service_name_ta,
           r.rating as customer_rating, r.comment as customer_review,
-          p.status as payment_status, p.payout_utr, p.settled_at,
-          p.tech_payout_amount as payment_tech_payout,
-          p.platform_commission as payment_platform_commission,
-          p.amount_total as payment_amount_total,
+          p.payment_status, p.payout_utr, p.settled_at,
+          p.payment_tech_payout,
+          p.payment_platform_commission,
+          p.payment_amount_total,
           t.upi_vpa as tech_upi_vpa
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN reviews r ON b.id = r.booking_id
         LEFT JOIN technicians t ON b.technician_id = t.id
         LEFT JOIN LATERAL (
-          SELECT status, payout_utr, settled_at, tech_payout_amount, platform_commission, amount_total 
-          FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+          SELECT 
+            MAX(status::text) as payment_status, 
+            MAX(payout_utr) as payout_utr, 
+            MAX(settled_at) as settled_at, 
+            COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as payment_tech_payout, 
+            COALESCE(SUM(platform_commission) FILTER (WHERE status != 'failed'), 0) as payment_platform_commission, 
+            COALESCE(SUM(amount_total) FILTER (WHERE status != 'failed'), 0) as payment_amount_total 
+          FROM payments WHERE booking_id = b.id
         ) p ON true
         WHERE b.technician_id = $1
           AND b.status != 'created'
@@ -1443,8 +1449,9 @@ async function partnerRoutes(fastify, options) {
       const platformRate = feeConfig.partnerCommPercent / 100.0;
 
       const jobs = res.rows.map(row => {
-        // Total job includes the advance booking fee + quoted work
-        const totalJob = parseFloat(row.quote_subtotal || row.final_amount || 150.00);
+        // Total job is the quoted diagnostic & repair work
+        const quoteSub = parseFloat(row.quote_subtotal) || 0;
+        const totalJob = quoteSub > 0 ? quoteSub : parseFloat(row.final_amount || 150.00);
 
         let techShare = 0;
         let platformCut = 0;
@@ -1452,8 +1459,20 @@ async function partnerRoutes(fastify, options) {
         if (row.payment_tech_payout !== null && row.payment_tech_payout !== undefined && parseFloat(row.payment_tech_payout) > 0) {
           techShare = parseFloat(row.payment_tech_payout);
           platformCut = parseFloat(row.payment_platform_commission || (totalJob - techShare).toFixed(2));
+        } else if (row.status === 'completed' && quoteSub > 0) {
+          const advPaid = parseFloat(row.advance_amount_paid !== null && row.advance_amount_paid !== undefined
+            ? row.advance_amount_paid
+            : Math.max(0, parseFloat(row.visit_fee || 99) - parseFloat(row.coupon_discount || 0)));
+          const inv = calculateDualCommissionInvoice({
+            totalJobAmount: quoteSub,
+            actualAdvancePaid: advPaid,
+            customerFeePercent: feeConfig.customerFeePercent,
+            gatewayFeePercent: feeConfig.gatewayFeePercent,
+            partnerCommPercent: feeConfig.partnerCommPercent
+          });
+          techShare = inv.partnerDirectRouteTransfer;
+          platformCut = inv.partnerCommissionAmount;
         } else {
-          // Booking fee is fully included in the partner's total job payout; deduct only partner commission %
           platformCut = parseFloat(((totalJob * feeConfig.partnerCommPercent) / 100).toFixed(2));
           techShare = parseFloat((totalJob - platformCut).toFixed(2));
         }

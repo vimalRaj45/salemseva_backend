@@ -858,8 +858,27 @@ async function paymentsRoutes(fastify, options) {
 
       // Total customer payment across advance booking fee + final step
       const totalCustomerPaid = isFinalSettlement ? (advancePaid + parsedAmount) : parsedAmount;
-      const techPayout = isFinalSettlement ? inv.partnerDirectRouteTransfer : parseFloat((parsedAmount * (100 - feeSettings.partnerCommPercent) / 100).toFixed(2));
-      const platformComm = isFinalSettlement ? inv.platformTotalRetained : parseFloat((parsedAmount * (feeSettings.partnerCommPercent / 100)).toFixed(2));
+
+      // Query prior non-failed payments for this booking to attribute incremental splits
+      const priorPaymentsRes = await query(`
+        SELECT 
+          COALESCE(SUM(tech_payout_amount), 0) as prior_tech_payout,
+          COALESCE(SUM(platform_commission), 0) as prior_platform_comm
+        FROM payments 
+        WHERE booking_id = $1 AND status != 'failed'
+      `, [bookingId]);
+      const priorTechPayout = parseFloat(priorPaymentsRes.rows[0]?.prior_tech_payout || 0);
+      const priorPlatformComm = parseFloat(priorPaymentsRes.rows[0]?.prior_platform_comm || 0);
+
+      // In final settlement, parsedAmount is the actual cash collected in this second transaction.
+      // Never store cumulative totalCustomerPaid into an individual transaction's amount_total column.
+      const txnAmount = parsedAmount;
+      const techPayout = isFinalSettlement
+        ? Math.max(0, parseFloat((inv.partnerDirectRouteTransfer - priorTechPayout).toFixed(2)))
+        : parseFloat((parsedAmount * (100 - feeSettings.partnerCommPercent) / 100).toFixed(2));
+      const platformComm = isFinalSettlement
+        ? Math.max(0, parseFloat((inv.platformTotalRetained - priorPlatformComm).toFixed(2)))
+        : parseFloat((parsedAmount * (feeSettings.partnerCommPercent / 100)).toFixed(2));
 
       const ledgerOrderId = `qr_ord_${bookingId}_${Date.now()}`;
       const ledgerPaymentId = `qr_pay_${cleanUtr}_${Date.now()}`;
@@ -882,7 +901,7 @@ async function paymentsRoutes(fastify, options) {
         bookingId,
         ledgerOrderId,
         ledgerPaymentId,
-        totalCustomerPaid,
+        txnAmount,
         techPayout,
         platformComm,
         cleanUtr,
