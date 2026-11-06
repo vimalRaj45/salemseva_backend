@@ -766,6 +766,7 @@ async function adminRoutes(fastify, options) {
           customerPlatformFee: parseFloat(customerPlatformCut.toFixed(2)),
           customerFeePercent: customerFeePercent,
           gatewayFee: parseFloat(gatewayFee.toFixed(2)),
+          razorpayFee: parseFloat(gatewayFee.toFixed(2)),
           gatewayFeePercent: gatewayFeePercent,
           techCommissionCut: parseFloat(techCommissionCut.toFixed(2)),
           techCommissionPercent: partnerCommPercent,
