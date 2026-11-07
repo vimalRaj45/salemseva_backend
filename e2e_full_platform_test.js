@@ -21,12 +21,12 @@
  * Usage:
  *   node e2e_full_platform_test.js
  *   node e2e_full_platform_test.js --local
- *   node e2e_full_platform_test.js --url https://salemseva-backend.onrender.com
+ *   node e2e_full_platform_test.js --url https://Shazu One-backend.onrender.com
  * ============================================================================
  */
 
 const BASE_URL_OVERRIDE = process.argv.find(arg => arg.startsWith('--url='))?.split('=')[1]
-  || (process.argv.includes('--cloud') ? 'https://salemseva-backend.onrender.com' : 'http://localhost:8080');
+  || (process.argv.includes('--cloud') ? 'https://Shazu One-backend.onrender.com' : 'http://localhost:8080');
 
 // Visual ANSI styling helpers
 const COLORS = {

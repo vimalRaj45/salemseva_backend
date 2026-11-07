@@ -5,7 +5,7 @@ async function updateEmails() {
     try {
       console.log(`Attempt ${attempt}: updating admin_team emails...`);
       const res = await db.query(
-        "UPDATE admin_team SET email = REPLACE(email, '@salemseva.in', '@shazuone.in') WHERE email LIKE '%@salemseva.in'"
+        "UPDATE admin_team SET email = REPLACE(email, '@Shazu One.in', '@shazuone.in') WHERE email LIKE '%@Shazu One.in'"
       );
       console.log(`Updated rows: ${res.rowCount}`);
       const check = await db.query('SELECT name, role, email FROM admin_team');

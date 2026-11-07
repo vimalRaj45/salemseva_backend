@@ -42,7 +42,7 @@ function cleanHumanReply(text, ops) {
 
   // If text was entirely SQL or is now empty, return a friendly professional message
   if (cleaned.length < 15 || /SELECT\s+.*FROM/i.test(cleaned)) {
-    return `Your service request is active in our system. You can track live technician arrival and dispatch status directly on your SalemSeva tracking screen, or connect with our Salem Operations desk at ${ops.phone}.`;
+    return `Your service request is active in our system. You can track live technician arrival and dispatch status directly on your Shazu One tracking screen, or connect with our Salem Operations desk at ${ops.phone}.`;
   }
   return cleaned;
 }
@@ -167,7 +167,9 @@ async function fetchUserLiveContext({ role, userId, userPhone, userName }) {
   try {
     if (role === 'technician') {
       const tRes = await query(`
-        SELECT t.id, t.full_name, t.phone, t.trade, t.locality, t.rating_avg, t.is_online,
+        SELECT t.id, t.full_name, t.phone, t.primary_trade as trade,
+               COALESCE(t.assigned_localities[1], 'Salem') as locality,
+               t.rating_avg, t.is_online,
                b.id as active_booking_id, b.status as active_booking_status, b.locality as job_locality,
                b.service_address as job_address, b.scheduled_slot as job_slot,
                b.customer_name, b.customer_phone
@@ -183,8 +185,8 @@ async function fetchUserLiveContext({ role, userId, userPhone, userName }) {
       // Customer: fetch last 3 bookings
       const bRes = await query(`
         SELECT b.id, b.status, b.locality, b.service_address, b.scheduled_slot,
-               b.visit_fee, b.advance_amount_paid, b.final_total_amount, b.created_at,
-               s.name as service_name, s.category as service_category,
+               b.visit_fee, b.advance_amount_paid, b.final_amount, b.created_at,
+               COALESCE(s.name_en, s.category, 'Home Service') as service_name, s.category as service_category,
                t.full_name as tech_name, t.phone as tech_phone, t.rating_avg as tech_rating
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id

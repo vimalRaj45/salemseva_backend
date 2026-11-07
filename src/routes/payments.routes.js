@@ -224,7 +224,7 @@ async function paymentsRoutes(fastify, options) {
 
         if (bookingId) {
           const parsedAmount = (parseFloat(amountPaise) || 9900) / 100;
-          
+
           // Record the escrow deposit against the columns that actually exist. The previous
           // statement named transaction_id and a status label that is not in the payment_status
           // enum, and the error was swallowed, so no payment was ever recorded here.
@@ -260,7 +260,7 @@ async function paymentsRoutes(fastify, options) {
           await query(`
             INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
             VALUES ($1, 'WEBHOOK_PAYMENT_CAPTURED', $2, 'razorpay', $3)
-          `, [bookingId, paymentId || 'rzp_webhook', JSON.stringify({ amount: parsedAmount, orderId, event })]).catch(() => {});
+          `, [bookingId, paymentId || 'rzp_webhook', JSON.stringify({ amount: parsedAmount, orderId, event })]).catch(() => { });
         }
       }
 
@@ -533,7 +533,7 @@ async function paymentsRoutes(fastify, options) {
           amount: invoice.platformTotalRetained
         },
         pgFee: invoice.paymentGatewayFee,
-        settlementAccount: 'acc_SalemSeva_Main'
+        settlementAccount: 'acc_Shazu One_Main'
       }
     };
   });
@@ -760,9 +760,9 @@ async function paymentsRoutes(fastify, options) {
       console.log('[BACKEND /payments/qr-intent] Env UPI ID:', vpa, '| Env Merchant Name:', merchantName);
 
       if (!vpa) {
-        return reply.status(500).send({ 
-          success: false, 
-          error: 'Business UPI ID is not configured. Please set BUSINESS_UPI_ID or UPI_ID in the backend .env file.' 
+        return reply.status(500).send({
+          success: false,
+          error: 'Business UPI ID is not configured. Please set BUSINESS_UPI_ID or UPI_ID in the backend .env file.'
         });
       }
 
@@ -925,8 +925,8 @@ async function paymentsRoutes(fastify, options) {
       const nextBookingStatus = isFinalSettlement
         ? 'completed'
         : (booking.status === 'created'
-            ? (booking.technician_id ? 'accepted' : 'matching')
-            : booking.status);
+          ? (booking.technician_id ? 'accepted' : 'matching')
+          : booking.status);
 
       if (isFinalSettlement) {
         await query(`
@@ -1023,7 +1023,7 @@ async function paymentsRoutes(fastify, options) {
             status: 'pending_admin_verification'
           })
         ]);
-      } catch (aErr) {}
+      } catch (aErr) { }
 
       return {
         success: true,
@@ -1145,7 +1145,7 @@ async function paymentsRoutes(fastify, options) {
           verifiedBy,
           JSON.stringify({ paymentId: payment.id, customerUtr: payment.customer_utr, amount: payment.amount_total, adminNotes })
         ]);
-      } catch (aErr) {}
+      } catch (aErr) { }
 
       return {
         success: true,
@@ -1189,7 +1189,7 @@ async function paymentsRoutes(fastify, options) {
           verifiedBy,
           JSON.stringify({ paymentId: payment.id, rejectionReason })
         ]);
-      } catch (aErr) {}
+      } catch (aErr) { }
 
       return {
         success: true,

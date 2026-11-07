@@ -4,7 +4,7 @@ const { runMistralChat } = require('./src/services/cloudflare_ai.service');
 
 async function testAiSystem() {
   console.log('====================================================');
-  console.log('🤖 SalemSeva AI Support System Verification Test');
+  console.log('🤖 Shazu One AI Support System Verification Test');
   console.log('====================================================\n');
 
   // Test 1: Direct Cloudflare Workers AI LLM (Mistral 7B)
@@ -12,7 +12,7 @@ async function testAiSystem() {
   try {
     const mistralRes = await runMistralChat({
       messages: [
-        { role: 'system', content: 'You are SalemSeva AI assistant in Salem, Tamil Nadu. Reply in 1 brief sentence.' },
+        { role: 'system', content: 'You are Shazu One AI assistant in Salem, Tamil Nadu. Reply in 1 brief sentence.' },
         { role: 'user', content: 'Hello, what services do you provide in Salem?' }
       ],
       maxTokens: 100
@@ -58,7 +58,7 @@ async function testAiSystem() {
 
   // Test 4: Live Render Endpoint Health Check
   console.log('👉 [Test 4] Checking Live Render Production Endpoint...');
-  const remoteUrl = 'https://salemseva-backend.onrender.com/api/v1/support/ai-chat';
+  const remoteUrl = 'https://Shazu One-backend.onrender.com/api/v1/support/ai-chat';
   try {
     const fetch = globalThis.fetch;
     const res = await fetch(remoteUrl, {

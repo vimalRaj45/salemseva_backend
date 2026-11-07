@@ -25,16 +25,11 @@ async function supportAgentRoutes(fastify, options) {
         userName = 'Customer'
       } = req.body || {};
 
-      // Security Gate: Enforce that only logged-in users can use Ask AI
+      // Friendly User Identification (logged in or guest inquiry)
       const isGuest = !userId || userId === 'guest' || userId === 'null' || userId === 'undefined';
-      if (isGuest && !userPhone) {
-        return reply.status(401).send({
-          success: false,
-          requireLogin: true,
-          reply: 'Please sign in to your SalemSeva account to chat with Ask AI and track your bookings.',
-          opsContact: getSalemOpsContact()
-        });
-      }
+      const effectiveUserName = (userName && userName.toLowerCase() !== 'customer')
+        ? userName
+        : (isGuest ? 'there' : 'Customer');
 
       let effectiveQuery = String(textQuery || '').trim();
 
@@ -43,7 +38,7 @@ async function supportAgentRoutes(fastify, options) {
         try {
           const rawBase64 = audioBase64.replace(/^data:audio\/[a-z0-9]+;base64,/, '');
           const audioBuffer = Buffer.from(rawBase64, 'base64');
-          
+
           const sttResult = await transcribeAudioWithWhisper(audioBuffer);
 
           if (!sttResult.success) {
@@ -81,7 +76,7 @@ async function supportAgentRoutes(fastify, options) {
         role: role === 'technician' ? 'technician' : 'customer',
         userId: String(userId || 'guest'),
         userPhone: String(userPhone || ''),
-        userName: String(userName || 'Customer')
+        userName: String(effectiveUserName || 'there')
       });
 
       return {
