@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const { runMistralChat } = require('./cloudflare_ai.service');
+const { getLiveFeeSettings } = require('./commission.service');
 
 function getSalemOpsContact() {
   return {
@@ -171,6 +172,111 @@ async function handleSupportQuery({
       success: true,
       reply: `Our Salem Operations Support Team is available to assist you directly. You can call or message our hotline anytime between ${ops.hours}.`,
       escalateToOps: true,
+      opsContact: ops
+    };
+  }
+
+  // 1.1 SMART DIRECT INTENT: Technician Location & Booking Status
+  const isTechTrackingIntent = /(where.*(tech|plumber|electrician|mechanic|service)|who.*(tech|plumber|electrician|assigned)|tech.*(status|location|contact|phone|number|arrived|reach|coming)|status.*(booking|service|order)|track.*(booking|service|tech)|when.*(reach|arrive|coming))/i.test(trimmedQuery);
+  if (isTechTrackingIntent) {
+    try {
+      const cleanPhone = (userPhone || '').replace(/[^0-9]/g, '').slice(-10);
+      const bRes = await query(`
+        SELECT b.id, b.status, b.locality, b.service_address, b.scheduled_slot,
+               b.visit_fee, b.advance_amount_paid, b.created_at,
+               t.full_name as tech_name, t.phone as tech_phone, t.rating_avg as tech_rating
+        FROM bookings b
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE ((b.customer_id IS NOT NULL AND b.customer_id::text = $1) OR (length($2) = 10 AND b.customer_phone LIKE '%' || $2))
+        ORDER BY b.created_at DESC
+        LIMIT 1
+      `, [userId, cleanPhone]);
+
+      if (bRes.rows.length > 0) {
+        const b = bRes.rows[0];
+        let techMsg = '';
+        const techName = b.tech_name || 'Assigned Technician';
+        const techPhone = b.tech_phone ? `(${b.tech_phone})` : '';
+
+        if (b.status === 'en_route') {
+          techMsg = `Your technician ${techName} ${techPhone} is currently EN ROUTE to your address at ${b.service_address || b.locality || 'Salem'}. Estimated arrival is prompt for your slot (${b.scheduled_slot || 'Today'}). You can reach them directly at ${b.tech_phone || ops.phone}.`;
+        } else if (b.status === 'arrived' || b.status === 'inspecting') {
+          techMsg = `Technician ${techName} ${techPhone} has arrived at your location in ${b.locality || 'Salem'} and is currently inspecting the service issue.`;
+        } else if (b.status === 'matching') {
+          techMsg = `Your booking #${b.id} is confirmed. Our Salem dispatch desk is currently matching the nearest verified technician in ${b.locality || 'Salem'}. You will receive an SMS and WhatsApp notification once assigned.`;
+        } else if (b.status === 'accepted') {
+          techMsg = `Technician ${techName} ${techPhone} has accepted your booking #${b.id} and is scheduled to visit during slot: ${b.scheduled_slot || 'scheduled time'}.`;
+        } else if (b.status === 'quote_presented') {
+          techMsg = `Technician ${techName} has presented the digital job estimate for booking #${b.id}. Please review and approve it on your screen to proceed with the repair.`;
+        } else if (b.status === 'quote_approved') {
+          techMsg = `Your quote for booking #${b.id} has been approved. Technician ${techName} is completing the requested service.`;
+        } else if (b.status === 'completed') {
+          techMsg = `Your recent booking #${b.id} in ${b.locality || 'Salem'} was successfully completed by technician ${techName}. If you need a new repair or inspection, you can book anytime!`;
+        } else {
+          techMsg = `Your booking #${b.id} status is "${b.status}". For any direct assistance, our Salem Operations desk is available at ${ops.phone}.`;
+        }
+
+        return {
+          success: true,
+          reply: techMsg,
+          booking: {
+            id: b.id,
+            status: b.status,
+            locality: b.locality,
+            technicianName: b.tech_name,
+            technicianPhone: b.tech_phone
+          },
+          escalateToOps: false,
+          opsContact: ops
+        };
+      } else {
+        return {
+          success: true,
+          reply: `I checked your account (${userName || 'Customer'}), but you don't have any active service bookings right now. You can book an electrician, plumber, or AC technician in Salem directly from our home screen!`,
+          escalateToOps: false,
+          opsContact: ops
+        };
+      }
+    } catch (trackErr) {
+      console.warn('[Support Agent] Direct tracking query failed:', trackErr.message);
+    }
+  }
+
+  // 1.2 SMART DIRECT INTENT: Pricing & Visit Fee Inquiry
+  const isPricingIntent = /(visit\s*fee|inspection\s*fee|cost|price|charges|how\s*much|rate|pricing)/i.test(trimmedQuery) && !/(cancel|refund|technician)/i.test(trimmedQuery);
+  if (isPricingIntent) {
+    try {
+      const feeSettings = await getLiveFeeSettings().catch(() => ({ inspectionVisitFee: 99.0 }));
+      const vFee = feeSettings.inspectionVisitFee || 99.0;
+      return {
+        success: true,
+        reply: `The doorstep inspection & diagnostic visit fee across Salem is ₹${vFee.toFixed(0)}. With coupon code SALEM50, you get ₹50 off (payable: ₹${Math.max(0, vFee - 50).toFixed(0)}). When you proceed with the repair work, your advance visit fee is credited directly towards the final service bill.`,
+        escalateToOps: false,
+        opsContact: ops
+      };
+    } catch (priceErr) {
+      console.warn('[Support Agent] Pricing intent failed:', priceErr.message);
+    }
+  }
+
+  // 1.3 SMART DIRECT INTENT: Cancellation Policy
+  const isCancelIntent = /(cancel|cancellation|refund|reschedule|money\s*back)/i.test(trimmedQuery) && !/(technician|where)/i.test(trimmedQuery);
+  if (isCancelIntent) {
+    return {
+      success: true,
+      reply: `SalemSeva Cancellation Policy: You can cancel or reschedule your service free of charge up to 24 hours prior to the scheduled appointment slot. Within 24 hours of service, cancellation is locked to protect technician dispatch. For emergency cancellations, please connect directly with our Salem Operations desk at ${ops.phone}.`,
+      escalateToOps: false,
+      opsContact: ops
+    };
+  }
+
+  // 1.4 SMART DIRECT INTENT: Working Hours & Coverage
+  const isHoursIntent = /(hours|timing|when\s*open|working\s*time|open\s*now|available|coverage|areas)/i.test(trimmedQuery) && !/(technician|where|status)/i.test(trimmedQuery);
+  if (isHoursIntent) {
+    return {
+      success: true,
+      reply: `SalemSeva operates across all 60 Corporation Wards of Salem (Fairlands, Hasthampatti, Suramangalam, Meyyanur, Ammapet, Gugai, and more) from ${ops.hours}. Both instant doorstep dispatches and advance scheduled slots are supported.`,
+      escalateToOps: false,
       opsContact: ops
     };
   }
