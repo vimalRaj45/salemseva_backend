@@ -121,7 +121,91 @@ function validateAndSanitizeQuery(rawSql, role, userId) {
 }
 
 /**
- * Builds schema prompt for Mistral 7B Text-to-SQL
+ * Formats a friendly, human-reassuring description of a booking status
+ */
+function describeBookingStatus(b) {
+  if (!b) return 'No active booking found.';
+  const techName = b.tech_name || 'Assigned Specialist';
+  const techPhone = b.tech_phone ? `(${b.tech_phone})` : '';
+  const serviceTitle = b.service_name || b.service_category || 'Home Service';
+  const slotText = b.scheduled_slot || 'scheduled appointment slot';
+  const localityText = b.locality || 'Salem';
+
+  switch (b.status) {
+    case 'created':
+    case 'matching':
+      return `Your booking #${b.id} for ${serviceTitle} in ${localityText} has been confirmed. Our Salem central dispatch desk is currently assigning the nearest verified specialist for your ${slotText}. You will receive a WhatsApp and SMS confirmation once your technician is dispatched.`;
+    case 'accepted':
+      return `Your booking #${b.id} is confirmed. Specialist ${techName} ${techPhone} has accepted your service request and is preparing for your appointment slot: ${slotText}.`;
+    case 'en_route':
+      return `Specialist ${techName} ${techPhone} is currently on the way to your doorstep at ${b.service_address || localityText}. Estimated arrival is prompt for your ${slotText}.`;
+    case 'arrived':
+    case 'inspecting':
+      return `Specialist ${techName} ${techPhone} has arrived at your address in ${localityText} and is currently inspecting your ${serviceTitle}.`;
+    case 'quote_presented':
+      return `Specialist ${techName} has completed the diagnostic inspection and prepared a digital job estimate for booking #${b.id}. Please review and approve it on your tracking screen to begin repairs.`;
+    case 'quote_approved':
+      return `Estimate approved. Specialist ${techName} is actively completing the requested repairs for booking #${b.id}.`;
+    case 'completed':
+      return `Your recent booking #${b.id} for ${serviceTitle} was successfully completed by ${techName}. The service was verified on site before completion OTP release.`;
+    case 'cancelled':
+      return `Booking #${b.id} has been cancelled. For any refund tracking or billing questions, our Salem Operations team is happy to assist.`;
+    default:
+      return `Your booking #${b.id} is active and being monitored by our Salem central dispatch team.`;
+  }
+}
+
+/**
+ * Fetches real-time deterministic database context for the given user
+ */
+async function fetchUserLiveContext({ role, userId, userPhone, userName }) {
+  const cleanPhone = (userPhone || '').replace(/[^0-9]/g, '').slice(-10);
+  let bookings = [];
+  let activeBooking = null;
+  let technicianProfile = null;
+
+  try {
+    if (role === 'technician') {
+      const tRes = await query(`
+        SELECT t.id, t.full_name, t.phone, t.trade, t.locality, t.rating_avg, t.is_online,
+               b.id as active_booking_id, b.status as active_booking_status, b.locality as job_locality,
+               b.service_address as job_address, b.scheduled_slot as job_slot,
+               b.customer_name, b.customer_phone
+        FROM technicians t
+        LEFT JOIN bookings b ON b.technician_id = t.id AND b.status IN ('accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved')
+        WHERE (t.id::text = $1 OR (length($2) = 10 AND t.phone LIKE '%' || $2))
+        LIMIT 1
+      `, [userId, cleanPhone]);
+      if (tRes.rows.length > 0) {
+        technicianProfile = tRes.rows[0];
+      }
+    } else {
+      // Customer: fetch last 3 bookings
+      const bRes = await query(`
+        SELECT b.id, b.status, b.locality, b.service_address, b.scheduled_slot,
+               b.visit_fee, b.advance_amount_paid, b.final_total_amount, b.created_at,
+               s.name as service_name, s.category as service_category,
+               t.full_name as tech_name, t.phone as tech_phone, t.rating_avg as tech_rating
+        FROM bookings b
+        LEFT JOIN services s ON b.service_id = s.id
+        LEFT JOIN technicians t ON b.technician_id = t.id
+        WHERE ((b.customer_id IS NOT NULL AND b.customer_id::text = $1)
+               OR (length($2) = 10 AND b.customer_phone LIKE '%' || $2))
+        ORDER BY b.created_at DESC
+        LIMIT 3
+      `, [userId, cleanPhone]);
+      bookings = bRes.rows || [];
+      activeBooking = bookings.find(b => !['completed', 'cancelled'].includes(b.status)) || bookings[0] || null;
+    }
+  } catch (err) {
+    console.warn('[Support Agent] Context fetch error:', err.message);
+  }
+
+  return { bookings, activeBooking, technicianProfile };
+}
+
+/**
+ * Builds schema prompt for Mistral 7B Text-to-SQL (preserved for API & tests)
  */
 function buildSchemaPrompt(role, userId, userPhone) {
   const ops = getSalemOpsContact();
@@ -196,192 +280,109 @@ async function handleSupportQuery({
     };
   }
 
-  // 1.1 SMART DIRECT INTENT: Technician Location & Booking Status
-  const isTechTrackingIntent = /(where.*(tech|plumber|electrician|mechanic|service)|who.*(tech|plumber|electrician|assigned)|tech.*(status|location|contact|phone|number|arrived|reach|coming)|status.*(booking|service|order)|track.*(booking|service|tech)|when.*(reach|arrive|coming))/i.test(trimmedQuery);
-  if (isTechTrackingIntent) {
-    try {
-      const cleanPhone = (userPhone || '').replace(/[^0-9]/g, '').slice(-10);
-      const bRes = await query(`
-        SELECT b.id, b.status, b.locality, b.service_address, b.scheduled_slot,
-               b.visit_fee, b.advance_amount_paid, b.created_at,
-               t.full_name as tech_name, t.phone as tech_phone, t.rating_avg as tech_rating
-        FROM bookings b
-        LEFT JOIN technicians t ON b.technician_id = t.id
-        WHERE ((b.customer_id IS NOT NULL AND b.customer_id::text = $1) OR (length($2) = 10 AND b.customer_phone LIKE '%' || $2))
-        ORDER BY b.created_at DESC
-        LIMIT 1
-      `, [userId, cleanPhone]);
+  // 2. Fetch deterministic real-time context from PostgreSQL
+  const { bookings, activeBooking, technicianProfile } = await fetchUserLiveContext({
+    role,
+    userId,
+    userPhone,
+    userName
+  });
 
-      if (bRes.rows.length > 0) {
-        const b = bRes.rows[0];
-        let techMsg = '';
-        const techName = b.tech_name || 'Assigned Technician';
-        const techPhone = b.tech_phone ? `(${b.tech_phone})` : '';
-
-        if (b.status === 'en_route') {
-          techMsg = `Your technician ${techName} ${techPhone} is currently EN ROUTE to your address at ${b.service_address || b.locality || 'Salem'}. Estimated arrival is prompt for your slot (${b.scheduled_slot || 'Today'}). You can reach them directly at ${b.tech_phone || ops.phone}.`;
-        } else if (b.status === 'arrived' || b.status === 'inspecting') {
-          techMsg = `Technician ${techName} ${techPhone} has arrived at your location in ${b.locality || 'Salem'} and is currently inspecting the service issue.`;
-        } else if (b.status === 'matching') {
-          techMsg = `Your booking #${b.id} is confirmed. Our Salem dispatch desk is currently matching the nearest verified technician in ${b.locality || 'Salem'}. You will receive an SMS and WhatsApp notification once assigned.`;
-        } else if (b.status === 'accepted') {
-          techMsg = `Technician ${techName} ${techPhone} has accepted your booking #${b.id} and is scheduled to visit during slot: ${b.scheduled_slot || 'scheduled time'}.`;
-        } else if (b.status === 'quote_presented') {
-          techMsg = `Technician ${techName} has presented the digital job estimate for booking #${b.id}. Please review and approve it on your screen to proceed with the repair.`;
-        } else if (b.status === 'quote_approved') {
-          techMsg = `Your quote for booking #${b.id} has been approved. Technician ${techName} is completing the requested service.`;
-        } else if (b.status === 'completed') {
-          techMsg = `Your recent booking #${b.id} in ${b.locality || 'Salem'} was successfully completed by technician ${techName}. If you need a new repair or inspection, you can book anytime!`;
-        } else {
-          techMsg = `Your booking #${b.id} status is "${b.status}". For any direct assistance, our Salem Operations desk is available at ${ops.phone}.`;
-        }
-
-        return {
-          success: true,
-          reply: techMsg,
-          booking: {
-            id: b.id,
-            status: b.status,
-            locality: b.locality,
-            technicianName: b.tech_name,
-            technicianPhone: b.tech_phone
-          },
-          escalateToOps: false,
-          opsContact: ops
-        };
+  // 3. Prepare Human-Readable Account Context for LLM
+  let contextDescription = '';
+  if (role === 'technician') {
+    if (technicianProfile) {
+      contextDescription = `Technician Name: ${technicianProfile.full_name || userName}, Trade: ${technicianProfile.trade || 'Specialist'}, Locality: ${technicianProfile.locality || 'Salem'}, Rating: ${technicianProfile.rating_avg || '5.0'}, Online: ${technicianProfile.is_online ? 'Yes' : 'No'}.\n`;
+      if (technicianProfile.active_booking_id) {
+        contextDescription += `Current Active Job Assignment: Booking #${technicianProfile.active_booking_id}, Status: ${technicianProfile.active_booking_status}, Customer: ${technicianProfile.customer_name || 'Customer'} (${technicianProfile.customer_phone || ''}), Address: ${technicianProfile.job_address || technicianProfile.job_locality || 'Salem'}, Slot: ${technicianProfile.job_slot || 'Today'}.`;
       } else {
-        return {
-          success: true,
-          reply: `I checked your account (${userName || 'Customer'}), but you don't have any active service bookings right now. You can book an electrician, plumber, or AC technician in Salem directly from our home screen!`,
-          escalateToOps: false,
-          opsContact: ops
-        };
-      }
-    } catch (trackErr) {
-      console.warn('[Support Agent] Direct tracking query failed:', trackErr.message);
-    }
-  }
-
-  // 1.2 SMART DIRECT INTENT: Pricing & Visit Fee Inquiry
-  const isPricingIntent = /(visit\s*fee|inspection\s*fee|cost|price|charges|how\s*much|rate|pricing)/i.test(trimmedQuery) && !/(cancel|refund|technician)/i.test(trimmedQuery);
-  if (isPricingIntent) {
-    try {
-      const feeSettings = await getLiveFeeSettings().catch(() => ({ inspectionVisitFee: 99.0 }));
-      const vFee = feeSettings.inspectionVisitFee || 99.0;
-      return {
-        success: true,
-        reply: `The doorstep inspection & diagnostic visit fee across Salem is ₹${vFee.toFixed(0)}. With coupon code SALEM50, you get ₹50 off (payable: ₹${Math.max(0, vFee - 50).toFixed(0)}). When you proceed with the repair work, your advance visit fee is credited directly towards the final service bill.`,
-        escalateToOps: false,
-        opsContact: ops
-      };
-    } catch (priceErr) {
-      console.warn('[Support Agent] Pricing intent failed:', priceErr.message);
-    }
-  }
-
-  // 1.3 SMART DIRECT INTENT: Cancellation Policy
-  const isCancelIntent = /(cancel|cancellation|refund|reschedule|money\s*back)/i.test(trimmedQuery) && !/(technician|where)/i.test(trimmedQuery);
-  if (isCancelIntent) {
-    return {
-      success: true,
-      reply: `SalemSeva Cancellation Policy: You can cancel or reschedule your service free of charge up to 24 hours prior to the scheduled appointment slot. Within 24 hours of service, cancellation is locked to protect technician dispatch. For emergency cancellations, please connect directly with our Salem Operations desk at ${ops.phone}.`,
-      escalateToOps: false,
-      opsContact: ops
-    };
-  }
-
-  // 1.4 SMART DIRECT INTENT: Working Hours & Coverage
-  const isHoursIntent = /(hours|timing|when\s*open|working\s*time|open\s*now|available|coverage|areas)/i.test(trimmedQuery) && !/(technician|where|status)/i.test(trimmedQuery);
-  if (isHoursIntent) {
-    return {
-      success: true,
-      reply: `SalemSeva operates across all 60 Corporation Wards of Salem (Fairlands, Hasthampatti, Suramangalam, Meyyanur, Ammapet, Gugai, and more) from ${ops.hours}. Both instant doorstep dispatches and advance scheduled slots are supported.`,
-      escalateToOps: false,
-      opsContact: ops
-    };
-  }
-
-  // 2. Generate SQL or policy response using Mistral 7B
-  const schemaSystemPrompt = buildSchemaPrompt(role, userId, userPhone);
-
-  const queryGenMessages = [
-    { role: 'system', content: schemaSystemPrompt },
-    {
-      role: 'user',
-      content: `The user asked: "${trimmedQuery}".
-If this question requires fetching database records, output ONLY a single valid SELECT query.
-If this question is a general greeting or platform policy inquiry (e.g. warranty, working hours, pricing), output a direct helpful answer without SQL.`
-    }
-  ];
-
-  const llmResult = await runMistralChat(queryGenMessages, { maxTokens: 256, temperature: 0.1 });
-
-  // If Cloudflare AI quota is exhausted or failed, gracefully fall back to Salem Ops
-  if (!llmResult.success) {
-    console.warn('[Support Agent] Cloudflare AI unavailable, falling back to Ops contact:', llmResult.error);
-    return {
-      success: true,
-      reply: 'Our AI support assistant is currently at high demand. Our dedicated Salem Operations team is standing by to help you directly right now.',
-      escalateToOps: true,
-      creditExhausted: Boolean(llmResult.creditExhausted),
-      opsContact: ops
-    };
-  }
-
-  const rawOutput = (llmResult.response || '').trim();
-
-  // 3. Check if LLM output is a SELECT query
-  const sqlMatch = rawOutput.match(/(?:SELECT\b[\s\S]+)/i);
-
-  if (sqlMatch) {
-    const candidateSql = sqlMatch[0].replace(/```sql|```/gi, '').trim();
-    const guardCheck = validateAndSanitizeQuery(candidateSql, role, userId);
-
-    if (guardCheck.isValid) {
-      try {
-        console.log(`[Support Agent] Executing safe scoped query: ${guardCheck.sanitizedSql}`);
-        const dbResult = await query(guardCheck.sanitizedSql);
-        const records = dbResult.rows || [];
-
-        // 4. Synthesize natural answer from records
-        const answerMessages = [
-          {
-            role: 'system',
-            content: `You are the Shazu One Support Assistant for ${role}s in Salem. Summarize the following database results clearly, warmly, and concisely for ${userName}. Do not show raw SQL.`
-          },
-          {
-            role: 'user',
-            content: `User query: "${trimmedQuery}".
-Database query results: ${JSON.stringify(records.slice(0, 5))}.
-Please provide a helpful, natural response to the user.`
-          }
-        ];
-
-        const answerResult = await runMistralChat(answerMessages, { maxTokens: 350, temperature: 0.3 });
-
-        if (answerResult.success && answerResult.response) {
-          const finalReply = cleanHumanReply(answerResult.response, ops);
-          return {
-            success: true,
-            reply: finalReply,
-            dataSnapshot: records.slice(0, 3),
-            escalateToOps: false,
-            opsContact: ops
-          };
-        }
-      } catch (dbErr) {
-        console.warn('[Support Agent] DB query execution failed:', dbErr.message);
+        contextDescription += `No active job assigned at this moment. You are ready to receive new dispatch requests in your trade.`;
       }
     } else {
-      console.warn('[Support Agent] SQL Guard rejected candidate query:', guardCheck.error);
+      contextDescription = `No registered technician profile found for this ID/phone.`;
+    }
+  } else {
+    // Customer
+    if (activeBooking) {
+      contextDescription = `Most Recent Booking Details:\n`;
+      contextDescription += `- Booking ID: #${activeBooking.id}\n`;
+      contextDescription += `- Service: ${activeBooking.service_name || activeBooking.service_category || 'Home Service'}\n`;
+      contextDescription += `- Locality: ${activeBooking.locality || 'Salem'}\n`;
+      contextDescription += `- Scheduled Slot: ${activeBooking.scheduled_slot || 'Confirmed Slot'}\n`;
+      contextDescription += `- Current Live Status: ${describeBookingStatus(activeBooking)}\n`;
+      if (activeBooking.tech_name) {
+        contextDescription += `- Assigned Specialist: ${activeBooking.tech_name} (Phone: ${activeBooking.tech_phone || 'Protected'})\n`;
+      } else {
+        contextDescription += `- Assigned Specialist: Currently matching nearest verified technician in ${activeBooking.locality || 'Salem'}\n`;
+      }
+      contextDescription += `- Visit Fee Paid: ₹${activeBooking.advance_amount_paid || activeBooking.visit_fee || 99}\n`;
+    } else {
+      contextDescription = `Customer ${userName} has no active or past bookings registered on this account.`;
     }
   }
 
-  // 5. Default natural reply or friendly fallback (NEVER LEAK RAW SQL)
-  const safeReply = cleanHumanReply(rawOutput, ops);
+  // 4. Construct direct, friendly conversational prompt for Mistral 7B
+  const systemPrompt = `You are "Ask AI", the warm, empathetic, and friendly customer support assistant for Shazu One in Salem, Tamil Nadu.
+You speak directly with customers and technicians like a helpful, polite human customer advocate.
+
+Current User: ${userName} (Persona: ${role}, Phone: ${userPhone || 'Registered Account'})
+
+Real-Time Account Context from Database:
+${contextDescription}
+
+Platform Guidelines & Policies:
+1. Cancellation: Free cancellation is allowed only at least 24 hours prior to the scheduled slot. Within 24 hours of service, cancellation is locked to protect technician schedules. Customers with urgent emergencies must contact Salem Operations (${ops.phone}).
+2. Warranty: No post-completion warranty is provided on workmanship or services. Customers must personally inspect and verify the repair before releasing the completion OTP to the technician. Any hardware spare parts carry manufacturer (OEM) warranties.
+3. Arrival Times: Technicians arrive promptly for the confirmed scheduled slot. Do NOT make unrealistic 15-25 minute rapid arrival promises.
+4. Technician Referral: Technician referral incentive is provided up to ₹100 per verified referral, subject to document verification and trade review (not a guaranteed flat ₹100).
+5. Salem Operations Hotline: ${ops.phone} (Available ${ops.hours}).
+
+CRITICAL INSTRUCTIONS:
+- Answer the user's question directly, warmly, and politely in 2 to 4 conversational sentences.
+- NEVER generate, explain, or mention SQL queries, SELECT commands, database tables, or programming code.
+- NEVER use raw database enums like 'status is "created"' or 'status is "matching"'. Use the human descriptions in the Real-Time Context.
+- If the user asks where their technician is or about their booking status, use the Real-Time Account Context above to provide a clear, reassuring answer.
+- If there are no bookings, warmly invite them to book an electrician, plumber, AC specialist, or appliance technician anytime.
+- Maintain a courteous, polite tone at all times.`;
+
+  const userPrompt = `User asks: "${trimmedQuery}". Please reply warmly and helpfully based on the context above.`;
+
+  const llmResult = await runMistralChat(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    { maxTokens: 250, temperature: 0.3 }
+  );
+
+  let finalReply = '';
+
+  if (llmResult.success && llmResult.response) {
+    // Clean any stray code or SQL mentions
+    finalReply = cleanHumanReply(llmResult.response, ops);
+  }
+
+  // If Cloudflare AI was unavailable or reply was too sparse, use the friendly deterministic fallback
+  if (!finalReply || finalReply.length < 20) {
+    if (activeBooking) {
+      finalReply = `Hello ${userName}! ${describeBookingStatus(activeBooking)} For any immediate assistance, our Salem Operations desk is available at ${ops.phone}.`;
+    } else if (technicianProfile) {
+      finalReply = `Hello ${technicianProfile.full_name || userName}! ${technicianProfile.active_booking_id ? `You have an active assignment #${technicianProfile.active_booking_id} in ${technicianProfile.job_locality || 'Salem'}.` : 'You currently have no active assignments and are ready for dispatch.'} For dispatcher support, contact ${ops.phone}.`;
+    } else {
+      finalReply = `Hello ${userName}! I checked your account, but you don't have any active service bookings right now. You can easily schedule an AC specialist, electrician, or plumber anytime from our home screen! If you need direct help, our Salem Operations desk is at ${ops.phone}.`;
+    }
+  }
+
   return {
     success: true,
-    reply: safeReply || `I found your service request. For any urgent changes or direct dispatcher assistance, our Salem Operations team is standing by at ${ops.phone}.`,
+    reply: finalReply,
+    booking: activeBooking ? {
+      id: activeBooking.id,
+      status: activeBooking.status,
+      locality: activeBooking.locality,
+      technicianName: activeBooking.tech_name,
+      technicianPhone: activeBooking.tech_phone
+    } : null,
     escalateToOps: false,
     opsContact: ops
   };
@@ -391,5 +392,6 @@ module.exports = {
   getSalemOpsContact,
   isHumanEscalationRequest,
   validateAndSanitizeQuery,
-  handleSupportQuery
+  handleSupportQuery,
+  describeBookingStatus
 };

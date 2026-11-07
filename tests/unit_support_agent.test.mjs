@@ -105,4 +105,29 @@ test('Unit Test: Human Escalation & Salem Ops Routing', async (t) => {
     assert.ok(result.opsContact.phone);
     assert.ok(result.reply.includes('Salem Operations Support Team'));
   });
+
+  await t.test('should translate raw database statuses into friendly reassuring language', async () => {
+    const { describeBookingStatus } = await import('../src/services/support_agent.service.js');
+    const createdStatus = describeBookingStatus({
+      id: 'SLM-70016',
+      status: 'created',
+      locality: 'Fairlands',
+      service_name: 'AC Master Service',
+      scheduled_slot: '10:00 AM - 12:00 PM'
+    });
+    assert.match(createdStatus, /confirmed/i);
+    assert.match(createdStatus, /assigning the nearest verified specialist/i);
+    assert.doesNotMatch(createdStatus, /status is "created"/i);
+
+    const enRouteStatus = describeBookingStatus({
+      id: 'SLM-70016',
+      status: 'en_route',
+      locality: 'Fairlands',
+      service_name: 'AC Master Service',
+      tech_name: 'K. Ramesh',
+      tech_phone: '+919443210002'
+    });
+    assert.match(enRouteStatus, /on the way to your doorstep/i);
+    assert.match(enRouteStatus, /K\. Ramesh/i);
+  });
 });
