@@ -1,11 +1,11 @@
-﻿const { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 
 // Clean environment variables (remove any extraneous quotes)
 const clean = (val) => (val ? val.replace(/^["']|["']$/g, '').trim() : '');
 
 const endpoint = clean(process.env.AWS_ENDPOINT_URL_S3) || 'https://br-twilight-dawn-b5thktcp.storage.c-7.us-east-2.aws.neon.tech';
-const accessKeyId = clean(process.env.AWS_ACCESS_KEY_ID) || 'nak_live_760937633e7a4e9b94a222c79dbe6ab1';
-const secretAccessKey = clean(process.env.AWS_SECRET_ACCESS_KEY) || 'nsk_live_35a2b7a09dbee48b3fa7e0e59fcec698febd310ab599cd43b7467596332e091c';
+const accessKeyId = clean(process.env.AWS_ACCESS_KEY_ID);
+const secretAccessKey = clean(process.env.AWS_SECRET_ACCESS_KEY);
 const region = clean(process.env.AWS_REGION) || 'us-east-2';
 const bucketName = clean(process.env.S3_BUCKET_NAME) || 'Shazu One-uploads';
 

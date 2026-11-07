@@ -8,6 +8,14 @@ const { query } = require('../db/db');
  * - PARTNER_COMMISSION_PERCENT (Default: 5.0%)
  */
 
+function getEnvUpiId() {
+  return (process.env.BUSINESS_UPI_ID || process.env.UPI_ID || '').trim();
+}
+
+function getEnvMerchantName() {
+  return (process.env.BUSINESS_MERCHANT_NAME || process.env.MERCHANT_NAME || '').trim();
+}
+
 // Real-time synchronization cache: mirrors the active platform_settings table row in PostgreSQL
 let latestSettings = {
   customerFeePercent: 2.0,
@@ -16,10 +24,18 @@ let latestSettings = {
   inspectionVisitFee: 99.0,
   partnerReferralIncentive: 100.0,
   refereeDiscountAmount: 50.0,
-  businessUpiId: 'shazuone.pay@icici',
-  businessMerchantName: 'Shazu One Home Services',
-  paymentGatewayMode: 'DYNAMIC_QR'
+  businessUpiId: getEnvUpiId(),
+  businessMerchantName: getEnvMerchantName(),
+  paymentGatewayMode: process.env.PAYMENT_GATEWAY_MODE || 'DYNAMIC_QR'
 };
+
+function getBusinessUpiId() {
+  return getEnvUpiId() || latestSettings.businessUpiId || '';
+}
+
+function getBusinessMerchantName() {
+  return getEnvMerchantName() || latestSettings.businessMerchantName || '';
+}
 
 function getCustomerPlatformFeePercent() {
   return latestSettings.customerFeePercent;
@@ -89,9 +105,9 @@ async function getLiveFeeSettings() {
         inspectionVisitFee: visitFee,
         partnerReferralIncentive: refIncentive,
         refereeDiscountAmount: refDiscount,
-        businessUpiId: row.business_upi_id || 'shazuone.pay@icici',
-        businessMerchantName: row.business_merchant_name || 'Shazu One Home Services',
-        paymentGatewayMode: row.payment_gateway_mode || 'DYNAMIC_QR'
+        businessUpiId: getEnvUpiId() || row.business_upi_id || '',
+        businessMerchantName: getEnvMerchantName() || row.business_merchant_name || '',
+        paymentGatewayMode: row.payment_gateway_mode || process.env.PAYMENT_GATEWAY_MODE || 'DYNAMIC_QR'
       };
       return latestSettings;
     }
@@ -204,6 +220,10 @@ function calculateCommissionSplit(totalAmount, percent = getPartnerCommissionPer
 }
 
 module.exports = {
+  getEnvUpiId,
+  getEnvMerchantName,
+  getBusinessUpiId,
+  getBusinessMerchantName,
   getCustomerPlatformFeePercent,
   getPaymentGatewayFeePercent,
   getPartnerCommissionPercent,

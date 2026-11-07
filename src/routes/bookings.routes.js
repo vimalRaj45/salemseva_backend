@@ -13,6 +13,8 @@ const {
   HELPDESK_PHONE,
   sanitizePhoneForDialer
 } = require('../utils/privacy');
+const { checkCancellationWindow } = require('../services/cancellation_policy.service');
+const { getSalemOpsContact } = require('../services/support_agent.service');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -1758,6 +1760,28 @@ async function bookingsRoutes(fastify, options) {
 
       if (booking.status === 'completed') {
         return reply.status(400).send({ success: false, error: 'Completed bookings cannot be cancelled' });
+      }
+
+      // 24-Hour Pre-Service Cancellation Policy Enforcement
+      const isOpsOverride = cancelledBy === 'admin' || cancelledBy === 'ops';
+      if (!isOpsOverride) {
+        const { isCancellationAllowed, hoursRemaining, policyReason } = checkCancellationWindow(
+          booking.scheduled_slot,
+          booking.created_at,
+          Boolean(booking.is_urgent_dispatch)
+        );
+
+        if (!isCancellationAllowed) {
+          const ops = getSalemOpsContact();
+          return reply.status(400).send({
+            success: false,
+            code: 'CANCELLATION_WINDOW_EXPIRED',
+            error: 'Cancellations are only available at least 24 hours prior to the scheduled service appointment. Since your service is scheduled within the next 24 hours, our specialist technician and tools are already dispatched. For emergency assistance or rescheduling, please contact Salem Operations Desk.',
+            policyReason,
+            hoursRemaining: Math.max(0, hoursRemaining),
+            opsContact: ops
+          });
+        }
       }
 
       if (booking.status === 'cancelled') {

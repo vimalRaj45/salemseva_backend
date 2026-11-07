@@ -19,8 +19,13 @@ const {
   calculateDualCommissionInvoice,
   getCustomerPlatformFeePercent,
   getPaymentGatewayFeePercent,
-  getPartnerCommissionPercent
+  getPartnerCommissionPercent,
+  getEnvUpiId,
+  getEnvMerchantName,
+  getBusinessUpiId,
+  getBusinessMerchantName
 } = require('../src/services/commission.service.js');
+const { checkCancellationWindow } = require('../src/services/cancellation_policy.service.js');
 
 // --- Pure Business Logic Implementations Under Test ---
 
@@ -253,6 +258,45 @@ describe('Unit Test: Cancellation & Refund Policy Rules', () => {
     assert.equal(res.refundAmount, 0);
     assert.equal(res.cancellationCharge, 500);
     assert.equal(res.policy, 'NO_REFUND_POST_COMPLETION');
+  });
+});
+
+describe('Unit Test: 24-Hour Pre-Service Cancellation Cutoff Policy', () => {
+  it('should permit cancellation when appointment is 48 hours in the future', () => {
+    const fixedNow = new Date('2026-11-08T10:00:00.000Z');
+    const futureSlot = '2026-11-10 10:00 AM - 12:00 PM';
+    const result = checkCancellationWindow(futureSlot, fixedNow, false, fixedNow);
+
+    assert.equal(result.isCancellationAllowed, true);
+    assert.ok(result.hoursRemaining >= 24, `Expected hours >= 24, got ${result.hoursRemaining}`);
+    assert.ok(result.policyReason.includes('Cancellation is available'));
+  });
+
+  it('should strictly block cancellation when appointment is within 12 hours', () => {
+    const fixedNow = new Date('2026-11-08T10:00:00.000Z');
+    const soonSlot = '2026-11-08 06:00 PM - 08:00 PM'; // 8 hours away
+    const result = checkCancellationWindow(soonSlot, fixedNow, false, fixedNow);
+
+    assert.equal(result.isCancellationAllowed, false);
+    assert.ok(result.hoursRemaining < 24);
+    assert.ok(result.policyReason.includes('must be made at least 24 hours prior to service'));
+  });
+
+  it('should block cancellation for emergency and immediate dispatch bookings', () => {
+    const fixedNow = new Date('2026-11-08T10:00:00.000Z');
+    const result = checkCancellationWindow('Immediate / Emergency Dispatch', fixedNow, true, fixedNow);
+
+    assert.equal(result.isCancellationAllowed, false);
+    assert.ok(result.policyReason.includes('Emergency and immediate dispatch bookings'));
+  });
+
+  it('should block cancellation when scheduled for tomorrow morning if less than 24 hours remain', () => {
+    const fixedNow = new Date('2026-11-08T15:00:00.000Z'); // 3:00 PM today
+    const tomorrowMorningSlot = 'Tomorrow, 10:00 AM'; // 19 hours away
+    const result = checkCancellationWindow(tomorrowMorningSlot, fixedNow, false, fixedNow);
+
+    assert.equal(result.isCancellationAllowed, false);
+    assert.ok(result.hoursRemaining < 24);
   });
 });
 
@@ -497,5 +541,72 @@ describe('Unit Test: Customer Service Review & Ops Escalation Policy', () => {
     const review1 = evaluateReview(1, ['incomplete', 'behavior'], 'Issue persists and technician rude');
     assert.equal(review1.isBelow3Star, true);
     assert.equal(review1.escalateToOps, true);
+  });
+});
+
+describe('Unit Test: Environment-Driven UPI ID & Merchant Name (No Hardcoding)', () => {
+  const originalBusinessUpi = process.env.BUSINESS_UPI_ID;
+  const originalMerchant = process.env.BUSINESS_MERCHANT_NAME;
+  const originalUpiId = process.env.UPI_ID;
+  const originalMerchantName = process.env.MERCHANT_NAME;
+
+  it('should dynamically read business UPI ID from BUSINESS_UPI_ID env var', () => {
+    process.env.BUSINESS_UPI_ID = 'test.custom@hdfcbank';
+    delete process.env.UPI_ID;
+    assert.equal(getEnvUpiId(), 'test.custom@hdfcbank');
+    assert.equal(getBusinessUpiId(), 'test.custom@hdfcbank');
+  });
+
+  it('should support UPI_ID alias when BUSINESS_UPI_ID is omitted', () => {
+    delete process.env.BUSINESS_UPI_ID;
+    process.env.UPI_ID = 'salem.alias@sbi';
+    assert.equal(getEnvUpiId(), 'salem.alias@sbi');
+    assert.equal(getBusinessUpiId(), 'salem.alias@sbi');
+  });
+
+  it('should dynamically read merchant name from BUSINESS_MERCHANT_NAME env var', () => {
+    process.env.BUSINESS_MERCHANT_NAME = 'Custom Salem Services';
+    delete process.env.MERCHANT_NAME;
+    assert.equal(getEnvMerchantName(), 'Custom Salem Services');
+    assert.equal(getBusinessMerchantName(), 'Custom Salem Services');
+  });
+
+  it('should support MERCHANT_NAME alias when BUSINESS_MERCHANT_NAME is omitted', () => {
+    delete process.env.BUSINESS_MERCHANT_NAME;
+    process.env.MERCHANT_NAME = 'Salem Enterprise Hub';
+    assert.equal(getEnvMerchantName(), 'Salem Enterprise Hub');
+    assert.equal(getBusinessMerchantName(), 'Salem Enterprise Hub');
+  });
+
+  it('should generate valid UPI Intent string with custom environment variables', () => {
+    process.env.BUSINESS_UPI_ID = 'merchant.pay@okaxis';
+    process.env.BUSINESS_MERCHANT_NAME = 'Salem Direct Services';
+
+    const vpa = getEnvUpiId();
+    const name = getEnvMerchantName();
+    const amount = '149.00';
+    const txnRef = 'SLM-999-ADV';
+    const txnNote = `${name} SLM-999`;
+
+    const uri = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent(name)}&am=${amount}&tr=${encodeURIComponent(txnRef)}&tn=${encodeURIComponent(txnNote)}&cu=INR`;
+
+    assert.ok(uri.includes('pa=merchant.pay%40okaxis'));
+    assert.ok(uri.includes('pn=Salem%20Direct%20Services'));
+    assert.ok(uri.includes('am=149.00'));
+  });
+
+  // Restore environment variables
+  it('should restore original environment variables after test', () => {
+    if (originalBusinessUpi !== undefined) process.env.BUSINESS_UPI_ID = originalBusinessUpi;
+    else delete process.env.BUSINESS_UPI_ID;
+
+    if (originalMerchant !== undefined) process.env.BUSINESS_MERCHANT_NAME = originalMerchant;
+    else delete process.env.BUSINESS_MERCHANT_NAME;
+
+    if (originalUpiId !== undefined) process.env.UPI_ID = originalUpiId;
+    else delete process.env.UPI_ID;
+
+    if (originalMerchantName !== undefined) process.env.MERCHANT_NAME = originalMerchantName;
+    else delete process.env.MERCHANT_NAME;
   });
 });

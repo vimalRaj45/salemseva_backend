@@ -3,6 +3,8 @@ const { query } = require('../db/db');
 // The same length-safe comparison the password service uses, so there is one implementation.
 const { constantTimeEqual: secureEqual } = require('../services/password.service');
 const {
+  getEnvUpiId,
+  getEnvMerchantName,
   getCustomerPlatformFeePercent,
   getPaymentGatewayFeePercent,
   getPartnerCommissionPercent,
@@ -717,11 +719,14 @@ async function paymentsRoutes(fastify, options) {
         LIMIT 1
       `);
       const row = sRes.rows[0] || {};
+      const businessUpiId = getEnvUpiId() || row.business_upi_id || '';
+      const businessMerchantName = getEnvMerchantName() || row.business_merchant_name || '';
+      console.log('[BACKEND /payments/qr-config] Env UPI ID:', businessUpiId, '| Env Merchant Name:', businessMerchantName);
       return {
         success: true,
-        businessUpiId: row.business_upi_id || process.env.BUSINESS_UPI_ID || 'shazuone.pay@icici',
-        businessMerchantName: row.business_merchant_name || process.env.BUSINESS_MERCHANT_NAME || 'Shazu One Home Services',
-        paymentGatewayMode: row.payment_gateway_mode || 'DYNAMIC_QR',
+        businessUpiId,
+        businessMerchantName,
+        paymentGatewayMode: row.payment_gateway_mode || process.env.PAYMENT_GATEWAY_MODE || 'DYNAMIC_QR',
         platformFeePercent: parseFloat(row.customer_platform_fee_percent || 2.0),
         gatewayFeePercent: parseFloat(row.gateway_fee_percent || 2.0)
       };
@@ -729,9 +734,9 @@ async function paymentsRoutes(fastify, options) {
       fastify.log.error('QR Config fetch error:', err);
       return {
         success: true,
-        businessUpiId: 'shazuone.pay@icici',
-        businessMerchantName: 'Shazu One Home Services',
-        paymentGatewayMode: 'DYNAMIC_QR'
+        businessUpiId: getEnvUpiId(),
+        businessMerchantName: getEnvMerchantName(),
+        paymentGatewayMode: process.env.PAYMENT_GATEWAY_MODE || 'DYNAMIC_QR'
       };
     }
   });
@@ -750,14 +755,22 @@ async function paymentsRoutes(fastify, options) {
         WHERE id = 'reward_settings' 
         LIMIT 1
       `);
-      const vpa = sRes.rows[0]?.business_upi_id || process.env.BUSINESS_UPI_ID || 'shazuone.pay@icici';
-      const merchantName = sRes.rows[0]?.business_merchant_name || 'Shazu One Home Services';
+      const vpa = getEnvUpiId() || sRes.rows[0]?.business_upi_id || '';
+      const merchantName = getEnvMerchantName() || sRes.rows[0]?.business_merchant_name || '';
+      console.log('[BACKEND /payments/qr-intent] Env UPI ID:', vpa, '| Env Merchant Name:', merchantName);
+
+      if (!vpa) {
+        return reply.status(500).send({ 
+          success: false, 
+          error: 'Business UPI ID is not configured. Please set BUSINESS_UPI_ID or UPI_ID in the backend .env file.' 
+        });
+      }
 
       const cleanAmount = parseFloat(amount).toFixed(2);
       const bId = bookingId || `SLM-${Date.now()}`;
       const suffix = paymentType === 'FINAL_SETTLEMENT' ? 'FIN' : 'ADV';
       const txnRef = `${bId}-${suffix}`;
-      const txnNote = `Shazu One Order ${bId}`;
+      const txnNote = `${merchantName || 'Order'} ${bId}`;
 
       // Standard Indian UPI Intent URI
       const upiUri = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent(merchantName)}&am=${cleanAmount}&tr=${encodeURIComponent(txnRef)}&tn=${encodeURIComponent(txnNote)}&cu=INR`;

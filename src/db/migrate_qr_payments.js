@@ -20,19 +20,26 @@ async function migrateQrPayments() {
     console.log('Payments table columns and indexes verified successfully.');
 
     // 2. Update platform_settings table with business UPI VPA and gateway mode
+    const envUpi = (process.env.BUSINESS_UPI_ID || process.env.UPI_ID || '').trim();
+    const envMerchant = (process.env.BUSINESS_MERCHANT_NAME || process.env.MERCHANT_NAME || '').trim();
+
     await query(`
       ALTER TABLE platform_settings
-        ADD COLUMN IF NOT EXISTS business_upi_id VARCHAR(100) DEFAULT 'shazuone.pay@icici',
-        ADD COLUMN IF NOT EXISTS business_merchant_name VARCHAR(150) DEFAULT 'Shazu One Home Services',
+        ADD COLUMN IF NOT EXISTS business_upi_id VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS business_merchant_name VARCHAR(150),
         ADD COLUMN IF NOT EXISTS payment_gateway_mode VARCHAR(50) DEFAULT 'DYNAMIC_QR';
-
-      UPDATE platform_settings
-      SET 
-        business_upi_id = COALESCE(business_upi_id, 'shazuone.pay@icici'),
-        business_merchant_name = COALESCE(business_merchant_name, 'Shazu One Home Services'),
-        payment_gateway_mode = COALESCE(payment_gateway_mode, 'DYNAMIC_QR')
-      WHERE id = 'reward_settings';
     `);
+
+    if (envUpi || envMerchant) {
+      await query(`
+        UPDATE platform_settings
+        SET 
+          business_upi_id = COALESCE(NULLIF($1, ''), business_upi_id),
+          business_merchant_name = COALESCE(NULLIF($2, ''), business_merchant_name),
+          payment_gateway_mode = COALESCE(payment_gateway_mode, 'DYNAMIC_QR')
+        WHERE id = 'reward_settings';
+      `, [envUpi, envMerchant]);
+    }
     console.log('Platform settings updated with business UPI configuration.');
 
     const res = await query(`SELECT business_upi_id, business_merchant_name, payment_gateway_mode FROM platform_settings WHERE id = 'reward_settings'`);
