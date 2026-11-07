@@ -28,6 +28,26 @@ function isHumanEscalationRequest(queryText = '') {
 }
 
 /**
+ * Strips any leaked SQL queries or database code from ever being shown to customers
+ */
+function cleanHumanReply(text, ops) {
+  if (!text) return '';
+  // Strip code blocks with SQL or programming languages
+  let cleaned = text.replace(/```[\s\S]*?```/gi, '');
+  // Strip lines starting with SQL keywords
+  cleaned = cleaned.replace(/^\s*(?:SELECT|UPDATE|INSERT|DELETE|FROM|WHERE|JOIN|GROUP BY|ORDER BY|LIMIT|HAVING)\b.*$/gim, '');
+  // Strip references like "Here is the SQL query:", "Execute this query:", etc.
+  cleaned = cleaned.replace(/(?:here\s*(?:is|are)?\s*(?:the)?\s*(?:valid\s*)?(?:sql\s*)?quer(?:y|ies)|look\s*up\s*(?:the\s*status\s*of)?\s*(?:your\s*booking\s*with)?\s*(?:the\s*following)?|run\s*the\s*following\s*query)[^.]*[:.]?/gi, '');
+  cleaned = cleaned.replace(/\n{2,}/g, '\n\n').trim();
+
+  // If text was entirely SQL or is now empty, return a friendly professional message
+  if (cleaned.length < 15 || /SELECT\s+.*FROM/i.test(cleaned)) {
+    return `Your service request is active in our system. You can track live technician arrival and dispatch status directly on your SalemSeva tracking screen, or connect with our Salem Operations desk at ${ops.phone}.`;
+  }
+  return cleaned;
+}
+
+/**
  * Validates that an SQL query is strictly read-only SELECT and contains tenant boundaries
  * @param {string} rawSql
  * @param {'customer'|'technician'} role
@@ -340,9 +360,10 @@ Please provide a helpful, natural response to the user.`
         const answerResult = await runMistralChat(answerMessages, { maxTokens: 350, temperature: 0.3 });
 
         if (answerResult.success && answerResult.response) {
+          const finalReply = cleanHumanReply(answerResult.response, ops);
           return {
             success: true,
-            reply: answerResult.response.trim(),
+            reply: finalReply,
             dataSnapshot: records.slice(0, 3),
             escalateToOps: false,
             opsContact: ops
@@ -356,10 +377,11 @@ Please provide a helpful, natural response to the user.`
     }
   }
 
-  // 5. Default natural reply or friendly fallback
+  // 5. Default natural reply or friendly fallback (NEVER LEAK RAW SQL)
+  const safeReply = cleanHumanReply(rawOutput, ops);
   return {
     success: true,
-    reply: rawOutput || 'I found your service request. For any urgent changes or direct dispatcher assistance, our Salem Operations team is available.',
+    reply: safeReply || `I found your service request. For any urgent changes or direct dispatcher assistance, our Salem Operations team is standing by at ${ops.phone}.`,
     escalateToOps: false,
     opsContact: ops
   };
