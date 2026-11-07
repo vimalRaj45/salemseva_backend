@@ -91,10 +91,21 @@ async function transcribeAudioWithWhisper(audioBuffer) {
  * @param {number} [options.temperature=0.2]
  * @returns {Promise<{success: boolean, response?: string, error?: string, creditExhausted?: boolean}>}
  */
-async function runMistralChat(messages, options = {}) {
+async function runMistralChat(messagesOrOptions, options = {}) {
+  let messages = [];
+  let opts = options;
+  if (Array.isArray(messagesOrOptions)) {
+    messages = messagesOrOptions;
+  } else if (messagesOrOptions && Array.isArray(messagesOrOptions.messages)) {
+    messages = messagesOrOptions.messages;
+    opts = { ...messagesOrOptions, ...options };
+  } else if (typeof messagesOrOptions === 'string') {
+    messages = [{ role: 'user', content: messagesOrOptions }];
+  }
+
   const { accountId, apiToken, llmModel } = getCloudflareConfig();
-  const maxTokens = options.maxTokens || 512;
-  const temperature = options.temperature !== undefined ? options.temperature : 0.2;
+  const maxTokens = opts.maxTokens || opts.max_tokens || 512;
+  const temperature = opts.temperature !== undefined ? opts.temperature : 0.2;
 
   if (!accountId || !apiToken) {
     return {

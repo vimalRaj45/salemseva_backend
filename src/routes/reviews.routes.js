@@ -105,8 +105,8 @@ async function reviewsRoutes(fastify, options) {
       creditsAwarded: 0,
       techStarPointsAwarded: 2,
       customerBenefit: isBelow3Star 
-        ? 'Eligible for 100% Free Warranty Revisit or Full Diagnostic Refund'
-        : 'Service Completed & 100% Satisfaction Guaranteed'
+        ? 'Eligible for Salem Operations Priority Review or Diagnostic Refund'
+        : 'Service Completed & Inspected on Site'
     };
   });
 

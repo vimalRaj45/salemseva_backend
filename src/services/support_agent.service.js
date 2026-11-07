@@ -120,7 +120,8 @@ RULES:
 1. Always scope queries to technician_id = '${userId}'.
 2. Write only valid PostgreSQL SELECT queries. Do not include markdown codeblocks or quotes if generating SQL.
 3. If the technician asks about jobs, bookings, or money, provide concise facts.
-4. If they need admin escalation or manager override, refer them to Salem Ops Helpline ${ops.phone}.`;
+4. If they ask about technician referral incentive: Explain that an incentive of UP TO ₹100 is provided per verified technician referral, subject to document verification and trade review (it is not a guaranteed flat ₹100).
+5. If they need admin escalation or manager override, refer them to Salem Ops Helpline ${ops.phone}.`;
   }
 
   // Customer Schema
@@ -137,7 +138,9 @@ RULES:
 1. Always scope queries to customer_id = '${userId}' OR customer_phone = '${userPhone || ''}'.
 2. Write only valid PostgreSQL SELECT queries. Do not include markdown codeblocks if generating SQL.
 3. If they ask about cancellation: Cancellations are strictly permitted ONLY at least 24 hours prior to the scheduled service appointment. Within 24 hours of service, self-serve cancellation is locked, and the customer must contact Salem Operations Helpline ${ops.phone}.
-4. If they ask to speak to human/support or need urgent manual assistance, provide Salem Ops Helpline ${ops.phone}.`;
+4. WARRANTY POLICY: Absolutely NO post-service warranty is provided on completed services or workmanship. Customers inspect and verify the repair on site before releasing the completion OTP. Spare parts carry original manufacturer (OEM) warranties where applicable.
+5. ARRIVAL SPEED: Do NOT promise arrival within 15-25 minutes. Technicians arrive according to the confirmed scheduled slot or prompt doorstep dispatch.
+6. If they ask to speak to human/support or need urgent manual assistance, provide Salem Ops Helpline ${ops.phone}.`;
 }
 
 /**
