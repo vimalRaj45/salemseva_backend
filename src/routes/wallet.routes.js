@@ -481,7 +481,9 @@ async function walletRoutes(fastify, options) {
         settledPayout,
         starPoints: tech.star_points || 0,
         starPointsTarget: 30,
-        zeroCommUnlocked: (tech.star_points >= 30) || Boolean(tech.zero_comm_unlocked),
+        milestoneBonusUnlocked: (tech.star_points >= 30),
+        milestoneBonusAmount: 500,
+        zeroCommUnlocked: false,
         referredTechs,
         incentives: {
           techName: tech.full_name,
@@ -491,7 +493,9 @@ async function walletRoutes(fastify, options) {
           settledPayout,
           starPoints: tech.star_points || 0,
           starPointsTarget: 30,
-          zeroCommUnlocked: (tech.star_points >= 30) || Boolean(tech.zero_comm_unlocked),
+          milestoneBonusUnlocked: (tech.star_points >= 30),
+          milestoneBonusAmount: 500,
+          zeroCommUnlocked: false,
           referredTechs,
           incentiveTransactions: []
         }
@@ -598,7 +602,9 @@ async function walletRoutes(fastify, options) {
         totalIncentives: parseFloat(totalsRes.rows[0]?.total_earned || 0),
         availablePayout: parseFloat(totalsRes.rows[0]?.available_payout || 0),
         starPoints: updatedTech.star_points,
-        zeroCommUnlocked: updatedTech.zero_comm_unlocked,
+        milestoneBonusUnlocked: (updatedTech.star_points >= 30),
+        milestoneBonusAmount: 500,
+        zeroCommUnlocked: false,
         referredTechnician: newRef,
         transaction: {
           id: `inc-${newRef.id}`,
