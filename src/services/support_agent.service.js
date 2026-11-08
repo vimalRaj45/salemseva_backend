@@ -174,7 +174,13 @@ function describeBookingStatus(b) {
  * Fetches real-time deterministic database context for the given user
  */
 async function fetchUserLiveContext({ role, userId, userPhone, userName }) {
+  const isValidUserId = Boolean(
+    userId &&
+    !['guest', 'null', 'undefined', ''].includes(String(userId).trim().toLowerCase())
+  );
+  const effectiveUserId = isValidUserId ? String(userId).trim() : null;
   const cleanPhone = (userPhone || '').replace(/[^0-9]/g, '').slice(-10);
+  const isValidPhone = cleanPhone.length === 10;
   let bookings = [];
   let activeBooking = null;
   let lastCompletedBooking = null;
@@ -184,18 +190,20 @@ async function fetchUserLiveContext({ role, userId, userPhone, userName }) {
   let activeTicket = null;
 
   try {
-    // 1. Fetch Recent Support Tickets for this User/Phone
-    const tktRes = await query(`
-      SELECT id, ticket_number, creator_name, subject, category, priority, status,
-             admin_notes, resolution_summary, created_at, updated_at
-      FROM support_tickets
-      WHERE ((creator_id IS NOT NULL AND creator_id = $1)
-             OR (length($2) = 10 AND creator_phone LIKE '%' || $2))
-      ORDER BY created_at DESC
-      LIMIT 3
-    `, [userId, cleanPhone]);
-    recentTickets = tktRes.rows || [];
-    activeTicket = recentTickets.find(t => !['resolved', 'closed'].includes(t.status)) || recentTickets[0] || null;
+    // 1. Fetch Recent Support Tickets strictly for verified User or 10-digit Phone
+    if (effectiveUserId || isValidPhone) {
+      const tktRes = await query(`
+        SELECT id, ticket_number, creator_name, subject, category, priority, status,
+               admin_notes, resolution_summary, created_at, updated_at
+        FROM support_tickets
+        WHERE (($1::text IS NOT NULL AND creator_id IS NOT NULL AND creator_id = $1)
+               OR ($2::text IS NOT NULL AND length($2) = 10 AND creator_phone LIKE '%' || $2))
+        ORDER BY created_at DESC
+        LIMIT 3
+      `, [effectiveUserId, isValidPhone ? cleanPhone : null]);
+      recentTickets = tktRes.rows || [];
+      activeTicket = recentTickets.find(t => !['resolved', 'closed'].includes(t.status)) || recentTickets[0] || null;
+    }
 
     if (role === 'technician') {
       const tRes = await query(`
@@ -391,6 +399,8 @@ async function handleSupportQuery({
       if (activeTicket.resolution_summary) {
         contextDescription += `- Resolution Notes: ${activeTicket.resolution_summary}\n`;
       }
+    } else {
+      contextDescription += `\nSupport Tickets: NONE (0 open tickets). Customer has NO active, pending, or past support tickets on file. If the user asks about tickets, complaints, or support cases, state clearly that there are no active support tickets registered on their account.\n`;
     }
   }
 
@@ -414,7 +424,7 @@ CRITICAL STYLE & CONTENT INSTRUCTIONS:
 - Absolutely NEVER use polite introductory padding or conversational filler (e.g. do NOT say "I would be happy to help", "I understand your excitement", "Thank you for asking").
 - Immediately state the facts: the exact booking ID, live status, specialist arrival details, or ticket status.
 - For completed services: State clearly that the service was successfully completed and is closed. No technician is currently allotted.
-- For support tickets: State the ticket number, subject, and current status immediately.
+- For support tickets: If the customer has an active ticket, state the ticket number, subject, and current status immediately. If they have NO tickets, state clearly that they have no support tickets registered on their account.
 - Never generate, explain, or mention SQL queries, SELECT commands, database tables, or programming code.
 - Never use raw database enums like 'status is "created"' or 'status is "matching"'. Use the human descriptions in the Real-Time Context.
 - Zero marketing fluff, zero long paragraphs. Strictly factual, direct, and reliable.`;
@@ -432,8 +442,12 @@ CRITICAL STYLE & CONTENT INSTRUCTIONS:
   // Construct deterministic reliable fallback for any outage or LLM hallucination
   let deterministicFallback = '';
   const isTicketQuery = /ticket|complaint|issue|support\s*case/i.test(trimmedQuery);
-  if (isTicketQuery && activeTicket) {
-    deterministicFallback = `Your support ticket #${activeTicket.ticket_number || activeTicket.id} (${activeTicket.subject || 'Service inquiry'}) is currently ${activeTicket.status.toUpperCase()}. Salem Operations is actively tracking your request.`;
+  if (isTicketQuery) {
+    if (activeTicket) {
+      deterministicFallback = `Your support ticket #${activeTicket.ticket_number || activeTicket.id} (${activeTicket.subject || 'Service inquiry'}) is currently ${activeTicket.status.toUpperCase()}. Salem Operations is actively tracking your request.`;
+    } else {
+      deterministicFallback = `You do not have any open support tickets on your account. To raise a service request or complaint, our Salem Operations desk is available at ${ops.phone}.`;
+    }
   } else if (activeBooking) {
     deterministicFallback = `${describeBookingStatus(activeBooking)} Confirmed slot: ${activeBooking.scheduled_slot || 'Today'}.`;
   } else if (lastCompletedBooking) {

@@ -320,6 +320,21 @@ async function runLiveScenarios() {
           detail: 'Accurately retrieved live support ticket status from database.'
         };
       }
+    },
+    {
+      name: 'Scenario 11: Zero-Ticket User Check (Strict No Fake Ticket & Null Payload)',
+      persona: 'customer',
+      user: TEST_CUST_2,
+      query: 'Check my support ticket status',
+      verify: (reply, res) => {
+        const statesNoTicket = /no\s+.*ticket|0\s+ticket|do not have any|no open/i.test(reply);
+        const ticketPayloadIsNull = res.recentTicket === null;
+        const noHallucinatedId = !/SLM-TKT-\d+/i.test(reply);
+        return {
+          ok: statesNoTicket && ticketPayloadIsNull && noHallucinatedId,
+          detail: 'Correctly confirmed 0 support tickets, returned null recentTicket, and avoided hallucinating ticket IDs.'
+        };
+      }
     }
   ];
 
