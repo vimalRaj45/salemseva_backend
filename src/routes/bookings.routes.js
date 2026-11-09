@@ -1763,12 +1763,20 @@ async function bookingsRoutes(fastify, options) {
       }
 
       // 24-Hour Pre-Service Cancellation Policy Enforcement
+      // Policy: Free cancellation is allowed before technician assignment (status: created/matching).
+      // Once a technician is assigned, cancellation must be requested at least 24 hours prior to service.
       const isOpsOverride = cancelledBy === 'admin' || cancelledBy === 'ops';
+      const isTechAssigned = Boolean(
+        booking.technician_id && !['created', 'matching'].includes(booking.status)
+      );
+
       if (!isOpsOverride) {
         const { isCancellationAllowed, hoursRemaining, policyReason } = checkCancellationWindow(
           booking.scheduled_slot,
           booking.created_at,
-          Boolean(booking.is_urgent_dispatch)
+          Boolean(booking.is_urgent_dispatch),
+          new Date(),
+          isTechAssigned
         );
 
         if (!isCancellationAllowed) {
@@ -1776,7 +1784,7 @@ async function bookingsRoutes(fastify, options) {
           return reply.status(400).send({
             success: false,
             code: 'CANCELLATION_WINDOW_EXPIRED',
-            error: 'Cancellations are only available at least 24 hours prior to the scheduled service appointment. Since your service is scheduled within the next 24 hours, our specialist technician and tools are already dispatched. For emergency assistance or rescheduling, please contact Salem Operations Desk.',
+            error: 'Cancellations are only available at least 24 hours prior to the scheduled service appointment. Since your service is scheduled within the next 24 hours and a specialist technician is already assigned, please contact Salem Operations Desk.',
             policyReason,
             hoursRemaining: Math.max(0, hoursRemaining),
             opsContact: ops

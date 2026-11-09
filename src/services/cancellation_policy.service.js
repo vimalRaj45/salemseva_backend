@@ -12,6 +12,7 @@
  * @param {Date|string} [createdAt]
  * @param {boolean} [isUrgentDispatch=false]
  * @param {Date} [now=new Date()]
+ * @param {boolean} [isTechAssigned=true]
  * @returns {{
  *   isCancellationAllowed: boolean,
  *   hoursRemaining: number,
@@ -19,13 +20,23 @@
  *   policyReason: string
  * }}
  */
-function checkCancellationWindow(scheduledSlot, createdAt, isUrgentDispatch = false, now = new Date()) {
+function checkCancellationWindow(scheduledSlot, createdAt, isUrgentDispatch = false, now = new Date(), isTechAssigned = true) {
   const currentMs = now.getTime();
   const createdDate = createdAt ? new Date(createdAt) : now;
   const slotStr = String(scheduledSlot || '').trim();
   const lowerSlot = slotStr.toLowerCase();
 
-  // 1. Emergency / Immediate Dispatch bookings are on-demand within 1-2 hours
+  // 1. If no technician has been assigned yet (created / matching stage), customer can freely cancel
+  if (!isTechAssigned) {
+    return {
+      isCancellationAllowed: true,
+      hoursRemaining: 999,
+      appointmentDate: new Date(),
+      policyReason: 'Technician has not yet been assigned. Free cancellation is permitted prior to specialist assignment.'
+    };
+  }
+
+  // 2. Emergency / Immediate Dispatch bookings are on-demand within 1-2 hours
   if (isUrgentDispatch || lowerSlot.includes('emergency') || lowerSlot.includes('urgent')) {
     const immediateServiceTime = new Date(createdDate.getTime() + 60 * 60 * 1000); // 1 hour from creation
     const hoursRemaining = (immediateServiceTime.getTime() - currentMs) / (1000 * 60 * 60);
