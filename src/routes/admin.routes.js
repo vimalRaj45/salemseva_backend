@@ -436,7 +436,7 @@ async function adminRoutes(fastify, options) {
       const { id } = req.params;
       const feeConfig = await getLiveFeeSettings();
       const techPayoutRate = (100 - feeConfig.partnerCommPercent) / 100.0;
-      const [techRes, jobsRes, earningsRes] = await Promise.all([
+      const [techRes, jobsRes, earningsRes, reviewsRes] = await Promise.all([
         query(`
           SELECT 
             t.*,
@@ -473,7 +473,18 @@ async function adminRoutes(fastify, options) {
           FROM bookings b
           LEFT JOIN payments p ON p.booking_id = b.id
           WHERE b.technician_id = $1
-        `, [id, techPayoutRate])
+        `, [id, techPayoutRate]),
+        query(`
+          SELECT 
+            r.*,
+            b.locality,
+            b.service_id,
+            b.customer_name
+          FROM reviews r
+          LEFT JOIN bookings b ON r.booking_id = b.id
+          WHERE r.technician_id = $1
+          ORDER BY r.created_at DESC
+        `, [id])
       ]);
 
       if (techRes.rows.length === 0) {
@@ -484,6 +495,7 @@ async function adminRoutes(fastify, options) {
         success: true,
         technician: techRes.rows[0],
         jobs: jobsRes.rows,
+        reviews: reviewsRes.rows || [],
         financials: {
           lifetimeEarnings: parseFloat(earningsRes.rows[0]?.lifetime_earnings || 0),
           grossJobVolume: parseFloat(earningsRes.rows[0]?.gross_job_volume || 0)

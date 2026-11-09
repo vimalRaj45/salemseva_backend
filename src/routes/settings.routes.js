@@ -29,6 +29,14 @@ async function settingsRoutes(fastify, options) {
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS business_upi_id VARCHAR(150);
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS business_merchant_name VARCHAR(150);
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS payment_gateway_mode VARCHAR(50) DEFAULT 'DYNAMIC_QR';
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_governance_enabled BOOLEAN DEFAULT TRUE;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_throttle_rating NUMERIC(3,2) DEFAULT 4.00;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_throttle_daily_cap INT DEFAULT 1;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_throttle_min_reviews INT DEFAULT 3;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_priority_window_seconds INT DEFAULT 90;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_priority_min_rating NUMERIC(3,2) DEFAULT 4.50;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_suspension_rating NUMERIC(3,2) DEFAULT 3.50;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_suspension_min_reviews INT DEFAULT 5;
     `);
 
     // Seed initial row if table is empty
@@ -144,6 +152,14 @@ async function settingsRoutes(fastify, options) {
         business_upi_id: getEnvUpiId() || row.business_upi_id || '',
         business_merchant_name: getEnvMerchantName() || row.business_merchant_name || '',
         payment_gateway_mode: row.payment_gateway_mode || 'DYNAMIC_QR',
+        quality_governance_enabled: row.quality_governance_enabled != null ? Boolean(row.quality_governance_enabled) : true,
+        quality_throttle_rating: parseFloat(row.quality_throttle_rating != null ? row.quality_throttle_rating : 4.0),
+        quality_throttle_daily_cap: parseInt(row.quality_throttle_daily_cap != null ? row.quality_throttle_daily_cap : 1, 10),
+        quality_throttle_min_reviews: parseInt(row.quality_throttle_min_reviews != null ? row.quality_throttle_min_reviews : 3, 10),
+        quality_priority_window_seconds: parseInt(row.quality_priority_window_seconds != null ? row.quality_priority_window_seconds : 90, 10),
+        quality_priority_min_rating: parseFloat(row.quality_priority_min_rating != null ? row.quality_priority_min_rating : 4.5),
+        quality_suspension_rating: parseFloat(row.quality_suspension_rating != null ? row.quality_suspension_rating : 3.5),
+        quality_suspension_min_reviews: parseInt(row.quality_suspension_min_reviews != null ? row.quality_suspension_min_reviews : 5, 10),
         updated_by: row.updated_by,
         updated_at: row.updated_at
       };
@@ -177,6 +193,14 @@ async function settingsRoutes(fastify, options) {
         business_upi_id,
         business_merchant_name,
         payment_gateway_mode,
+        quality_governance_enabled,
+        quality_throttle_rating,
+        quality_throttle_daily_cap,
+        quality_throttle_min_reviews,
+        quality_priority_window_seconds,
+        quality_priority_min_rating,
+        quality_suspension_rating,
+        quality_suspension_min_reviews,
         updated_by = 'admin_salem_central'
       } = req.body || {};
 
@@ -205,6 +229,15 @@ async function settingsRoutes(fastify, options) {
       const newBusinessMerchant = business_merchant_name !== undefined ? String(business_merchant_name).trim() : defaultMerchant;
       const newPaymentMode = payment_gateway_mode !== undefined ? String(payment_gateway_mode).trim() : (current.payment_gateway_mode || 'DYNAMIC_QR');
 
+      const newQGovEnabled = quality_governance_enabled !== undefined ? Boolean(quality_governance_enabled) : (current.quality_governance_enabled != null ? Boolean(current.quality_governance_enabled) : true);
+      const newQThrottleRating = quality_throttle_rating !== undefined ? parseFloat(quality_throttle_rating) : parseFloat(current.quality_throttle_rating || 4.0);
+      const newQThrottleCap = quality_throttle_daily_cap !== undefined ? parseInt(quality_throttle_daily_cap, 10) : parseInt(current.quality_throttle_daily_cap || 1, 10);
+      const newQThrottleMinRev = quality_throttle_min_reviews !== undefined ? parseInt(quality_throttle_min_reviews, 10) : parseInt(current.quality_throttle_min_reviews || 3, 10);
+      const newQPrioritySecs = quality_priority_window_seconds !== undefined ? parseInt(quality_priority_window_seconds, 10) : parseInt(current.quality_priority_window_seconds || 90, 10);
+      const newQPriorityMinRating = quality_priority_min_rating !== undefined ? parseFloat(quality_priority_min_rating) : parseFloat(current.quality_priority_min_rating || 4.5);
+      const newQSuspensionRating = quality_suspension_rating !== undefined ? parseFloat(quality_suspension_rating) : parseFloat(current.quality_suspension_rating || 3.5);
+      const newQSuspensionMinRev = quality_suspension_min_reviews !== undefined ? parseInt(quality_suspension_min_reviews, 10) : parseInt(current.quality_suspension_min_reviews || 5, 10);
+
       const updateSql = `
         INSERT INTO platform_settings (
           id, referee_discount_amount,
@@ -212,9 +245,14 @@ async function settingsRoutes(fastify, options) {
           partner_commission_percent, platform_commission_percent,
           customer_platform_fee_percent, payment_gateway_fee_percent, gateway_fee_percent,
           inspection_visit_fee, business_upi_id, business_merchant_name, payment_gateway_mode,
+          quality_governance_enabled, quality_throttle_rating, quality_throttle_daily_cap,
+          quality_throttle_min_reviews, quality_priority_window_seconds, quality_priority_min_rating,
+          quality_suspension_rating, quality_suspension_min_reviews,
           updated_at, updated_by
         ) VALUES (
-          'reward_settings', $1, $2, $3, $4, $4, $5, $6, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, $11
+          'reward_settings', $1, $2, $3, $4, $4, $5, $6, $6, $7, $8, $9, $10,
+          $12, $13, $14, $15, $16, $17, $18, $19,
+          CURRENT_TIMESTAMP, $11
         )
         ON CONFLICT (id) DO UPDATE SET
           referee_discount_amount = EXCLUDED.referee_discount_amount,
@@ -229,6 +267,14 @@ async function settingsRoutes(fastify, options) {
           business_upi_id = EXCLUDED.business_upi_id,
           business_merchant_name = EXCLUDED.business_merchant_name,
           payment_gateway_mode = EXCLUDED.payment_gateway_mode,
+          quality_governance_enabled = EXCLUDED.quality_governance_enabled,
+          quality_throttle_rating = EXCLUDED.quality_throttle_rating,
+          quality_throttle_daily_cap = EXCLUDED.quality_throttle_daily_cap,
+          quality_throttle_min_reviews = EXCLUDED.quality_throttle_min_reviews,
+          quality_priority_window_seconds = EXCLUDED.quality_priority_window_seconds,
+          quality_priority_min_rating = EXCLUDED.quality_priority_min_rating,
+          quality_suspension_rating = EXCLUDED.quality_suspension_rating,
+          quality_suspension_min_reviews = EXCLUDED.quality_suspension_min_reviews,
           updated_at = CURRENT_TIMESTAMP,
           updated_by = EXCLUDED.updated_by
         RETURNING *;
@@ -245,7 +291,15 @@ async function settingsRoutes(fastify, options) {
         newBusinessUpi,
         newBusinessMerchant,
         newPaymentMode,
-        updated_by
+        updated_by,
+        newQGovEnabled,
+        newQThrottleRating,
+        newQThrottleCap,
+        newQThrottleMinRev,
+        newQPrioritySecs,
+        newQPriorityMinRating,
+        newQSuspensionRating,
+        newQSuspensionMinRev
       ]);
 
       invalidateCommissionCache();

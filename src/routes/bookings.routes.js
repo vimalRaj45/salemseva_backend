@@ -1313,9 +1313,18 @@ async function bookingsRoutes(fastify, options) {
             matched_at = CASE WHEN ($1::text = 'accepted' OR $1::text = 'en_route' OR $1::text = 'preparing') AND matched_at IS NULL THEN CURRENT_TIMESTAMP ELSE matched_at END,
             arrived_at = CASE WHEN ($1::text = 'arrived' OR $1::text = 'in_progress') AND arrived_at IS NULL THEN CURRENT_TIMESTAMP ELSE arrived_at END,
             completed_at = CASE WHEN $1::text = 'completed' AND completed_at IS NULL THEN CURRENT_TIMESTAMP ELSE completed_at END
-        WHERE id = $2 
+        WHERE id = $2 AND (
+          $1::text <> 'accepted' OR technician_id IS NULL OR ($3::uuid IS NOT NULL AND technician_id = $3::uuid)
+        )
         RETURNING *
       `, [status, targetId, validTechId, partsMode || null]);
+
+      if (res.rows.length === 0 && status === 'accepted') {
+        return reply.status(409).send({
+          success: false,
+          error: 'Concurrency Conflict: This booking was already accepted by another specialist in Salem.'
+        });
+      }
 
       booking = res.rows[0] || booking;
 

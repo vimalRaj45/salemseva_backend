@@ -219,6 +219,50 @@ function calculateCommissionSplit(totalAmount, percent = getPartnerCommissionPer
   };
 }
 
+async function getLiveQualitySettings() {
+  try {
+    const res = await query(`
+      SELECT 
+        quality_governance_enabled,
+        quality_throttle_rating,
+        quality_throttle_daily_cap,
+        quality_throttle_min_reviews,
+        quality_priority_window_seconds,
+        quality_priority_min_rating,
+        quality_suspension_rating,
+        quality_suspension_min_reviews
+      FROM platform_settings 
+      WHERE id = 'reward_settings' 
+      LIMIT 1
+    `);
+    if (res.rows.length > 0) {
+      const row = res.rows[0];
+      return {
+        enabled: row.quality_governance_enabled != null ? Boolean(row.quality_governance_enabled) : true,
+        throttleRating: row.quality_throttle_rating != null ? parseFloat(row.quality_throttle_rating) : 4.0,
+        throttleDailyCap: row.quality_throttle_daily_cap != null ? parseInt(row.quality_throttle_daily_cap, 10) : 1,
+        throttleMinReviews: row.quality_throttle_min_reviews != null ? parseInt(row.quality_throttle_min_reviews, 10) : 3,
+        priorityWindowSeconds: row.quality_priority_window_seconds != null ? parseInt(row.quality_priority_window_seconds, 10) : 90,
+        priorityMinRating: row.quality_priority_min_rating != null ? parseFloat(row.quality_priority_min_rating) : 4.5,
+        suspensionRating: row.quality_suspension_rating != null ? parseFloat(row.quality_suspension_rating) : 3.5,
+        suspensionMinReviews: row.quality_suspension_min_reviews != null ? parseInt(row.quality_suspension_min_reviews, 10) : 5
+      };
+    }
+  } catch (err) {
+    // Return sensible defaults if columns are not yet initialized
+  }
+  return {
+    enabled: true,
+    throttleRating: 4.0,
+    throttleDailyCap: 1,
+    throttleMinReviews: 3,
+    priorityWindowSeconds: 90,
+    priorityMinRating: 4.5,
+    suspensionRating: 3.5,
+    suspensionMinReviews: 5
+  };
+}
+
 module.exports = {
   getEnvUpiId,
   getEnvMerchantName,
@@ -229,6 +273,7 @@ module.exports = {
   getPartnerCommissionPercent,
   getEnvCommissionPercent,
   getLiveFeeSettings,
+  getLiveQualitySettings,
   calculateDualCommissionInvoice,
   calculateCommissionSplit,
   invalidateCommissionCache

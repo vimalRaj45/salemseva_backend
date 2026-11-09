@@ -2,7 +2,7 @@ const { query } = require('../db/db');
 // Password hashing lives in one place so onboarding and sign-in agree on the format.
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
-const { getPartnerCommissionPercent, getLiveFeeSettings, calculateDualCommissionInvoice } = require('../services/commission.service');
+const { getPartnerCommissionPercent, getLiveFeeSettings, getLiveQualitySettings, calculateDualCommissionInvoice } = require('../services/commission.service');
 const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/privacy');
 
 async function partnerRoutes(fastify, options) {
@@ -16,6 +16,60 @@ async function partnerRoutes(fastify, options) {
   } catch (mErr) {
     fastify.log.warn('Technician referral column migration note: ' + mErr.message);
   }
+
+  // 1b. Fast duty sync check for background polling and notifications
+  fastify.get('/partner/duty/sync', async (req, reply) => {
+    try {
+      const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
+      const techIdParam = (req.query?.technicianId || req.query?.id) ? String(req.query.technicianId || req.query.id).trim() : '';
+      
+      if (!phoneParam && !techIdParam) {
+        return reply.send({ success: false, error: 'Technician authentication required' });
+      }
+
+      const cleanDigits = phoneParam.replace(/[^0-9]/g, '').slice(-10);
+
+      const techRes = await query(`
+        SELECT id, full_name, phone, is_online, is_kyc_verified, primary_trade, secondary_trades, assigned_localities 
+        FROM technicians 
+        WHERE ($1::text <> '' AND id::text = $1)
+           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
+           OR ($3::text <> '' AND phone = $3)
+        ORDER BY created_at ASC 
+        LIMIT 1
+      `, [techIdParam, cleanDigits || '', phoneParam]);
+
+      const tech = techRes.rows[0];
+      if (!tech) {
+        return reply.send({ success: false, notFound: true, message: 'Technician partner not found in database' });
+      }
+
+      const jobRes = await query(`
+        SELECT id, service_id, locality, status, visit_fee, created_at, scheduled_slot
+        FROM bookings 
+        WHERE (technician_id = $1 OR (technician_id IS NULL AND status = 'matching'))
+          AND status IN ('matching', 'accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress')
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `, [tech.id]);
+
+      const activeJob = jobRes.rows[0] || null;
+      return reply.send({
+        success: true,
+        isOnline: Boolean(tech.is_online),
+        activeJob: activeJob ? {
+          id: activeJob.id,
+          bookingId: activeJob.id,
+          serviceName: activeJob.service_id,
+          locality: activeJob.locality,
+          status: activeJob.status,
+          visitFee: activeJob.visit_fee
+        } : null
+      });
+    } catch (err) {
+      return reply.send({ success: false, error: err.message });
+    }
+  });
 
   // 1. Get Partner Duty & Active Job Dispatch directly from DB
   fastify.get('/partner/duty', async (req, reply) => {
@@ -337,6 +391,8 @@ async function partnerRoutes(fastify, options) {
       let techId = null;
       let cleanPhone = null;
       let techAssignedLocalities = null;
+      let isHighRated = true;
+      const qualitySettings = await getLiveQualitySettings();
       // Declared here, not inside the block below: the lead query reads it after the guard, and a
       // block-scoped binding made every request without a phone number throw a ReferenceError.
       let allTrades = trade ? [trade] : null;
@@ -344,7 +400,7 @@ async function partnerRoutes(fastify, options) {
         cleanPhone = phoneParam.replace(/[\s\-\(\)]/g, '');
         const cleanDigits = phoneParam.replace(/\D/g, '').slice(-10);
         const techRes = await query(`
-          SELECT id, primary_trade, secondary_trades, assigned_localities, daily_job_capacity FROM technicians 
+          SELECT id, primary_trade, secondary_trades, assigned_localities, daily_job_capacity, rating_avg, rating_count FROM technicians 
           WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1 
              OR id::text = $1
              OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
@@ -352,7 +408,27 @@ async function partnerRoutes(fastify, options) {
         `, [cleanPhone, cleanDigits || '']);
         if (techRes.rows.length > 0) {
           techId = techRes.rows[0].id;
-          const techCap = Math.min(4, Math.max(1, parseInt(techRes.rows[0].daily_job_capacity, 10) || 4));
+          const techRow = techRes.rows[0];
+          const ratingAvg = parseFloat(techRow.rating_avg || 5.0);
+          const ratingCount = parseInt(techRow.rating_count || 0, 10);
+          isHighRated = !qualitySettings.enabled || ratingCount < qualitySettings.throttleMinReviews || ratingAvg >= qualitySettings.priorityMinRating;
+
+          // Quality Gate 1: Dynamic quality suspension if customer rating falls below admin-configured threshold
+          if (qualitySettings.enabled && ratingCount >= qualitySettings.suspensionMinReviews && ratingAvg < qualitySettings.suspensionRating) {
+            return {
+              success: false,
+              isQualitySuspended: true,
+              leads: [],
+              error: `Quality Alert: Your customer satisfaction rating (${ratingAvg}/5.0) is below the platform quality standard (${qualitySettings.suspensionRating.toFixed(1)}). Direct lead claiming is paused. Please contact Salem Seva Ops.`
+            };
+          }
+
+          // Quality Gate 2: Daily capacity throttling for low-rated specialists
+          let techCap = Math.min(4, Math.max(1, parseInt(techRow.daily_job_capacity, 10) || 4));
+          if (qualitySettings.enabled && ratingCount >= qualitySettings.throttleMinReviews && ratingAvg < qualitySettings.throttleRating) {
+            techCap = qualitySettings.throttleDailyCap;
+          }
+
           const pTrade = techRes.rows[0].primary_trade;
           const sTrades = Array.isArray(techRes.rows[0].secondary_trades) ? techRes.rows[0].secondary_trades : [];
           allTrades = [pTrade, ...sTrades].filter(Boolean);
@@ -375,7 +451,9 @@ async function partnerRoutes(fastify, options) {
               leads: [],
               dailyCapacityReached: true,
               dailyJobCapacity: techCap,
-              message: `Daily job limit of ${techCap} jobs reached for today.`
+              message: (qualitySettings.enabled && ratingCount >= qualitySettings.throttleMinReviews && ratingAvg < qualitySettings.throttleRating)
+                ? `Quality Throttle: Partners with rating under ${qualitySettings.throttleRating.toFixed(1)} are restricted to ${qualitySettings.throttleDailyCap} job per day (Limit reached for today).`
+                : `Daily job limit of ${techCap} jobs reached for today.`
             };
           }
         }
@@ -424,9 +502,12 @@ async function partnerRoutes(fastify, options) {
                 AND customer_phone IS NOT NULL
             )
           )
+          AND (
+            $5::boolean = TRUE OR created_at <= NOW() - ($6::int || ' seconds')::interval
+          )
         ORDER BY created_at DESC
         LIMIT 30;
-      `, [allTrades || (trade ? [trade] : null), techId ? String(techId) : null, cleanPhone, techAssignedLocalities]);
+      `, [allTrades || (trade ? [trade] : null), techId ? String(techId) : null, cleanPhone, techAssignedLocalities, isHighRated, qualitySettings.priorityWindowSeconds || 90]);
 
       return {
         success: true,
@@ -481,7 +562,7 @@ async function partnerRoutes(fastify, options) {
       }
 
       // Check if already claimed by someone else
-      const checkRes = await query(`SELECT technician_id, status, scheduled_slot, locality FROM bookings WHERE id = $1`, [bookingId]);
+      const checkRes = await query(`SELECT technician_id, status, scheduled_slot, locality, created_at FROM bookings WHERE id = $1`, [bookingId]);
       if (checkRes.rows.length === 0) {
         return reply.status(404).send({ success: false, error: 'Booking not found' });
       }
@@ -492,6 +573,33 @@ async function partnerRoutes(fastify, options) {
           success: false,
           error: 'This scheduled slot was already claimed by another specialist in Salem.'
         });
+      }
+
+      // Quality Gate 1: Check technician rating & review standing
+      const qualitySettings = await getLiveQualitySettings();
+      const ratingAvg = parseFloat(tech.rating_avg || 5.0);
+      const ratingCount = parseInt(tech.rating_count || 0, 10);
+      const isHighRated = !qualitySettings.enabled || ratingCount < qualitySettings.throttleMinReviews || ratingAvg >= qualitySettings.priorityMinRating;
+
+      if (qualitySettings.enabled && ratingCount >= qualitySettings.suspensionMinReviews && ratingAvg < qualitySettings.suspensionRating) {
+        return reply.status(403).send({
+          success: false,
+          error: `Quality Suspension: Your customer rating (${ratingAvg}/5.0) is below the platform standard (${qualitySettings.suspensionRating.toFixed(1)}). Autonomous lead acceptance is paused pending admin review.`
+        });
+      }
+
+      // Quality Gate 2: Priority Window Protection
+      // Fresh leads are reserved for top-rated specialists
+      if (qualitySettings.enabled && !isHighRated && existing.created_at) {
+        const leadAgeMs = Date.now() - new Date(existing.created_at).getTime();
+        const requiredMs = (qualitySettings.priorityWindowSeconds || 90) * 1000;
+        if (leadAgeMs < requiredMs) {
+          const remainingSecs = Math.ceil((requiredMs - leadAgeMs) / 1000);
+          return reply.status(403).send({
+            success: false,
+            error: `Priority Dispatch: This fresh booking is prioritized for top-rated specialists (${qualitySettings.priorityMinRating}+). It will become open for you in ${remainingSecs}s if unclaimed.`
+          });
+        }
       }
 
       // Check if technician's assigned localities include this booking's locality
@@ -514,8 +622,12 @@ async function partnerRoutes(fastify, options) {
         }
       }
 
-      // Check if technician has reached their daily job limit (1 to 4 jobs)
-      const maxDailyCap = Math.min(4, Math.max(1, parseInt(tech.daily_job_capacity, 10) || 4));
+      // Quality Gate 3: Dynamic daily job capacity throttling
+      let maxDailyCap = Math.min(4, Math.max(1, parseInt(tech.daily_job_capacity, 10) || 4));
+      if (qualitySettings.enabled && ratingCount >= qualitySettings.throttleMinReviews && ratingAvg < qualitySettings.throttleRating) {
+        maxDailyCap = qualitySettings.throttleDailyCap;
+      }
+
       const todayCountRes = await query(`
         SELECT COUNT(*)::int as count 
         FROM bookings 
@@ -527,15 +639,18 @@ async function partnerRoutes(fastify, options) {
       if (currentJobsToday >= maxDailyCap) {
         return reply.status(403).send({
           success: false,
-          error: `Daily job limit reached (${maxDailyCap} jobs per day limit). You have already taken ${currentJobsToday} jobs today.`
+          error: (qualitySettings.enabled && ratingCount >= qualitySettings.throttleMinReviews && ratingAvg < qualitySettings.throttleRating)
+            ? `Quality Limit: Partners with customer rating under ${qualitySettings.throttleRating.toFixed(1)} are restricted to ${qualitySettings.throttleDailyCap} job per day until ratings improve.`
+            : `Daily job limit reached (${maxDailyCap} jobs per day limit). You have already taken ${currentJobsToday} jobs today.`
         });
       }
 
-      // Update booking with technician_id and status = 'accepted'
+      // Concurrency Gate: Atomic DB UPDATE with row-level lock
+      // Only updates if technician_id IS NULL AND status = 'matching'
       const updateRes = await query(`
         UPDATE bookings 
         SET technician_id = $1, status = 'accepted', matched_at = COALESCE(matched_at, CURRENT_TIMESTAMP)
-        WHERE id = $2 AND (technician_id IS NULL OR technician_id = $1)
+        WHERE id = $2 AND (technician_id IS NULL OR technician_id = $1) AND status = 'matching'
         RETURNING *;
       `, [tech.id, bookingId]);
 

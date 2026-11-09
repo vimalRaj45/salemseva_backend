@@ -97,7 +97,7 @@ async function servicesRoutes(fastify, options) {
 
       // Check verified, unblocked technicians for this trade in Salem
       const techsRes = await query(`
-        SELECT id, full_name, phone, is_online, rating_avg, primary_trade, secondary_trades
+        SELECT id, full_name, phone, is_online, rating_avg, primary_trade, secondary_trades, assigned_localities
         FROM technicians 
         WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
           AND is_blocked = FALSE 
@@ -195,6 +195,31 @@ async function servicesRoutes(fastify, options) {
         };
       }
 
+      // Collect all assigned working localities for technicians covering this domain
+      const allLocalities = [];
+      techsRes.rows.forEach(t => {
+        if (Array.isArray(t.assigned_localities)) {
+          t.assigned_localities.forEach(loc => {
+            if (loc && typeof loc === 'string' && loc.trim()) {
+              allLocalities.push(loc.trim());
+            }
+          });
+        }
+      });
+      const uniqueCoveredLocalities = Array.from(new Set(allLocalities));
+
+      const customerLocality = req.query.locality ? String(req.query.locality).trim().toLowerCase() : '';
+      let isLocalityCovered = true;
+      if (customerLocality && totalTechnicians > 0) {
+        const anyHasLocalities = techsRes.rows.some(t => Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0);
+        if (anyHasLocalities) {
+          isLocalityCovered = uniqueCoveredLocalities.some(loc => {
+            const l = loc.toLowerCase();
+            return l.includes(customerLocality) || customerLocality.includes(l);
+          });
+        }
+      }
+
       return {
         success: true,
         serviceId: id,
@@ -205,6 +230,15 @@ async function servicesRoutes(fastify, options) {
         isTemporarilyClosed: false,
         totalDailyCapacity,
         dailyCapacityPerTech,
+        coveredLocalities: uniqueCoveredLocalities,
+        isLocalityCovered,
+        localityNotice: !isLocalityCovered ? {
+          locality: req.query.locality,
+          title: lang === 'ta' ? 'கூடுதல் பயணக் கட்டண அறிவிப்பு' : 'Out-of-Coverage Area Notice',
+          message: lang === 'ta'
+            ? `உங்கள் பகுதியில் (${req.query.locality}) தொழில்நுட்ப வல்லுநர் நேரடியாக ஒதுக்கப்படவில்லை. உங்களுக்காக பிரத்யேகமாக தொழில்நுட்ப வல்லுநர் ஏற்பாடு செய்யப்படும், ஆனால் கூடுதல் பயணக் கட்டணம் பொருந்தக்கூடும்.`
+            : `No technician is currently registered directly in ${req.query.locality}. We will arrange a specialist for your location, but an additional travel / out-of-area fee may apply.`
+        } : null,
         dates: datesAvailability
       };
     } catch (err) {
