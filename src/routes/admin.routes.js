@@ -23,11 +23,7 @@ async function adminRoutes(fastify, options) {
             b.*,
             t.full_name as technician_name,
             t.phone as technician_phone,
-            COALESCE(
-              NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
-              NULLIF(t.rating_avg, 0),
-              CASE WHEN (SELECT count(*)::int FROM bookings b2 WHERE b2.technician_id = t.id AND b2.status = 'completed') > 0 THEN 5.0 ELSE 0 END
-            ) as technician_rating,
+            COALESCE(NULLIF(t.rating_avg, 0), 5.0) as technician_rating,
             t.primary_trade as technician_trade
           FROM bookings b
           LEFT JOIN technicians t ON b.technician_id = t.id
@@ -37,31 +33,22 @@ async function adminRoutes(fastify, options) {
         query(`
           SELECT 
             t.id, t.full_name, t.phone, t.primary_trade, t.secondary_trades, t.years_experience,
-            COALESCE(
-              NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
-              NULLIF(t.rating_avg, 0),
-              CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
-            ) as rating_avg,
-            GREATEST(
-              COALESCE(t.rating_count, 0),
-              (SELECT count(*)::int FROM reviews r WHERE r.technician_id = t.id)
-            ) as rating_count,
-            GREATEST(
-              COALESCE(t.jobs_completed_count, 0),
-              (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
-            ) as jobs_completed_count,
+            COALESCE(NULLIF(t.rating_avg, 0), 5.0) as rating_avg,
+            COALESCE(t.rating_count, 0) as rating_count,
+            COALESCE(t.jobs_completed_count, 0) as jobs_completed_count,
             t.is_online, 
             t.is_kyc_verified, t.current_lat, t.current_lng, t.star_points,
             t.aadhaar_card_url, t.aadhaar_uploaded_at, t.aadhaar_number, t.upi_vpa,
             t.assigned_localities, t.created_at,
             t.is_blocked, t.block_reason, t.blocked_at,
-            (
-              SELECT count(*) 
-              FROM bookings b 
-              WHERE b.technician_id = t.id 
-                AND b.status IN ('accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented')
-            ) as active_job_count
+            COALESCE(act.active_cnt, 0) as active_job_count
           FROM technicians t 
+          LEFT JOIN (
+            SELECT technician_id, count(*)::int as active_cnt
+            FROM bookings
+            WHERE status IN ('accepted', 'en_route', 'arrived', 'in_progress', 'quote_presented')
+            GROUP BY technician_id
+          ) act ON act.technician_id = t.id
           ORDER BY (CASE WHEN t.is_kyc_verified = FALSE THEN 0 ELSE 1 END), t.created_at DESC NULLS LAST, t.is_online DESC, t.rating_avg DESC
         `)
       ]);

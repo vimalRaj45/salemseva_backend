@@ -1028,19 +1028,60 @@ async function bookingsRoutes(fastify, options) {
         LIMIT 30
       `);
 
-      // Enrich each booking with payments, quote items, and audit logs
-      const enrichedBookings = await Promise.all(res.rows.map(async (b) => {
-        const [paymentsRes, quoteRes, auditRes, reviewRes] = await Promise.all([
-          query('SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
-          query('SELECT * FROM quote_items WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
-          query('SELECT * FROM audit_logs WHERE booking_id = $1 ORDER BY created_at ASC', [b.id]).catch(() => ({ rows: [] })),
-          query('SELECT * FROM reviews WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [b.id]).catch(() => ({ rows: [] }))
-        ]);
+      if (res.rows.length === 0) {
+        return { success: true, count: 0, bookings: [] };
+      }
 
-        let rawPayments = paymentsRes.rows || [];
-        let rawQuoteItems = quoteRes.rows || [];
-        const auditLogs = auditRes.rows || [];
-        const existingBookingReview = reviewRes.rows[0] || null;
+      const bookingIds = res.rows.map(b => b.id);
+      const feeSettings = await getLiveFeeSettings();
+      const customerFeePercent = feeSettings.customerFeePercent ?? 2.0;
+      const gatewayFeePercent = feeSettings.gatewayFeePercent ?? 0.0;
+      const partnerCommPercent = feeSettings.partnerCommPercent ?? 7.0;
+
+      // Bulk fetch all payments, quote items, audit logs, reviews, and fallback catalog in a single parallel batch
+      const [paymentsRes, quoteRes, auditRes, reviewRes, sparesRes] = await Promise.all([
+        query('SELECT * FROM payments WHERE booking_id = ANY($1::text[]) ORDER BY created_at ASC', [bookingIds]).catch(() => ({ rows: [] })),
+        query('SELECT * FROM quote_items WHERE booking_id = ANY($1::text[]) ORDER BY created_at ASC', [bookingIds]).catch(() => ({ rows: [] })),
+        query('SELECT * FROM audit_logs WHERE booking_id = ANY($1::text[]) ORDER BY created_at ASC', [bookingIds]).catch(() => ({ rows: [] })),
+        query('SELECT DISTINCT ON (booking_id) * FROM reviews WHERE booking_id = ANY($1::text[]) ORDER BY booking_id, created_at DESC', [bookingIds]).catch(() => ({ rows: [] })),
+        query('SELECT * FROM service_spares_catalog ORDER BY is_oem_part DESC LIMIT 50').catch(() => ({ rows: [] }))
+      ]);
+
+      const paymentsByBooking = {};
+      for (const p of (paymentsRes.rows || [])) {
+        if (!paymentsByBooking[p.booking_id]) paymentsByBooking[p.booking_id] = [];
+        paymentsByBooking[p.booking_id].push(p);
+      }
+
+      const quotesByBooking = {};
+      for (const q of (quoteRes.rows || [])) {
+        if (!quotesByBooking[q.booking_id]) quotesByBooking[q.booking_id] = [];
+        quotesByBooking[q.booking_id].push(q);
+      }
+
+      const auditsByBooking = {};
+      for (const a of (auditRes.rows || [])) {
+        if (!auditsByBooking[a.booking_id]) auditsByBooking[a.booking_id] = [];
+        auditsByBooking[a.booking_id].push(a);
+      }
+
+      const reviewByBooking = {};
+      for (const r of (reviewRes.rows || [])) {
+        reviewByBooking[r.booking_id] = r;
+      }
+
+      const sparesByService = {};
+      for (const sp of (sparesRes.rows || [])) {
+        if (!sparesByService[sp.service_id]) sparesByService[sp.service_id] = [];
+        sparesByService[sp.service_id].push(sp);
+      }
+
+      // Synchronously enrich each booking in-memory with zero sequential DB round-trips
+      const enrichedBookings = res.rows.map((b) => {
+        const rawPayments = paymentsByBooking[b.id] || [];
+        const rawQuoteItems = quotesByBooking[b.id] || [];
+        const auditLogs = auditsByBooking[b.id] || [];
+        const existingBookingReview = reviewByBooking[b.id] || null;
 
         // Normalize quote items
         let quoteItems = rawQuoteItems.map(qi => ({
@@ -1054,8 +1095,8 @@ async function bookingsRoutes(fastify, options) {
 
         // If completed booking has no items recorded yet, query service_spares_catalog dynamically from PostgreSQL
         if (b.status === 'completed' && quoteItems.length === 0) {
-          const dbCat = await query('SELECT * FROM service_spares_catalog WHERE service_id = $1 ORDER BY is_oem_part DESC LIMIT 3', [b.service_id || 'ac']).catch(() => ({ rows: [] }));
-          quoteItems = dbCat.rows.map(item => ({
+          const serviceSpares = (sparesByService[b.service_id || 'ac'] || sparesByService['ac'] || []).slice(0, 3);
+          quoteItems = serviceSpares.map(item => ({
             id: item.id,
             name: item.item_name,
             type: item.item_type,
@@ -1087,11 +1128,6 @@ async function bookingsRoutes(fastify, options) {
           : (isCompleted ? (finalQuoteSubtotal > 0 ? finalQuoteSubtotal : visitFee) : (isPaidStage ? visitFee : 0));
 
         // Part 2 Itemized Deductions & Breakdown via Central Dual-Commission Engine
-        const feeSettings = await getLiveFeeSettings();
-        const customerFeePercent = feeSettings.customerFeePercent ?? 2.0;
-        const gatewayFeePercent = feeSettings.gatewayFeePercent ?? 0.0;
-        const partnerCommPercent = feeSettings.partnerCommPercent ?? 7.0;
-
         const approvedLaborQuote = finalQuoteSubtotal > 0 ? finalQuoteSubtotal : part2PaidAmt;
         const advPaidAtBooking = parseFloat(b.advance_amount_paid !== null && b.advance_amount_paid !== undefined ? b.advance_amount_paid : part1PaidAmt);
 
@@ -1201,7 +1237,7 @@ async function bookingsRoutes(fastify, options) {
             escrowGuarantee: isCancelled ? 'Escrow Released & Refunded' : '100% Protected under Shazu One Escrow'
           }
         };
-      }));
+      });
 
       return {
         success: true,

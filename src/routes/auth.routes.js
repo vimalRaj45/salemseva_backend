@@ -1635,24 +1635,24 @@ async function authRoutes(fastify, options) {
 
       const userCleanPhone = (u.phone || '').replace(/[^0-9]/g, '').slice(-10);
 
-      // Fetch real aggregate stats from bookings
-      const bookingsCountRes = await query(`
-        SELECT 
-          COUNT(*)::int as total_bookings,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END)::int as completed_bookings,
-          COUNT(CASE WHEN status NOT IN ('completed', 'cancelled') THEN 1 END)::int as active_bookings
-        FROM bookings
-        WHERE RIGHT(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g'), 10) = $1
-      `, [userCleanPhone]);
+      // Fetch real aggregate stats and referrals in parallel via Promise.all
+      const [bookingsCountRes, refCountRes] = await Promise.all([
+        query(`
+          SELECT 
+            COUNT(*)::int as total_bookings,
+            COUNT(CASE WHEN status = 'completed' THEN 1 END)::int as completed_bookings,
+            COUNT(CASE WHEN status NOT IN ('completed', 'cancelled') THEN 1 END)::int as active_bookings
+          FROM bookings
+          WHERE RIGHT(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g'), 10) = $1
+        `, [userCleanPhone]),
+        query(`
+          SELECT COUNT(*)::int as count
+          FROM users
+          WHERE referred_by = $1 AND referral_code IS NOT NULL
+        `, [u.referral_code || ''])
+      ]);
 
       const bStats = bookingsCountRes.rows[0] || { total_bookings: 0, completed_bookings: 0, active_bookings: 0 };
-
-      // Real referral count
-      const refCountRes = await query(`
-        SELECT COUNT(*)::int as count
-        FROM users
-        WHERE referred_by = $1 AND referral_code IS NOT NULL
-      `, [u.referral_code || '']);
       const referralCount = refCountRes.rows[0]?.count || 0;
 
       return {

@@ -54,11 +54,21 @@ function getEnvCommissionPercent() {
   return getPartnerCommissionPercent();
 }
 
+let cachedFeeSettings = null;
+let feeSettingsExpiry = 0;
+let cachedQualitySettings = null;
+let qualitySettingsExpiry = 0;
+const SETTINGS_CACHE_TTL_MS = 30000;
+
 /**
- * Real-time query to PostgreSQL platform_settings table.
- * Fetches the live configuration on every call without stale caching.
+ * Real-time query to PostgreSQL platform_settings table with 30s in-memory TTL caching.
+ * Fetches the live configuration and automatically invalidates whenever admin modifies settings.
  */
 async function getLiveFeeSettings() {
+  const now = Date.now();
+  if (cachedFeeSettings && now < feeSettingsExpiry) {
+    return cachedFeeSettings;
+  }
   try {
     const res = await query(`
       SELECT 
@@ -109,6 +119,8 @@ async function getLiveFeeSettings() {
         businessMerchantName: getEnvMerchantName() || row.business_merchant_name || '',
         paymentGatewayMode: row.payment_gateway_mode || process.env.PAYMENT_GATEWAY_MODE || 'DYNAMIC_QR'
       };
+      cachedFeeSettings = latestSettings;
+      feeSettingsExpiry = now + SETTINGS_CACHE_TTL_MS;
       return latestSettings;
     }
   } catch (err) {
@@ -119,7 +131,10 @@ async function getLiveFeeSettings() {
 }
 
 function invalidateCommissionCache() {
-  // Real-time queries bypass cache; kept for backward-compatibility call sites
+  cachedFeeSettings = null;
+  feeSettingsExpiry = 0;
+  cachedQualitySettings = null;
+  qualitySettingsExpiry = 0;
 }
 
 /**
@@ -220,6 +235,10 @@ function calculateCommissionSplit(totalAmount, percent = getPartnerCommissionPer
 }
 
 async function getLiveQualitySettings() {
+  const now = Date.now();
+  if (cachedQualitySettings && now < qualitySettingsExpiry) {
+    return cachedQualitySettings;
+  }
   try {
     const res = await query(`
       SELECT 
@@ -237,7 +256,7 @@ async function getLiveQualitySettings() {
     `);
     if (res.rows.length > 0) {
       const row = res.rows[0];
-      return {
+      cachedQualitySettings = {
         enabled: row.quality_governance_enabled != null ? Boolean(row.quality_governance_enabled) : true,
         throttleRating: row.quality_throttle_rating != null ? parseFloat(row.quality_throttle_rating) : 4.0,
         throttleDailyCap: row.quality_throttle_daily_cap != null ? parseInt(row.quality_throttle_daily_cap, 10) : 1,
@@ -247,6 +266,8 @@ async function getLiveQualitySettings() {
         suspensionRating: row.quality_suspension_rating != null ? parseFloat(row.quality_suspension_rating) : 3.5,
         suspensionMinReviews: row.quality_suspension_min_reviews != null ? parseInt(row.quality_suspension_min_reviews, 10) : 5
       };
+      qualitySettingsExpiry = now + SETTINGS_CACHE_TTL_MS;
+      return cachedQualitySettings;
     }
   } catch (err) {
     // Return sensible defaults if columns are not yet initialized

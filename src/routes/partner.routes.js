@@ -108,23 +108,30 @@ async function partnerRoutes(fastify, options) {
         ...(Array.isArray(tech.secondary_trades) ? tech.secondary_trades : [])
       ].filter(Boolean);
 
-      // Calculate technician's daily job capacity and today's taken count (capped 1 to 4)
+      // Calculate technician's daily job capacity (capped 1 to 4)
       const techDailyCapacity = Math.min(4, Math.max(1, parseInt(tech.daily_job_capacity, 10) || 4));
-      const todayCountRes = await query(`
+
+      // Asynchronously initiate count of today's taken jobs in parallel
+      const todayCountPromise = query(`
         SELECT COUNT(*)::int as count 
         FROM bookings 
         WHERE technician_id = $1 
           AND (created_at >= CURRENT_DATE OR scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
           AND status NOT IN ('cancelled', 'created')
       `, [tech.id]);
+
+      // Asynchronously initiate count of today's taken jobs and fee settings in parallel
+      const [todayCountRes, liveFees] = await Promise.all([
+        todayCountPromise,
+        getLiveFeeSettings()
+      ]);
       const jobsTakenToday = parseInt(todayCountRes.rows[0]?.count || 0, 10);
       const canTakeMoreJobsToday = jobsTakenToday < techDailyCapacity;
+      const partnerEarningsMultiplier = Math.max(0, (100 - liveFees.partnerCommPercent) / 100.0);
 
-      // Get latest active job for this partner from DB (prioritize technician's own assigned jobs over unassigned broadcast requests)
-      // If technician has reached daily job limit, suppress unassigned broadcast requests ($5 = true)
-      // Filter strictly by the technician's chosen operational areas (assigned_localities)
-      // Exclude jobs/customers that this technician rejected for the current day. Other customer requests remain unaffected!
-      const jobRes = await query(`
+      // Execute active job, cancellation notice, offline request, appointment queue, and financial metrics in parallel
+      const [jobRes, cancelledRes, directJobRes, myScheduledRes, statsRes] = await Promise.all([
+        query(`
         SELECT * FROM bookings 
         WHERE (
           technician_id = $1 
@@ -172,17 +179,9 @@ async function partnerRoutes(fastify, options) {
           END,
           created_at DESC 
         LIMIT 1
-      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null, canTakeMoreJobsToday]);
+      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], cleanPhone, tech.assigned_localities || null, canTakeMoreJobsToday]),
 
-      const activeJob = jobRes.rows[0] || null;
-      if (activeJob && (!activeJob.customer_otp || String(activeJob.customer_otp).trim().length !== 4)) {
-        const genOtp = String(Math.floor(1000 + Math.random() * 9000));
-        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [genOtp, activeJob.id]);
-        activeJob.customer_otp = genOtp;
-      }
-
-      // Check if there is a recently cancelled booking for this technician or trade
-      const cancelledRes = await query(`
+        query(`
         SELECT b.*, al.metadata as cancel_metadata, al.created_at as cancelled_at
         FROM bookings b
         LEFT JOIN audit_logs al ON b.id = al.booking_id AND al.event_type = 'BOOKING_CANCELLED'
@@ -211,7 +210,38 @@ async function partnerRoutes(fastify, options) {
           AND b.created_at >= NOW() - INTERVAL '12 hours'
         ORDER BY b.created_at DESC 
         LIMIT 1
-      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], tech.assigned_localities || null]);
+      `, [tech.id, allTechTrades.length > 0 ? allTechTrades : [tech.primary_trade], tech.assigned_localities || null]),
+
+        query(`
+        SELECT * FROM bookings 
+        WHERE technician_id = $1 
+          AND status IN ('matching', 'accepted')
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `, [tech.id]),
+
+        query(`
+        SELECT * FROM bookings
+        WHERE technician_id = $1
+          AND status != 'created'
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [tech.id]),
+
+        query(`
+        SELECT 
+          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs_count
+        FROM bookings WHERE technician_id = $1
+      `, [tech.id, partnerEarningsMultiplier])
+      ]);
+
+      const activeJob = jobRes.rows[0] || null;
+      if (activeJob && (!activeJob.customer_otp || String(activeJob.customer_otp).trim().length !== 4)) {
+        const genOtp = String(Math.floor(1000 + Math.random() * 9000));
+        await query('UPDATE bookings SET customer_otp = $1 WHERE id = $2', [genOtp, activeJob.id]);
+        activeJob.customer_otp = genOtp;
+      }
 
       const cancelledJob = cancelledRes.rows[0] || null;
       let cancelNotice = null;
@@ -240,15 +270,6 @@ async function partnerRoutes(fastify, options) {
         };
       }
 
-      // Check if there is an explicit admin request assigned to this technician (especially when offline)
-      const directJobRes = await query(`
-        SELECT * FROM bookings 
-        WHERE technician_id = $1 
-          AND status IN ('matching', 'accepted')
-        ORDER BY created_at DESC 
-        LIMIT 1
-      `, [tech.id]);
-
       const directJob = directJobRes.rows[0] || null;
       const offlineJobRequest = directJob ? {
         id: directJob.id,
@@ -276,24 +297,6 @@ async function partnerRoutes(fastify, options) {
         adminRequested: true
       } : null;
 
-      // Get technician's past and upcoming assigned appointments across all dates (strictly confirmed and paid)
-      const myScheduledRes = await query(`
-        SELECT * FROM bookings
-        WHERE technician_id = $1
-          AND status != 'created'
-        ORDER BY created_at DESC
-        LIMIT 100
-      `, [tech.id]);
-
-      // Calculate real today earnings and completed jobs from actual DB bookings using dynamic commission
-      const liveFees = await getLiveFeeSettings();
-      const partnerEarningsMultiplier = Math.max(0, (100 - liveFees.partnerCommPercent) / 100.0);
-      const statsRes = await query(`
-        SELECT 
-          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs_count
-        FROM bookings WHERE technician_id = $1
-      `, [tech.id, partnerEarningsMultiplier]);
       const techStats = statsRes.rows[0] || { today_earnings: 0, completed_jobs_count: 0 };
       const realTodayEarnings = parseFloat(techStats.today_earnings || 0);
       const realJobsCount = parseInt(techStats.completed_jobs_count || tech.jobs_completed_count || 0, 10);
