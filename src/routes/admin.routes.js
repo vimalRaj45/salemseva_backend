@@ -615,32 +615,57 @@ async function adminRoutes(fastify, options) {
           p.razorpay_payment_id,
           p.payment_method,
           p.payment_status,
-          p.payment_amount,
+          p.verified_inflow,
+          p.pending_inflow,
+          p.refund_outflow,
           p.payment_tech_payout,
           p.payment_platform_commission,
           p.payout_utr,
           p.customer_utr,
           p.settled_at,
-          p.successful_payments_count,
+          p.verified_payments_count,
+          p.pending_payments_count,
           p.failed_payments_count,
           p.failed_payments_amount
         FROM bookings b
         LEFT JOIN technicians t ON b.technician_id = t.id
         LEFT JOIN LATERAL (
           SELECT 
-            COALESCE(SUM(amount_total) FILTER (WHERE status != 'failed'), 0) as payment_amount,
-            COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as payment_tech_payout,
-            COALESCE(SUM(platform_commission) FILTER (WHERE status != 'failed'), 0) as payment_platform_commission,
+            -- Verified customer inflows (money actually verified into platform account)
+            COALESCE(SUM(amount_total) FILTER (
+              WHERE status::text NOT IN ('failed', 'refunded') 
+                AND (verification_status = 'verified' OR (verification_status IS NULL AND (payment_method IS NULL OR payment_method NOT ILIKE '%qr%')))
+            ), 0) as verified_inflow,
+
+            -- Pending / unverified incoming payments (QR submitted by customer, waiting for admin check)
+            COALESCE(SUM(amount_total) FILTER (
+              WHERE status::text NOT IN ('failed', 'refunded') 
+                AND verification_status = 'pending'
+            ), 0) as pending_inflow,
+
+            -- Refund records (recorded when refund was processed or initiated)
+            COALESCE(SUM(amount_total) FILTER (WHERE status::text = 'refunded'), 0) as refund_outflow,
+
+            COALESCE(SUM(tech_payout_amount) FILTER (WHERE status::text NOT IN ('failed', 'refunded')), 0) as payment_tech_payout,
+            COALESCE(SUM(platform_commission) FILTER (WHERE status::text NOT IN ('failed', 'refunded')), 0) as payment_platform_commission,
             MAX(id::text) as payment_id,
             MAX(razorpay_payment_id) as razorpay_payment_id,
             MAX(payment_method) as payment_method,
             MAX(status::text) as payment_status,
+            MAX(verification_status) as verification_status,
             MAX(payout_utr) as payout_utr,
             MAX(customer_utr) as customer_utr,
             MAX(settled_at) as settled_at,
-            COUNT(*) FILTER (WHERE status != 'failed') as successful_payments_count,
-            COUNT(*) FILTER (WHERE status = 'failed') as failed_payments_count,
-            COALESCE(SUM(amount_total) FILTER (WHERE status = 'failed'), 0) as failed_payments_amount
+            COUNT(*) FILTER (
+              WHERE status::text NOT IN ('failed', 'refunded') 
+                AND (verification_status = 'verified' OR (verification_status IS NULL AND (payment_method IS NULL OR payment_method NOT ILIKE '%qr%')))
+            ) as verified_payments_count,
+            COUNT(*) FILTER (
+              WHERE status::text NOT IN ('failed', 'refunded') 
+                AND verification_status = 'pending'
+            ) as pending_payments_count,
+            COUNT(*) FILTER (WHERE status::text = 'failed') as failed_payments_count,
+            COALESCE(SUM(amount_total) FILTER (WHERE status::text = 'failed'), 0) as failed_payments_amount
           FROM payments WHERE booking_id = b.id
         ) p ON true
         ${whereClause}
@@ -651,7 +676,7 @@ async function adminRoutes(fastify, options) {
       const result = await query(sql, params);
       const rows = result.rows || [];
 
-      // Calculate end-to-end financial aggregations (strictly non-failed funds)
+      // Calculate end-to-end financial aggregations (strictly non-failed, confirmed funds)
       let totalGross = 0;
       let totalCustomerPlatformFees = 0;
       let totalGatewayFees = 0;
@@ -677,22 +702,22 @@ async function adminRoutes(fastify, options) {
         const isCompleted = r.booking_status === 'completed';
         const isCreated = r.booking_status === 'created';
 
+        const verifiedInflow = parseFloat(r.verified_inflow || 0.00);
+        const pendingInflow = parseFloat(r.pending_inflow || 0.00);
+        const refundOutflow = parseFloat(r.refund_outflow || 0.00);
         const failedAmountForRow = parseFloat(r.failed_payments_amount || 0.00);
         const failedCountForRow = parseInt(r.failed_payments_count || 0, 10);
         totalFailedPaymentsAmount += failedAmountForRow;
         totalFailedPaymentsCount += failedCountForRow;
 
-        // Strictly exclude failed payments. If booking is in 'created' status and no successful payment occurred, gross is 0.00
-        const recordedPaymentAmount = parseFloat(r.payment_amount || 0.00);
-        const successfulCount = parseInt(r.successful_payments_count || 0, 10);
-
+        // Strictly count ONLY verified funds in Gross Inflow. If unverified or failed, gross is 0.00
         let gross = 0.00;
-        if (successfulCount > 0 && recordedPaymentAmount > 0) {
-          gross = recordedPaymentAmount;
-        } else if (!isCreated && !isCancelled) {
+        if (verifiedInflow > 0) {
+          gross = verifiedInflow;
+        } else if (isCompleted) {
           const visitFee = parseFloat(r.visit_fee) || 49.00;
           const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
-          gross = isCompleted && quoteSubtotal > 0 ? quoteSubtotal : visitFee;
+          gross = quoteSubtotal > 0 ? quoteSubtotal : visitFee;
         }
 
         // Customer and Technician cutoff calculations via Central Dual-Commission Engine
@@ -701,13 +726,30 @@ async function adminRoutes(fastify, options) {
         let techCommissionCut = 0.00;
         let techPayout = 0.00;
         let platformCut = 0.00;
+        let refund = 0.00;
 
         const quoteSubtotal = parseFloat(r.quote_subtotal) || 0.00;
         const advanceAmount = parseFloat(r.advance_amount_paid !== null && r.advance_amount_paid !== undefined
           ? r.advance_amount_paid
           : Math.max(0, parseFloat(r.visit_fee || 99) - parseFloat(r.coupon_discount || 0)));
 
-        if (isCompleted && quoteSubtotal > 0) {
+        if (isCancelled) {
+          if (verifiedInflow > 0) {
+            // Money was actually received in platform bank account before cancellation
+            const calculatedRefund = r.refund_amount != null ? parseFloat(r.refund_amount) : Math.max(0, verifiedInflow - parseFloat(r.refund_platform_fee || 0));
+            refund = parseFloat(calculatedRefund.toFixed(2));
+            platformCut = parseFloat((r.refund_platform_fee != null ? parseFloat(r.refund_platform_fee) : Math.max(0, verifiedInflow - refund)).toFixed(2));
+            if (r.technician_name && !r.technician_name.includes('Pre-Dispatch')) {
+              techPayout = parseFloat(Math.max(0, verifiedInflow - refund - platformCut).toFixed(2));
+            }
+          } else {
+            // Cancelled when payment was never received/verified -> ₹0 revenue, ₹0 refund due
+            gross = 0.00;
+            refund = 0.00;
+            platformCut = 0.00;
+            techPayout = 0.00;
+          }
+        } else if (isCompleted && quoteSubtotal > 0) {
           const inv = calculateDualCommissionInvoice({
             totalJobAmount: quoteSubtotal,
             actualAdvancePaid: advanceAmount,
@@ -722,34 +764,45 @@ async function adminRoutes(fastify, options) {
           techCommissionCut = inv.partnerCommissionAmount;
           techPayout = parseFloat(r.payment_tech_payout) || inv.partnerDirectRouteTransfer;
           platformCut = inv.platformTotalRetained;
-        } else if (gross > 0 && !isCancelled) {
+        } else if (gross > 0) {
           customerPlatformCut = parseFloat(((gross * customerFeePercent) / 100).toFixed(2));
           gatewayFee = parseFloat(((gross * gatewayFeePercent) / 100).toFixed(2));
           techCommissionCut = parseFloat(((gross * platformCommRate)).toFixed(2));
           techPayout = parseFloat((gross - techCommissionCut).toFixed(2));
           platformCut = parseFloat((customerPlatformCut + techCommissionCut).toFixed(2));
-        } else if (isCancelled) {
-          if (r.technician_name && r.technician_name !== 'None (Pre-Dispatch)') {
-            techPayout = gross; // Travel fuel compensation if dispatched
-          }
-          if (r.refund_platform_fee) {
-            platformCut = parseFloat(r.refund_platform_fee);
-          }
         }
 
-        // Customer Refund & Gateway Fee Retention
-        let refund = 0;
+        // Granular transaction status for unambiguous admin understanding
+        let txStatus = 'UNPAID';
         if (isCancelled) {
-          refund = parseFloat(r.refund_amount !== null && r.refund_amount !== undefined ? r.refund_amount : ((r.cancellation_reason?.includes('customer') || !r.technician_name) ? gross : 0));
+          if (verifiedInflow <= 0 && pendingInflow <= 0) {
+            txStatus = 'CANCELLED_UNPAID';
+          } else if (verifiedInflow <= 0 && pendingInflow > 0) {
+            txStatus = 'UNVERIFIED';
+          } else {
+            txStatus = (r.refund_status === 'REFUNDED' || r.payout_utr) ? 'REFUNDED' : 'REFUND_PENDING';
+          }
+        } else if (isCompleted) {
+          txStatus = r.payout_utr ? 'SETTLED' : 'ESCROW_HELD';
+        } else if (verifiedInflow > 0) {
+          txStatus = 'ESCROW_HELD';
+        } else if (pendingInflow > 0) {
+          txStatus = 'UNVERIFIED';
+        } else {
+          txStatus = 'UNPAID';
         }
 
         // Update overall summary with strictly confirmed amounts
-        totalGross += gross;
-        totalCustomerPlatformFees += customerPlatformCut;
-        totalGatewayFees += gatewayFee;
-        totalPartnerCommissionCut += techCommissionCut;
-        totalTechPayout += techPayout;
-        totalPlatformCut += platformCut;
+        if (gross > 0) {
+          totalGross += gross;
+          totalCustomerPlatformFees += customerPlatformCut;
+          totalGatewayFees += gatewayFee;
+          totalPartnerCommissionCut += techCommissionCut;
+          totalTechPayout += techPayout;
+          totalPlatformCut += platformCut;
+        } else if (isCancelled && platformCut > 0) {
+          totalPlatformCut += platformCut;
+        }
         totalCustomerRefunds += refund;
         if (isCompleted) completedCount++;
 
@@ -759,7 +812,7 @@ async function adminRoutes(fastify, options) {
           regionMap[loc] = { locality: loc, gross: 0, orders: 0, techPayout: 0, platformCut: 0 };
         }
         regionMap[loc].gross += gross;
-        regionMap[loc].orders += 1;
+        regionMap[loc].orders += (gross > 0 || isCompleted) ? 1 : 0;
         regionMap[loc].techPayout += techPayout;
         regionMap[loc].platformCut += platformCut;
 
@@ -772,7 +825,7 @@ async function adminRoutes(fastify, options) {
         dailyMap[dateKey].techPayout += techPayout;
         dailyMap[dateKey].razorpayFee += gatewayFee;
         dailyMap[dateKey].platformCut += platformCut;
-        dailyMap[dateKey].orders += 1;
+        dailyMap[dateKey].orders += (gross > 0 || isCompleted) ? 1 : 0;
 
         return {
           id: r.payment_id || `txn_${r.booking_id}`,
@@ -806,7 +859,7 @@ async function adminRoutes(fastify, options) {
           failedCount: failedCountForRow,
           paymentMethod: r.payment_method || 'UPI (Direct Business QR)',
           razorpayPaymentId: r.razorpay_payment_id || `pay_${String(r.booking_id || '').substring(0, 8)}`,
-          status: isCancelled ? 'REFUNDED' : (isCompleted ? (r.payout_utr ? 'SETTLED' : 'ESCROW_HELD') : (gross > 0 ? 'ESCROW_HELD' : 'UNPAID'))
+          status: txStatus
         };
       });
 
@@ -826,6 +879,8 @@ async function adminRoutes(fastify, options) {
         platformCut: parseFloat(dm.platformCut.toFixed(2))
       })).sort((a, b) => a.date.localeCompare(b.date));
 
+      const confirmedOrdersCount = transactions.filter(t => t.grossAmount > 0 || t.bookingStatus === 'completed').length;
+
       const responsePayload = {
         summary: {
           totalGross: parseFloat(totalGross.toFixed(2)),
@@ -841,7 +896,7 @@ async function adminRoutes(fastify, options) {
           netPlatformEarnings: parseFloat((totalPlatformCut - totalGatewayFees).toFixed(2)),
           totalFailedPaymentsAmount: parseFloat(totalFailedPaymentsAmount.toFixed(2)),
           totalFailedPaymentsCount: totalFailedPaymentsCount,
-          totalTransactions: transactions.length,
+          totalTransactions: confirmedOrdersCount,
           completedOrders: completedCount
         },
         regionBreakdown,
@@ -992,15 +1047,23 @@ async function adminRoutes(fastify, options) {
           b.refund_gateway_fee,
           b.refund_status,
           b.refunded_at,
-          p.id as payment_id,
-          p.payment_method,
-          p.amount_total as paid_amount,
-          p.customer_utr,
-          p.payout_utr as refund_utr
+          p_in.id as payment_id,
+          p_in.payment_method,
+          p_in.amount_total as paid_amount,
+          p_in.customer_utr,
+          p_in.verification_status,
+          COALESCE(p_out.payout_utr, b.refunded_at::text) as refund_utr
         FROM bookings b
         LEFT JOIN LATERAL (
-          SELECT * FROM payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
-        ) p ON true
+          SELECT * FROM payments 
+          WHERE booking_id = b.id AND status NOT IN ('failed', 'refunded') 
+          ORDER BY created_at DESC LIMIT 1
+        ) p_in ON true
+        LEFT JOIN LATERAL (
+          SELECT * FROM payments 
+          WHERE booking_id = b.id AND status = 'refunded' 
+          ORDER BY created_at DESC LIMIT 1
+        ) p_out ON true
         WHERE b.status = 'cancelled'
         ORDER BY b.cancelled_at DESC NULLS LAST, b.created_at DESC
         LIMIT 200
@@ -1008,12 +1071,20 @@ async function adminRoutes(fastify, options) {
 
       const result = await query(sql);
       const refunds = (result.rows || []).map(r => {
-        const originalPaid = parseFloat(r.paid_amount || r.final_amount || r.visit_fee || 99.00);
+        const hasVerifiedPayment = r.paid_amount && (r.verification_status === 'verified' || (r.verification_status == null && r.payment_method !== 'DYNAMIC_UPI_QR'));
+        const originalPaid = hasVerifiedPayment ? parseFloat(r.paid_amount) : 0.00;
         const platformRetention = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
         const gatewayRetention = 0.00;
         const calculatedRefund = parseFloat(Math.max(0, originalPaid - (platformRetention + gatewayRetention)).toFixed(2));
         const finalRefund = r.refund_amount != null ? parseFloat(r.refund_amount) : calculatedRefund;
-        const isRefunded = r.refund_status === 'REFUNDED' || Boolean(r.refund_utr) || Boolean(r.refunded_at);
+        const isRefunded = r.refund_status === 'REFUNDED' || Boolean(r.refund_utr && r.refund_utr.length > 3) || Boolean(r.refunded_at);
+
+        let derivedRefundStatus = 'REFUND_PENDING';
+        if (!hasVerifiedPayment && (!r.paid_amount || r.verification_status === 'pending')) {
+          derivedRefundStatus = 'UNVERIFIED_PAYMENT';
+        } else if (isRefunded) {
+          derivedRefundStatus = 'REFUNDED';
+        }
 
         return {
           bookingId: r.booking_id,
@@ -1022,6 +1093,7 @@ async function adminRoutes(fastify, options) {
           locality: r.locality || 'Fairlands',
           serviceId: r.service_id || 'home_service',
           originalPaid,
+          hasVerifiedPayment,
           platformRetention,
           gatewayRetention,
           refundAmount: finalRefund,
@@ -1029,8 +1101,8 @@ async function adminRoutes(fastify, options) {
           cancelledBy: r.cancelled_by || 'customer',
           cancellationReason: r.cancellation_reason || 'Customer requested cancellation',
           cancellationDetails: r.cancellation_details || '',
-          refundStatus: isRefunded ? 'REFUNDED' : (r.refund_status || 'REFUND_PENDING'),
-          refundUtr: r.refund_utr || '',
+          refundStatus: derivedRefundStatus,
+          refundUtr: isRefunded ? (r.refund_utr || '') : '',
           refundedAt: r.refunded_at || null,
           customerUtr: r.customer_utr || '',
           paymentMethod: r.payment_method || 'UPI QR'

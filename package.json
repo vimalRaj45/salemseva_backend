@@ -11,6 +11,7 @@
     "test:e2e": "node tests/e2e_full_suite.test.js",
     "test:integrity": "node tests/production_data_integrity.test.js",
     "test:integrity:strict": "node tests/production_data_integrity.test.js --strict --no-spawn",
+    "test:role-api": "node tests/role_based_rest_api.test.js",
     "test:security": "node tests/security_guard.test.js",
     "test:sql": "node tests/sql_statement_check.js",
     "test:stress": "node tests/stress_test_suite.js",
