@@ -206,11 +206,21 @@ async function ensureMerchantAlertsSchema(queryFn) {
       sender_label VARCHAR(200),
       raw_message TEXT,
       alert_hash VARCHAR(64) UNIQUE,
-      matched_payment_id INT NULL,
+      matched_payment_id VARCHAR(80) NULL,
       matched_at TIMESTAMPTZ NULL,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
   `);
+  // Ensure existing installations upgrade INT -> VARCHAR(80) so UUID payments.id values store cleanly
+  try {
+    await queryFn(`
+      ALTER TABLE merchant_credit_alerts
+      ALTER COLUMN matched_payment_id TYPE VARCHAR(80)
+      USING matched_payment_id::text;
+    `);
+  } catch (_) {
+    // Ignore if already VARCHAR/TEXT or running under mock DB in tests
+  }
 }
 
 async function promotePaymentWithAlert(
@@ -224,7 +234,7 @@ async function promotePaymentWithAlert(
       WHERE id = $2 AND matched_payment_id IS NULL
       RETURNING id
     `,
-    [paymentId, alertId]
+    [String(paymentId), alertId]
   );
 
   if (!claimRes.rows || claimRes.rows.length === 0) {

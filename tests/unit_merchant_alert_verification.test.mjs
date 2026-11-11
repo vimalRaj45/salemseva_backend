@@ -292,4 +292,28 @@ describe('Unit Test: Two-Way Auto-Verification, CSV Bulk Verify & Single-Use Ale
     assert.equal(res.matched, false);
     assert.equal(state.payments[0].verification_status, 'pending');
   });
+
+  it('supports UUID payment IDs when matching alerts against payments table', async () => {
+    const { state, queryFn } = createMockDb();
+    const uuidPaymentId = '7f6d2c1a-4b90-4f12-9a33-8e1f2a3b4c5d';
+    state.payments.push({
+      id: uuidPaymentId,
+      booking_id: 'SLM-41487',
+      amount_total: 99,
+      customer_utr: '998877665544',
+      payment_method: 'DYNAMIC_UPI_QR',
+      verification_status: 'pending'
+    });
+
+    const res = await processIncomingMerchantAlert(queryFn, {
+      from: 'alerts@hdfcbank.net',
+      subject: 'Rs.99.00 credited',
+      body: 'UPI/998877665544/SLM-41487'
+    });
+
+    assert.equal(res.matched, true);
+    assert.equal(res.matchedPaymentId, uuidPaymentId);
+    assert.equal(state.alerts[0].matched_payment_id, uuidPaymentId);
+    assert.equal(state.payments[0].verification_status, 'verified');
+  });
 });

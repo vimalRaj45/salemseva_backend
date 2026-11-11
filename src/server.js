@@ -71,7 +71,7 @@ fastify.register(require('./routes/notifications.routes'), { prefix: '/api/v1' }
 // 116 handlers answered with err.message. A driver error string names the table, the column
 // and often the statement, which is a free map of the schema for anyone probing. The detail
 // is logged with the request id; the caller gets the id and nothing else.
-const GENERIC_500 = 'Something went wrong on our side. Quote the requestId when reporting it.';
+const GENERIC_500 = 'Unable to complete this request right now. Please try again in a moment.';
 
 fastify.addHook('onSend', async (req, reply, payload) => {
   if (reply.statusCode < 500) return payload;

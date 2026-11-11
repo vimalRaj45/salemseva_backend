@@ -23,6 +23,22 @@ const {
 
 async function paymentsRoutes(fastify, options) {
   try {
+    await query(`
+      ALTER TABLE payments
+        ADD COLUMN IF NOT EXISTS customer_utr VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS ocr_detected_utr VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS screenshot_url TEXT,
+        ADD COLUMN IF NOT EXISTS verification_status VARCHAR(30) DEFAULT 'pending',
+        ADD COLUMN IF NOT EXISTS verified_by VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITH TIME ZONE,
+        ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS idx_payments_verification_status ON payments(verification_status);`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_payments_customer_utr ON payments(customer_utr);`);
+  } catch (qrColErr) {
+    fastify.log.warn('QR payments schema init note: ' + qrColErr.message);
+  }
+  try {
     await ensureMerchantAlertsSchema(query);
   } catch (schemaErr) {
     fastify.log.warn('Merchant alerts schema init note: ' + schemaErr.message);
@@ -843,11 +859,18 @@ async function paymentsRoutes(fastify, options) {
       }
 
       const parsedAmount = parseFloat(amount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid payment amount greater than ₹0 is required' });
+      }
+      const cleanScreenshotUrl =
+        screenshotUrl && typeof screenshotUrl === 'string' && screenshotUrl.length <= 524288
+          ? screenshotUrl
+          : null;
 
       // Check if booking exists
       let bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
       if (bRes.rows.length === 0) {
-        // If this is an advance fee reservation with a client-generated booking token (e.g. SCHED-1793523...)
+        // If this is an advance fee reservation with a client-generated booking token (e.g. SCHED-... / SLM-...)
         if (String(bookingId).startsWith('SCHED-') || String(bookingId).startsWith('TEMP-') || paymentType === 'ADVANCE_FEE') {
           try {
             await query(`
@@ -947,7 +970,7 @@ async function paymentsRoutes(fastify, options) {
         platformComm,
         cleanUtr,
         ocrDetectedUtr || null,
-        screenshotUrl || null
+        cleanScreenshotUrl
       ]);
 
       let finalPaymentRow = insertRes.rows[0];
@@ -1084,6 +1107,24 @@ async function paymentsRoutes(fastify, options) {
       };
     } catch (err) {
       fastify.log.error('Submit manual QR error:', err);
+      if (err && err.code === '23505') {
+        return reply.status(409).send({
+          success: false,
+          error: 'This payment reference or transaction has already been recorded.'
+        });
+      }
+      if (err && err.code === '23503') {
+        return reply.status(404).send({
+          success: false,
+          error: 'Booking record could not be linked. Please refresh and start checkout again.'
+        });
+      }
+      if (err && err.code === '22P02') {
+        return reply.status(400).send({
+          success: false,
+          error: 'Invalid payment or booking identifier format.'
+        });
+      }
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
