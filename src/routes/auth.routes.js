@@ -1769,6 +1769,22 @@ async function authRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: e.message });
     }
   });
+
+  // 8. Client Session Sync (graceful session acknowledgement)
+  fastify.post('/auth/session', async (req, reply) => {
+    try {
+      const { phone, role = 'customer', name = '' } = req.body || {};
+      return {
+        success: true,
+        recorded: Boolean(phone),
+        role,
+        name
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
 }
 
 module.exports = authRoutes;

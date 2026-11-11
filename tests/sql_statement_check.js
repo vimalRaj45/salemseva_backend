@@ -109,7 +109,18 @@ const CASES = [
     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
     ON CONFLICT (alert_hash) DO NOTHING
     RETURNING *`,
-    ['BANK_ALERT', 99, '123456789012', 'SLM-00001', 'Bank', 'Credit alert', 'probe_hash_001']]
+    ['BANK_ALERT', 99, '123456789012', 'SLM-00001', 'Bank', 'Credit alert', 'probe_hash_001']],
+  ['chat_messages select', `
+    SELECT id, booking_id, sender_role, sender_name, message_text, attachment_url, is_read, created_at
+    FROM chat_messages
+    WHERE booking_id = $1
+    ORDER BY created_at ASC`,
+    ['probe-booking']],
+  ['chat_messages insert', `
+    INSERT INTO chat_messages (booking_id, sender_role, sender_name, message_text, attachment_url)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id, booking_id, sender_role, sender_name, message_text, attachment_url, is_read, created_at`,
+    ['probe-booking', 'customer', 'Customer', 'Probe message', null]]
 ];
 
 (async () => {

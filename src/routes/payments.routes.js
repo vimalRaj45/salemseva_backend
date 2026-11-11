@@ -1163,8 +1163,8 @@ async function paymentsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Booking ID is required' });
       }
 
-      const parsedAmount = parseFloat(amount);
-      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      const parsedAmount = parseFloat(amount ?? 0);
+      if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
         return reply.status(400).send({ success: false, error: 'Valid doorstep collection amount is required' });
       }
 
@@ -1230,6 +1230,9 @@ async function paymentsRoutes(fastify, options) {
       const platformComm = Math.max(0, parseFloat((inv.platformTotalRetained - priorPlatformComm).toFixed(2)));
       const storedUtr = cleanOptionalUtr || `TECH-${String(bookingId).slice(-6).toUpperCase()}-${Date.now().toString().slice(-6)}`;
 
+      const paymentMethodLabel = parsedAmount === 0 ? 'ADVANCE_COVERED' : 'DYNAMIC_UPI_QR';
+      const initialVerificationStatus = parsedAmount === 0 ? 'verified' : 'tech_confirmed';
+
       const insertRes = await query(`
         INSERT INTO payments (
           booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
@@ -1238,8 +1241,8 @@ async function paymentsRoutes(fastify, options) {
           created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
-          $7, $8, NULL, 'tech_confirmed', 'PARTNER_PHYSICAL_CHECK',
+          $5, $6, 'escrow_held', $9,
+          $7, $8, NULL, $10, 'PARTNER_PHYSICAL_CHECK',
           NOW()
         )
         RETURNING *;
@@ -1251,24 +1254,28 @@ async function paymentsRoutes(fastify, options) {
         techPayout,
         platformComm,
         storedUtr,
-        cleanOptionalUtr || null
+        cleanOptionalUtr || null,
+        paymentMethodLabel,
+        initialVerificationStatus
       ]);
 
       let finalPaymentRow = insertRes.rows[0];
-      let autoVerified = false;
-      try {
-        const alertMatch = await claimMatchingAlertForPayment(query, {
-          paymentId: finalPaymentRow.id,
-          bookingId,
-          amount: parsedAmount,
-          utr: cleanOptionalUtr || null
-        });
-        if (alertMatch.matched && alertMatch.payment) {
-          finalPaymentRow = alertMatch.payment;
-          autoVerified = true;
+      let autoVerified = parsedAmount === 0;
+      if (parsedAmount > 0) {
+        try {
+          const alertMatch = await claimMatchingAlertForPayment(query, {
+            paymentId: finalPaymentRow.id,
+            bookingId,
+            amount: parsedAmount,
+            utr: cleanOptionalUtr || null
+          });
+          if (alertMatch.matched && alertMatch.payment) {
+            finalPaymentRow = alertMatch.payment;
+            autoVerified = true;
+          }
+        } catch (claimErr) {
+          fastify.log.warn('Doorstep merchant alert claim note: ' + claimErr.message);
         }
-      } catch (claimErr) {
-        fastify.log.warn('Doorstep merchant alert claim note: ' + claimErr.message);
       }
 
       await query(`

@@ -45,6 +45,18 @@ async function bookingsRoutes(fastify, options) {
 
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_amount_paid NUMERIC(10,2) DEFAULT 0.00;
       ALTER TABLE bookings ADD COLUMN IF NOT EXISTS advance_coupon_discount NUMERIC(10,2) DEFAULT 0.00;
+
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        booking_id VARCHAR(30) REFERENCES bookings(id) ON DELETE CASCADE,
+        sender_role VARCHAR(20) NOT NULL,
+        sender_name TEXT,
+        message_text TEXT NOT NULL,
+        attachment_url TEXT,
+        is_read BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+      ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS sender_name TEXT;
     `);
   } catch (schemaErr) {
     fastify.log.warn('Reschedule schema init: ' + schemaErr.message);
@@ -565,7 +577,7 @@ async function bookingsRoutes(fastify, options) {
 
       // Check if booking is scheduled
       const isScheduledBooking = booking.booking_type === 'scheduled' || (Boolean(booking.scheduled_slot) && booking.scheduled_slot !== 'instant_now');
-      const isRideStarted = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status);
+      const isRideStarted = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress', 'completed'].includes(booking.status);
 
       // Check if booking already has an assigned technician
       let technician = null;
@@ -1947,7 +1959,123 @@ async function bookingsRoutes(fastify, options) {
     }
   });
 
+  // 14. Lightweight Booking Summary Lookup (used by partner quote/approval checks)
+  fastify.get('/bookings/:id', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1 LIMIT 1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      return { success: true, booking: bRes.rows[0] };
+    } catch (err) {
+      fastify.log.error({ err, bookingId: req.params?.id }, 'Get booking error');
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 
+  // 15. Real-time Booking Chat Messages (GET & POST)
+  const formatChatMessageRow = (row) => {
+    const sender = row.sender_role || 'customer';
+    const defaultName =
+      sender === 'technician' ? 'Assigned Partner' : sender === 'ops_admin' ? 'Salem Ops' : 'Customer';
+    const createdAt = row.created_at || new Date().toISOString();
+    const dt = new Date(createdAt);
+    return {
+      id: row.id,
+      bookingId: row.booking_id,
+      sender,
+      senderName: row.sender_name || defaultName,
+      text: row.message_text,
+      attachmentUrl: row.attachment_url || null,
+      isRead: Boolean(row.is_read),
+      time: Number.isNaN(dt.getTime())
+        ? 'Just now'
+        : dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: Number.isNaN(dt.getTime()) ? Date.now() : dt.getTime(),
+      createdAt
+    };
+  };
+
+  fastify.get('/bookings/:id/messages', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const bRes = await query('SELECT id FROM bookings WHERE id = $1 LIMIT 1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({
+          success: false,
+          notFound: true,
+          error: 'Booking not found',
+          messages: []
+        });
+      }
+
+      const msgRes = await query(
+        `
+          SELECT id, booking_id, sender_role, sender_name, message_text, attachment_url, is_read, created_at
+          FROM chat_messages
+          WHERE booking_id = $1
+          ORDER BY created_at ASC
+        `,
+        [id]
+      );
+
+      return {
+        success: true,
+        messages: msgRes.rows.map(formatChatMessageRow)
+      };
+    } catch (err) {
+      fastify.log.error({ err, bookingId: req.params?.id }, 'Get booking messages error');
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  fastify.post('/bookings/:id/messages', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { sender, senderRole, senderName, text, message_text, attachmentUrl } = req.body || {};
+      const resolvedText = String(text || message_text || '').trim();
+      if (!resolvedText) {
+        return reply.status(400).send({ success: false, error: 'Message text is required' });
+      }
+
+      const bRes = await query('SELECT id FROM bookings WHERE id = $1 LIMIT 1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const rawRole = String(sender || senderRole || 'customer').toLowerCase().trim();
+      const normalizedRole = ['customer', 'technician', 'ops_admin'].includes(rawRole)
+        ? rawRole
+        : rawRole === 'partner'
+          ? 'technician'
+          : 'customer';
+      const defaultName =
+        normalizedRole === 'technician'
+          ? 'Assigned Partner'
+          : normalizedRole === 'ops_admin'
+            ? 'Salem Ops'
+            : 'Customer';
+      const resolvedSenderName = String(senderName || defaultName).trim().slice(0, 80);
+
+      const insRes = await query(
+        `
+          INSERT INTO chat_messages (booking_id, sender_role, sender_name, message_text, attachment_url)
+          VALUES ($1, $2, $3, $4, $5)
+          RETURNING id, booking_id, sender_role, sender_name, message_text, attachment_url, is_read, created_at
+        `,
+        [id, normalizedRole, resolvedSenderName, resolvedText, attachmentUrl || null]
+      );
+
+      return {
+        success: true,
+        message: formatChatMessageRow(insRes.rows[0])
+      };
+    } catch (err) {
+      fastify.log.error({ err, bookingId: req.params?.id }, 'Post booking message error');
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 }
 
 module.exports = bookingsRoutes;
