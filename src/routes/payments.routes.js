@@ -106,7 +106,7 @@ async function paymentsRoutes(fastify, options) {
     }
   }
 
-  // 1. Create Real Razorpay Order for Escrow Deposit
+  // 1. Create Real Razorpay Order for . Deposit
   fastify.post('/payments/create-order', async (req, reply) => {
     try {
       const { bookingId, amount, currency = 'INR', isDiagnosticOnly = false } = req.body || {};
@@ -140,8 +140,8 @@ async function paymentsRoutes(fastify, options) {
             receipt: `rcpt_${bookingId}`,
             notes: {
               bookingId: bookingId,
-              type: isDiagnosticOnly ? 'DIAGNOSTIC_ESCROW' : 'FINAL_SETTLEMENT',
-              platform: 'Shazu One Escrow'
+              type: isDiagnosticOnly ? 'DIAGNOSTIC_.' : 'FINAL_SETTLEMENT',
+              platform: 'Shazu One .'
             }
           })
         });
@@ -225,22 +225,22 @@ async function paymentsRoutes(fastify, options) {
         if (bookingId) {
           const parsedAmount = (parseFloat(amountPaise) || 9900) / 100;
 
-          // Record the escrow deposit against the columns that actually exist. The previous
+          // Record the . deposit against the columns that actually exist. The previous
           // statement named transaction_id and a status label that is not in the payment_status
           // enum, and the error was swallowed, so no payment was ever recorded here.
           // tech_payout_amount and platform_commission are NOT NULL with no default, so both
           // have to be supplied even though the split is only decided at settlement.
           // Keep the order id exactly as Razorpay sent it. It used to be prefixed with
           // `order_`, which never matched the id stored by /payments/verify, so the conflict
-          // target missed and every webhook added a second escrow row for the same money.
+          // target missed and every webhook added a second . row for the same money.
           const ledgerOrderId = orderId || `order_${paymentId || Date.now()}`;
           await query(`
             INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-            VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+            VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
             ON CONFLICT (razorpay_order_id) DO UPDATE
               SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
                   amount_total = EXCLUDED.amount_total,
-                  status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
+                  status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
           `, [bookingId, ledgerOrderId, paymentId || `pay_${Date.now()}`, parsedAmount]);
 
           // Check if this was a diagnostic advance or quote approval
@@ -285,7 +285,7 @@ async function paymentsRoutes(fastify, options) {
       const payment = pRes.rows[0] || null;
 
       const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status)
-        || (payment && (payment.status === 'escrow_held' || payment.status === 'captured' || payment.status === 'settled'));
+        || (payment && (payment.status === '._held' || payment.status === 'captured' || payment.status === 'settled'));
 
       return {
         success: true,
@@ -300,7 +300,7 @@ async function paymentsRoutes(fastify, options) {
     }
   });
 
-  // 2. Verify Razorpay Payment Signature and Record in Neon DB Escrow Ledger
+  // 2. Verify Razorpay Payment Signature and Record in Neon DB . Ledger
   fastify.post('/payments/verify', async (req, reply) => {
     try {
       const {
@@ -316,7 +316,7 @@ async function paymentsRoutes(fastify, options) {
       if (payment_method === 'cash' || req.body.paymentMethod === 'cash') {
         return reply.status(400).send({
           success: false,
-          error: 'Cash payments are not allowed. Shazu One requires 100% digital escrow payments (UPI / Cards / Net Banking).'
+          error: 'Cash payments are not allowed. Shazu One requires 100% digital . payments (UPI / Cards / Net Banking).'
         });
       }
 
@@ -348,14 +348,14 @@ async function paymentsRoutes(fastify, options) {
       const orderTxId = razorpay_order_id || `order_${Date.now()}`;
       const parsedAmount = parseFloat(amount) || 99.00;
 
-      // Record in Neon DB Payments Escrow Ledger
+      // Record in Neon DB Payments . Ledger
       const insertSql = `
         INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-        VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+        VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
         ON CONFLICT (razorpay_order_id) DO UPDATE
           SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
               amount_total = EXCLUDED.amount_total,
-              status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
+              status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
         RETURNING *;
       `;
 
@@ -471,8 +471,8 @@ async function paymentsRoutes(fastify, options) {
         verified: true,
         paymentId: paymentTxId,
         orderId: orderTxId,
-        escrowStatus: 'HELD_IN_ESCROW',
-        guarantee: '100% Protected under Shazu One Escrow Policy',
+        .Status: 'HELD_IN_.',
+        guarantee: '100% Protected under Shazu One . Policy',
         invoice: dualInvoice,
         routeTransfer: routeTransferResult,
         disbursalSummary: {
@@ -539,7 +539,7 @@ async function paymentsRoutes(fastify, options) {
   });
 
   // 4. Customer Confirms Work Finished & Authorizes Partner Settlement
-  fastify.post('/payments/escrow/release', async (req, reply) => {
+  fastify.post('/payments/./release', async (req, reply) => {
     try {
       const { bookingId, customerOtp, rating = 5, reviewComment } = req.body;
 
@@ -645,10 +645,10 @@ async function paymentsRoutes(fastify, options) {
         }
       }
 
-      // 4. Record Payment in payments table as escrow_held (awaiting Admin disbursal confirmation)
+      // 4. Record Payment in payments table as ._held (awaiting Admin disbursal confirmation)
       const settledRes = await query(`
         UPDATE payments
-        SET status = 'escrow_held',
+        SET status = '._held',
             amount_total = $2,
             tech_payout_amount = $3,
             platform_commission = $4,
@@ -664,7 +664,7 @@ async function paymentsRoutes(fastify, options) {
       if (settledRes.rowCount === 0) {
         await query(`
           INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-          VALUES ($1, $2, $3, $4, 'escrow_held', 'UPI (Pending Partner Disbursal)', NULL, NULL)
+          VALUES ($1, $2, $3, $4, '._held', 'UPI (Pending Partner Disbursal)', NULL, NULL)
         `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut]);
       }
 
@@ -905,7 +905,7 @@ async function paymentsRoutes(fastify, options) {
           created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
+          $5, $6, '._held', 'DYNAMIC_UPI_QR',
           $7, $8, $9, 'pending',
           NOW()
         )
@@ -1130,7 +1130,7 @@ async function paymentsRoutes(fastify, options) {
         SET verification_status = 'verified',
             verified_by = $1,
             verified_at = NOW(),
-            status = 'escrow_held'
+            status = '._held'
         WHERE id = $2
         RETURNING *;
       `, [verifiedBy, payment.id]);
@@ -1149,7 +1149,7 @@ async function paymentsRoutes(fastify, options) {
 
       return {
         success: true,
-        message: `Payment with UTR ${payment.customer_utr} verified successfully. Escrow confirmed.`,
+        message: `Payment with UTR ${payment.customer_utr} verified successfully. . confirmed.`,
         payment: updateRes.rows[0]
       };
     } catch (err) {

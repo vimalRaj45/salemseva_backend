@@ -36,11 +36,11 @@ async function ragRoutes(fastify, options) {
       const slmMatch = queryText.match(/SLM-[A-Za-z0-9\-]+/i);
       const extractedSlm = slmMatch ? slmMatch[0] : null;
 
-      const detectedLocality = SALEM_LOCALITIES.find(loc => 
+      const detectedLocality = SALEM_LOCALITIES.find(loc =>
         new RegExp(`\\b${loc}\\b`, 'i').test(queryText)
       ) || null;
 
-      const detectedTrade = TRADES.find(tr => 
+      const detectedTrade = TRADES.find(tr =>
         new RegExp(`\\b${tr}\\b`, 'i').test(queryText)
       ) || null;
 
@@ -48,7 +48,7 @@ async function ragRoutes(fastify, options) {
       const isBookingIntent = lower.includes('booking') || lower.includes('job') || lower.includes('order') || lower.includes('trip') || extractedSlm || extractedUuid;
       const isTechIntent = lower.includes('tech') || lower.includes('partner') || lower.includes('mechanic') || lower.includes('kyc') || lower.includes('fleet');
       const isCustomerIntent = lower.includes('customer') || lower.includes('user') || lower.includes('client');
-      const isPaymentIntent = lower.includes('pay') || lower.includes('qr') || lower.includes('escrow') || lower.includes('settle') || lower.includes('utr') || lower.includes('disburse');
+      const isPaymentIntent = lower.includes('pay') || lower.includes('qr') || lower.includes('.') || lower.includes('settle') || lower.includes('utr') || lower.includes('disburse');
       const isTicketIntent = lower.includes('ticket') || lower.includes('complaint') || lower.includes('support') || lower.includes('issue') || lower.includes('review');
 
       const searchTerm = `%${queryText.replace(/[%_]/g, '')}%`;
@@ -90,7 +90,7 @@ async function ragRoutes(fastify, options) {
           onlineTechnicians: tMetrics.rows[0]?.online_now || 0,
           pendingQrVerifications: pMetrics.rows[0]?.pending_qr || 0
         };
-      } catch (_) {}
+      } catch (_) { }
 
       // 3. Query Bookings
       if (filterScope === 'all' || filterScope === 'bookings' || isBookingIntent || extractedPhone || extractedUuid) {
@@ -174,7 +174,7 @@ async function ragRoutes(fastify, options) {
         }
       }
 
-      // 6. Query Payments / Escrow
+      // 6. Query Payments / .
       if (filterScope === 'all' || filterScope === 'payments' || isPaymentIntent || lower.includes('qr') || lower.includes('utr')) {
         try {
           const pRes = await query(`
@@ -267,7 +267,7 @@ async function ragRoutes(fastify, options) {
       if (results.bookings.length > 0) {
         contextBlocks.push(
           `Bookings (${results.bookings.length}):\n` +
-          results.bookings.map(b => 
+          results.bookings.map(b =>
             `- ID: ${b.id.slice(0, 8)}... | Status: ${b.status} | Locality: ${b.locality} | Service: ${b.service_id} | Amount: INR ${b.final_total_amount || 0} | Customer: ${b.customer_name || 'N/A'} (${b.customer_phone || 'N/A'}) | Tech: ${b.technician_name || 'Unassigned'}`
           ).join('\n')
         );
@@ -276,7 +276,7 @@ async function ragRoutes(fastify, options) {
       if (results.customers.length > 0) {
         contextBlocks.push(
           `Customers (${results.customers.length}):\n` +
-          results.customers.map(c => 
+          results.customers.map(c =>
             `- Name: ${c.full_name} | Phone: ${c.phone} | Locality: ${c.locality} | Total Bookings: ${c.booking_count}`
           ).join('\n')
         );
@@ -285,7 +285,7 @@ async function ragRoutes(fastify, options) {
       if (results.technicians.length > 0) {
         contextBlocks.push(
           `Technicians (${results.technicians.length}):\n` +
-          results.technicians.map(t => 
+          results.technicians.map(t =>
             `- Name: ${t.full_name} | Phone: ${t.phone} | Trade: ${t.primary_trade} | KYC: ${t.is_kyc_verified ? 'Verified' : 'PENDING'} | Online: ${t.is_online ? 'YES' : 'NO'} | Rating: ${t.rating_avg} (${t.jobs_completed_count} jobs)`
           ).join('\n')
         );
@@ -294,7 +294,7 @@ async function ragRoutes(fastify, options) {
       if (results.payments.length > 0) {
         contextBlocks.push(
           `Payments (${results.payments.length}):\n` +
-          results.payments.map(p => 
+          results.payments.map(p =>
             `- ID: ${p.id.slice(0, 8)}... | Amount: INR ${p.amount} | Method: ${p.payment_method} | UTR: ${p.customer_utr || 'None'} | Verification: ${p.verification_status}`
           ).join('\n')
         );
@@ -303,13 +303,13 @@ async function ragRoutes(fastify, options) {
       if (results.tickets.length > 0) {
         contextBlocks.push(
           `Support Tickets (${results.tickets.length}):\n` +
-          results.tickets.map(tk => 
+          results.tickets.map(tk =>
             `- Ticket: ${tk.ticket_number} | Priority: ${tk.priority} | Status: ${tk.status} | Issue: ${tk.issue_type} | Customer: ${tk.customer_phone}`
           ).join('\n')
         );
       }
 
-      const ragContext = contextBlocks.length > 0 
+      const ragContext = contextBlocks.length > 0
         ? contextBlocks.join('\n\n')
         : 'No specific matching database records found for this query in Shazu One.';
 

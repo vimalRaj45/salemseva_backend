@@ -38,7 +38,7 @@
  *      - GET  /api/v1/admin/technicians (Fleet roster & verification)
  *      - GET  /api/v1/admin/technicians/:id/dossier (Technician comprehensive dossier)
  *      - GET  /api/v1/admin/customers (Customer accounts roster)
- *      - GET  /api/v1/admin/settlements (Settlements & escrow monitoring)
+ *      - GET  /api/v1/admin/settlements (Settlements & . monitoring)
  *      - GET  /api/v1/admin/financials/ledger (Verified gross & payout ledger)
  *      - GET  /api/v1/admin/settings/rewards (Quality governance & fee config)
  *      - POST /api/v1/admin/settings/rewards (Threshold updating)
@@ -383,12 +383,12 @@ async function runRoleBasedSuite() {
       logTest('ADMIN', 'GET', '/api/v1/admin/customers', res.statusCode, ok, `Customers: ${(body.customers || []).length} registered`);
     }
 
-    // 4.8 Admin Settlements & Escrow Command
+    // 4.8 Admin Settlements & . Command
     {
       const res = await fastify.inject({ method: 'GET', url: '/api/v1/admin/settlements' });
       const body = res.json();
       const ok = res.statusCode === 200 && body.success === true;
-      logTest('ADMIN', 'GET', '/api/v1/admin/settlements', res.statusCode, ok, 'Escrow ledger loaded');
+      logTest('ADMIN', 'GET', '/api/v1/admin/settlements', res.statusCode, ok, '. ledger loaded');
     }
 
     // 4.9 Verified Financial Ledger & Revenue Tracking

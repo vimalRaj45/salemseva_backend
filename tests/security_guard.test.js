@@ -9,9 +9,9 @@
  *   2. A protected route refuses a request with no token and rejects a forged token.
  *   3. An administrator session reaches /admin; a customer session does not.
  *   4. The old hardcoded admin password no longer works.
- *   5. /payments/verify writes the escrow row and refuses a forged signature.
+ *   5. /payments/verify writes the . row and refuses a forged signature.
  *   6. The Razorpay webhook refuses an unsigned payload and does not duplicate the
- *      escrow row when it is delivered for an order already on file.
+ *      . row when it is delivered for an order already on file.
  *   7. A destructive maintenance script refuses to run without confirmation.
  *   8. Partner onboarding requires a password, stores it as a scrypt hash, refuses to
  *      rewrite an account that already exists, and never falls back to 'salem123'.
@@ -199,12 +199,12 @@ async function paymentChecks(signedIn) {
 
   const row = (await query('SELECT * FROM payments WHERE booking_id = $1', [bookingId])).rows[0];
   if (!row) {
-    bad('escrow row written to the ledger', 'no payments row for the booking');
+    bad('. row written to the ledger', 'no payments row for the booking');
   } else {
     const amountOk = Number(row.amount_total) === 99;
     const notNullOk = row.tech_payout_amount !== null && row.platform_commission !== null;
-    expect(amountOk && notNullOk && row.status === 'escrow_held',
-      'escrow row written to the ledger',
+    expect(amountOk && notNullOk && row.status === '._held',
+      '. row written to the ledger',
       `status=${row.status} total=${row.amount_total} payout=${row.tech_payout_amount} commission=${row.platform_commission}`);
   }
 
@@ -241,7 +241,7 @@ async function paymentChecks(signedIn) {
   expect(unsignedWebhook.status === 400, 'webhook refuses an unsigned delivery', `HTTP ${unsignedWebhook.status}`);
 
   const rows = (await query('SELECT id FROM payments WHERE booking_id = $1', [bookingId])).rows;
-  expect(rows.length === 1, 'a repeated webhook does not duplicate the escrow row', `${rows.length} row(s)`);
+  expect(rows.length === 1, 'a repeated webhook does not duplicate the . row', `${rows.length} row(s)`);
 }
 
 async function partnerOnboardChecks(signedIn) {
@@ -305,18 +305,18 @@ async function cleanup() {
   const digits = created.phones.map(p => String(p).replace(/\D/g, '').slice(-10)).filter(Boolean);
 
   for (const bookingId of created.bookingIds) {
-    await query('DELETE FROM payments WHERE booking_id = $1', [bookingId]).catch(() => {});
-    await query('DELETE FROM audit_logs WHERE booking_id = $1', [bookingId]).catch(() => {});
-    await query('DELETE FROM bookings WHERE id = $1', [bookingId]).catch(() => {});
+    await query('DELETE FROM payments WHERE booking_id = $1', [bookingId]).catch(() => { });
+    await query('DELETE FROM audit_logs WHERE booking_id = $1', [bookingId]).catch(() => { });
+    await query('DELETE FROM bookings WHERE id = $1', [bookingId]).catch(() => { });
   }
   await query(
     `DELETE FROM users WHERE role <> 'admin' AND RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = ANY($1)`,
     [digits]
-  ).catch(() => {});
+  ).catch(() => { });
   await query(
     `DELETE FROM technicians WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = ANY($1)`,
     [digits]
-  ).catch(() => {});
+  ).catch(() => { });
 
   const left = await query(
     `SELECT (SELECT COUNT(*) FROM users WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = ANY($1)) AS users,

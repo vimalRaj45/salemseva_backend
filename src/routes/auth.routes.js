@@ -17,6 +17,10 @@ const {
   constantTimeEqual
 } = require('../services/password.service');
 const emailService = require('../services/email.service');
+const {
+  resolveTechnicianReferrer,
+  resolveCustomerReferrer
+} = require('../services/referral.service');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -100,7 +104,10 @@ function formatTechnicianUser(t, cleanPhone) {
     secondaryTrades: Array.isArray(t.secondary_trades) ? t.secondary_trades : [],
     secondary_trades: Array.isArray(t.secondary_trades) ? t.secondary_trades : [],
     dailyJobCapacity: Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4)),
-    daily_job_capacity: Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4))
+    daily_job_capacity: Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4)),
+    referralCode: t.referral_code || ('TECH' + (cleanPhone || String(t.phone || '').replace(/\D/g, '').slice(-4) || '9999')),
+    referredByTechId: t.referred_by_tech_id || null,
+    isReferred: Boolean(t.referred_by_tech_id)
   };
 }
 
@@ -123,6 +130,17 @@ function formatCustomerUser(u, cleanPhone, referralCount = 0) {
 }
 
 async function authRoutes(fastify, options) {
+  // Ensure technician referral columns exist before registration or verification queries run
+  try {
+    await query(`
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referred_by_tech_id UUID;
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referral_code VARCHAR(50);
+      ALTER TABLE technicians ADD COLUMN IF NOT EXISTS referral_incentive_paid BOOLEAN DEFAULT FALSE;
+    `);
+  } catch (mErr) {
+    fastify.log.warn('Auth routes technician referral migration note: ' + mErr.message);
+  }
+
   // 1. Production Credentials-Based Login Endpoint (Username / Phone / Email + Password)
   fastify.post('/auth/login', async (req, reply) => {
     try {
@@ -437,6 +455,29 @@ async function authRoutes(fastify, options) {
           : (Array.isArray(secondary_trades) ? secondary_trades : []);
         const sanitizedSecondary = rawSecondary.filter(t => t && t !== trade);
 
+        let referringTechId = null;
+        let referringTechCode = null;
+        if (referralCode && String(referralCode).trim()) {
+          try {
+            const refLookup = await resolveTechnicianReferrer(query, referralCode, cleanPhone);
+            if (!refLookup.ok) {
+              return reply.status(refLookup.status === 404 ? 400 : refLookup.status).send({
+                success: false,
+                error: refLookup.error
+              });
+            }
+            referringTechId = refLookup.referrer.id;
+            referringTechCode = refLookup.referralCode;
+          } catch (dbErr) {
+            fastify.log.error(dbErr);
+            return reply.status(500).send({
+              success: false,
+              error: 'Could not verify partner referral code. Please try again.'
+            });
+          }
+        }
+        const myTechRefCode = 'TECH-' + cleanPhone.slice(-4);
+
         createdUser = {
           id: `tech-${Date.now()}`,
           role: 'technician',
@@ -456,7 +497,11 @@ async function authRoutes(fastify, options) {
           aadhaarCardUrl: safeAadhaarDocUrl,
           upiId: (upiId || '').trim() || null,
           serviceArea: locality,
-          assignedLocalities: [locality.split(',')[0].trim()]
+          assignedLocalities: [locality.split(',')[0].trim()],
+          referralCode: myTechRefCode,
+          referredByTechId: referringTechId,
+          referralCodeUsed: referringTechCode,
+          isReferred: Boolean(referringTechId)
         };
 
         // Insert into DB without overwriting existing data
@@ -472,14 +517,14 @@ async function authRoutes(fastify, options) {
               is_kyc_verified, is_online, assigned_localities, password_hash,
               aadhaar_number, aadhaar_card_url, aadhaar_uploaded_at, upi_vpa,
               years_experience, rating_avg, rating_count, jobs_completed_count,
-              daily_job_capacity
+              daily_job_capacity, referred_by_tech_id, referral_code
             )
             VALUES (
               $1, $2, $3, $4, $5::text[],
               FALSE, FALSE, $6::text[], $7,
               $8, $9::text, CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END, $10,
               $11, 0.00, 0, 0,
-              $12
+              $12, $13, $14
             )
             RETURNING id
           `, [
@@ -488,7 +533,9 @@ async function authRoutes(fastify, options) {
             localities, pwdHash, cleanAadhaar, safeAadhaarDocUrl,
             (upiId || '').trim() || null,
             parseInt(experienceYears, 10) || 0,
-            clampedDailyCapacity
+            clampedDailyCapacity,
+            referringTechId,
+            myTechRefCode
           ]);
           
           if (insertTechRes.rows[0]?.id) {
@@ -508,30 +555,15 @@ async function authRoutes(fastify, options) {
       } else {
         let referredBy = null;
         if (referralCode && String(referralCode).trim()) {
-          const refTrim = String(referralCode).trim().toUpperCase();
-          const refPhone = refTrim.replace(/[^0-9]/g, '').slice(-10);
-
-          if (cleanPhone && (refPhone === cleanPhone || refTrim === ('SEVA' + cleanPhone.slice(-4)))) {
-            return reply.status(400).send({
-              success: false,
-              error: 'You cannot use your own referral code.'
-            });
-          }
-
           try {
-            const refCheck = await query(`
-              SELECT referral_code, phone FROM users 
-              WHERE UPPER(referral_code) = $1 OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
-              LIMIT 1
-            `, [refTrim, refPhone]);
-            if (refCheck.rows.length > 0) {
-              referredBy = refCheck.rows[0].referral_code || refCheck.rows[0].phone;
-            } else {
-              return reply.status(400).send({
+            const refLookup = await resolveCustomerReferrer(query, referralCode, cleanPhone);
+            if (!refLookup.ok) {
+              return reply.status(refLookup.status === 404 ? 400 : refLookup.status).send({
                 success: false,
-                error: `Wrong referral code "${refTrim}". No account found with this referral code. Please check or leave blank.`
+                error: refLookup.error
               });
             }
+            referredBy = refLookup.referralCode;
           } catch (dbErr) {
             fastify.log.error(dbErr);
             return reply.status(500).send({
@@ -588,39 +620,28 @@ async function authRoutes(fastify, options) {
   // POST /auth/verify-referral - Check if a referral code exists before registration
   fastify.post('/auth/verify-referral', async (req, reply) => {
     try {
-      const { referralCode = '', phone = '' } = req.body || {};
-      const refTrim = String(referralCode || '').trim().toUpperCase();
-      const cleanPhone = (phone || '').replace(/[^0-9]/g, '').slice(-10);
-      if (!refTrim) {
-        return reply.status(400).send({ success: false, valid: false, error: 'Please enter a referral code or friend phone' });
-      }
-      const refDigits = refTrim.replace(/[^0-9]/g, '').slice(-10);
-      if (cleanPhone && (cleanPhone === refDigits || refTrim === ('SEVA' + cleanPhone.slice(-4)))) {
-        return reply.status(400).send({ success: false, valid: false, error: 'You cannot use your own referral code.' });
-      }
+      const { referralCode = '', phone = '', role = 'customer' } = req.body || {};
+      const isTech = role === 'technician' || role === 'partner';
+      const refLookup = isTech
+        ? await resolveTechnicianReferrer(query, referralCode, phone)
+        : await resolveCustomerReferrer(query, referralCode, phone);
 
-      const res = await query(`
-        SELECT id, full_name, referral_code, phone FROM users
-        WHERE UPPER(referral_code) = $1
-           OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
-        LIMIT 1
-      `, [refTrim, refDigits]);
-
-      if (res.rows.length === 0) {
-        return reply.status(404).send({
+      if (!refLookup.ok) {
+        return reply.status(refLookup.status).send({
           success: false,
           valid: false,
-          error: `Wrong referral code "${refTrim}". No member found with this referral code.`
+          error: refLookup.error
         });
       }
 
-      const u = res.rows[0];
       return {
         success: true,
         valid: true,
-        referrerName: u.full_name || 'Salem Member',
-        referralCode: u.referral_code || u.phone,
-        message: `Valid referral from ${u.full_name || 'member'}! Flat ₹50 waiver unlocked.`
+        referrerName: refLookup.referrerName,
+        referralCode: refLookup.referralCode,
+        message: isTech
+          ? `Valid partner referral from ${refLookup.referrerName}! Linked to your onboarding.`
+          : `Valid referral from ${refLookup.referrerName}! Flat ₹50 waiver unlocked.`
       };
     } catch (err) {
       fastify.log.error(err);

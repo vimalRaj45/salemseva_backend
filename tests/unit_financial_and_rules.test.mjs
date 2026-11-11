@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * SHAZU ONE: UNIT TEST SUITE
- * Financial Escrow Splits, Coupon Rules, Cancellation Policies & State Machine
+ * Financial . Splits, Coupon Rules, Cancellation Policies & State Machine
  * ============================================================================
  * Uses Node.js native test runner (node:test & node:assert/strict).
  * Zero external runner dependencies required.
@@ -30,10 +30,10 @@ const { checkCancellationWindow } = require('../src/services/cancellation_policy
 // --- Pure Business Logic Implementations Under Test ---
 
 /**
- * Dynamic Escrow Payout Split
+ * Dynamic . Payout Split
  * Platform fee = commissionPercent % (default 2%), Technician = (100 - commissionPercent)%
  */
-export function calculateEscrowSplit(totalAmount, commissionPercent = 2) {
+export function calculate.Split(totalAmount, commissionPercent = 2) {
   if (typeof totalAmount !== 'number' || isNaN(totalAmount) || totalAmount <= 0) {
     throw new Error('Total amount must be a positive number');
   }
@@ -162,9 +162,9 @@ export function isValidStateTransition(currentStatus, nextStatus) {
 // TEST SPECIFICATIONS
 // ============================================================================
 
-describe('Unit Test: Dynamic Platform Commission & Escrow Payout Split', () => {
+describe('Unit Test: Dynamic Platform Commission & . Payout Split', () => {
   it('should accurately split ₹1000 at default 2% commission into ₹20 platform fee and ₹980 technician payout', () => {
-    const split = calculateEscrowSplit(1000, 2);
+    const split = calculate.Split(1000, 2);
     assert.equal(split.platformFee, 20);
     assert.equal(split.technicianPayout, 980);
     assert.equal(split.platformFee + split.technicianPayout, 1000);
@@ -172,35 +172,35 @@ describe('Unit Test: Dynamic Platform Commission & Escrow Payout Split', () => {
 
   it('should dynamically adapt when commission is increased in .env (e.g. 5% or 10%) as business grows', () => {
     // At 5% platform commission
-    const split5 = calculateEscrowSplit(1000, 5);
+    const split5 = calculate.Split(1000, 5);
     assert.equal(split5.platformFee, 50);
     assert.equal(split5.technicianPayout, 950);
     assert.equal(split5.platformFee + split5.technicianPayout, 1000);
 
     // At 8.5% platform commission on ₹1250 job
-    const split8_5 = calculateEscrowSplit(1250, 8.5);
+    const split8_5 = calculate.Split(1250, 8.5);
     assert.equal(split8_5.platformFee, 106.25);
     assert.equal(split8_5.technicianPayout, 1143.75);
     assert.equal(split8_5.platformFee + split8_5.technicianPayout, 1250);
 
     // At 10% platform commission on ₹2500 job
-    const split10 = calculateEscrowSplit(2500, 10);
+    const split10 = calculate.Split(2500, 10);
     assert.equal(split10.platformFee, 250);
     assert.equal(split10.technicianPayout, 2250);
     assert.equal(split10.platformFee + split10.technicianPayout, 2500);
   });
 
   it('should accurately calculate split for standard visitation fee ₹149', () => {
-    const split = calculateEscrowSplit(149, 2);
+    const split = calculate.Split(149, 2);
     assert.equal(split.platformFee, 2.98);
     assert.equal(split.technicianPayout, 146.02);
     assert.equal(Math.round((split.platformFee + split.technicianPayout) * 100) / 100, 149);
   });
 
   it('should reject invalid or negative numbers', () => {
-    assert.throws(() => calculateEscrowSplit(-500), /positive number/);
-    assert.throws(() => calculateEscrowSplit(0), /positive number/);
-    assert.throws(() => calculateEscrowSplit('invalid'), /positive number/);
+    assert.throws(() => calculate.Split(-500), /positive number/);
+    assert.throws(() => calculate.Split(0), /positive number/);
+    assert.throws(() => calculate.Split('invalid'), /positive number/);
   });
 });
 
@@ -436,7 +436,7 @@ describe('Unit Test: Advance Payment Verification & Lead Visibility Guard', () =
 describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger', () => {
   it('should exclude failed payment attempts from Gross Revenue and Customer Inflow', () => {
     const rawPayments = [
-      { id: 'pay_1', amount_total: 99.00, status: 'escrow_held', part: 1 },
+      { id: 'pay_1', amount_total: 99.00, status: '._held', part: 1 },
       { id: 'pay_2_fail', amount_total: 257.55, status: 'failed', part: 2 },
       { id: 'pay_2_success', amount_total: 257.55, status: 'settled', part: 2 }
     ];
@@ -457,8 +457,8 @@ describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger
     const customerFeePercent = 2.0; // 2%
     const gatewayFeePercent = 1.0; // 1% ~ 1.02%
 
-    const part1Txn = { id: 'txn_part1', amount_total: 99.00, status: 'escrow_held' };
-    const part2Txn = { id: 'txn_part2', amount_total: 257.55, status: 'escrow_held' };
+    const part1Txn = { id: 'txn_part1', amount_total: 99.00, status: '._held' };
+    const part2Txn = { id: 'txn_part2', amount_total: 257.55, status: '._held' };
 
     // Itemized deductions calculation
     const netWorkBase = quoteTotal;

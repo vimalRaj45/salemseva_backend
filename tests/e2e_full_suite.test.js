@@ -7,7 +7,7 @@
  * 1. System Health & Dual-Language Services Catalog
  * 2. Customer Booking Lifecycle (Instant & Scheduled)
  * 3. Technician Workflow, Digital On-Site Quote & Real-Time Tracking
- * 4. Escrow Financials & Settlement Payout Split
+ * 4. . Financials & Settlement Payout Split
  * 5. Customer Cancellation & Audit Trail (Pre & Post Dispatch Policies)
  * 6. Real Reviews & Star Ratings (PostgreSQL Grounded + Ops Escalation)
  * 7. Admin Coupons CRUD & Validation (Percentage, Flat, Min-Order, Expiry)
@@ -592,8 +592,8 @@ async function runMasterE2ETestSuite() {
       );
       await pool.query(`DELETE FROM audit_logs WHERE booking_id IN (SELECT id::text FROM bookings WHERE customer_phone = $1)`, [testPhone]);
       await pool.query(`DELETE FROM bookings WHERE customer_phone = $1`, [testPhone]);
-      await pool.query(`DELETE FROM reviews WHERE customer_phone = $1`, [testPhone]).catch(() => {});
-      await pool.query(`DELETE FROM users WHERE role <> 'admin' AND phone = $1`, [testPhone]).catch(() => {});
+      await pool.query(`DELETE FROM reviews WHERE customer_phone = $1`, [testPhone]).catch(() => { });
+      await pool.query(`DELETE FROM users WHERE role <> 'admin' AND phone = $1`, [testPhone]).catch(() => { });
       await pool.end();
       console.log(`  Cleanup                  : rows for ${testPhone} removed`);
     } catch (cleanupErr) {

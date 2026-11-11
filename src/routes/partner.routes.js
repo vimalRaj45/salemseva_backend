@@ -4,6 +4,7 @@ const { query } = require('../db/db');
 const { hashPassword } = require('../services/password.service');
 const { getPartnerCommissionPercent, getLiveFeeSettings, getLiveQualitySettings, calculateDualCommissionInvoice } = require('../services/commission.service');
 const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/privacy');
+const { resolveTechnicianReferrer } = require('../services/referral.service');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -22,7 +23,7 @@ async function partnerRoutes(fastify, options) {
     try {
       const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
       const techIdParam = (req.query?.technicianId || req.query?.id) ? String(req.query.technicianId || req.query.id).trim() : '';
-      
+
       if (!phoneParam && !techIdParam) {
         return reply.send({ success: false, error: 'Technician authentication required' });
       }
@@ -76,7 +77,7 @@ async function partnerRoutes(fastify, options) {
     try {
       const phoneParam = req.query?.phone ? String(req.query.phone).trim() : '';
       const techIdParam = (req.query?.technicianId || req.query?.id) ? String(req.query.technicianId || req.query.id).trim() : '';
-      
+
       if (!phoneParam && !techIdParam) {
         return reply.status(401).send({ success: false, error: 'Technician authentication (phone or ID) is required' });
       }
@@ -262,8 +263,8 @@ async function partnerRoutes(fastify, options) {
           locality: cancelledJob.locality || 'Fairlands, Salem',
           reason: meta.reason || 'Customer cancelled booking',
           stage: meta.previousStatus || 'matching',
-          technicianTravelDisbursal: meta.technicianTravelDisbursal !== undefined 
-            ? meta.technicianTravelDisbursal 
+          technicianTravelDisbursal: meta.technicianTravelDisbursal !== undefined
+            ? meta.technicianTravelDisbursal
             : (parseFloat(cancelledJob.visit_fee) || 99.00),
           platformCommission: 0.00,
           cancelledAt: cancelledJob.cancelled_at || cancelledJob.created_at
@@ -987,18 +988,14 @@ async function partnerRoutes(fastify, options) {
 
       let referringTechId = null;
       if (referralCode && String(referralCode).trim()) {
-        const refClean = String(referralCode).trim().replace(/[^0-9]/g, '').slice(-10);
-        try {
-          const refRes = await query(`
-            SELECT id FROM technicians 
-            WHERE referral_code = $1 
-               OR ($2 <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
-            LIMIT 1
-          `, [String(referralCode).trim().toUpperCase(), refClean]);
-          if (refRes.rows.length > 0) {
-            referringTechId = refRes.rows[0].id;
-          }
-        } catch (rfErr) {}
+        const refLookup = await resolveTechnicianReferrer(query, referralCode, phoneDigits);
+        if (!refLookup.ok) {
+          return reply.status(refLookup.status === 404 ? 400 : refLookup.status).send({
+            success: false,
+            error: refLookup.error
+          });
+        }
+        referringTechId = refLookup.referrer.id;
       }
       const myRefCode = 'TECH-' + phoneDigits.slice(-4);
 
@@ -1046,7 +1043,7 @@ async function partnerRoutes(fastify, options) {
           VALUES ($1, $2, 'technician', $3, $4)
           ON CONFLICT (phone) DO NOTHING
         `, [fullName || 'Salem Verified Partner', cleanPhone, partnerPwdHash, serviceArea || 'Fairlands, Salem']);
-      } catch (uErr) {}
+      } catch (uErr) { }
 
       const hasReferral = Boolean(referralCode && referralCode.trim().length > 0);
       let referralBonus = 0.00;
@@ -1080,7 +1077,7 @@ async function partnerRoutes(fastify, options) {
             timestamp: new Date().toISOString()
           })
         ]);
-      } catch (e) {}
+      } catch (e) { }
 
       const createdTech = res.rows[0];
       const tradeNames = {
@@ -1116,7 +1113,7 @@ async function partnerRoutes(fastify, options) {
 
       return {
         success: true,
-        message: hasReferral 
+        message: hasReferral
           ? `Partner onboarded! Welcome bonus of INR ${referralBonus} unlocked via referral code ${referralCode.toUpperCase()}`
           : 'Partner onboarded and DigiLocker KYC verified successfully in Neon DB',
         technician: createdTech,
@@ -1246,7 +1243,7 @@ async function partnerRoutes(fastify, options) {
         : null;
 
       const inputSec = secondaryTrades !== undefined ? secondaryTrades : secondary_trades;
-      const sanitizedSec = inputSec !== undefined 
+      const sanitizedSec = inputSec !== undefined
         ? (Array.isArray(inputSec) ? inputSec.filter(t => t && t !== trade) : [])
         : null;
 
@@ -1300,7 +1297,7 @@ async function partnerRoutes(fastify, options) {
             role = 'technician'
           WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $3
         `, [fullName || null, serviceArea || null, cleanDigits || 'NOMATCH']);
-      } catch (uErr) {}
+      } catch (uErr) { }
 
       const tradeNames = {
         ac: 'AC Repair & Cooling Expert',
@@ -1596,7 +1593,7 @@ async function partnerRoutes(fastify, options) {
           techShare = parseFloat((totalJob - platformCut).toFixed(2));
         }
 
-        let settlementStatus = 'ESCROW_HELD';
+        let settlementStatus = '._HELD';
         if (row.status === 'completed') {
           if (row.payout_utr && row.payment_status === 'settled') {
             settlementStatus = 'SETTLED_TO_BANK';
@@ -1898,7 +1895,7 @@ async function partnerRoutes(fastify, options) {
              VALUES ($1, $2, $3, $4, $5)`,
             [id, b.scheduled_slot, proposedSlot, 'technician_proposal', reason || 'Technician proposed revised slot']
           );
-        } catch (_) {}
+        } catch (_) { }
 
         return {
           success: true,
@@ -1928,7 +1925,7 @@ async function partnerRoutes(fastify, options) {
              VALUES ($1, $2, $3, $4, $5)`,
             [id, b.scheduled_slot, b.scheduled_slot, 'technician_emergency_handover', reason || 'Technician requested handover to Central Ops']
           );
-        } catch (_) {}
+        } catch (_) { }
 
         return {
           success: true,

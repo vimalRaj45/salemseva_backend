@@ -45,8 +45,6 @@ fastify.register(require('./routes/services.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/bookings.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/payments.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/reviews.routes'), { prefix: '/api/v1' });
-fastify.register(require('./routes/translate.routes'), { prefix: '/api/v1' });
-fastify.register(require('./routes/webrtc.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/partner.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/wallet.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/admin.routes'), { prefix: '/api/v1' });
@@ -58,7 +56,6 @@ fastify.register(require('./routes/settings.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/coupons.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/tickets.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/notifications.routes'), { prefix: '/api/v1' });
-fastify.register(require('./routes/support_agent.routes'), { prefix: '/api/v1' });
 
 // ---------------------------------------------------------------------------
 // Authorization

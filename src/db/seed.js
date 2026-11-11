@@ -5,7 +5,7 @@ const { pool } = require('./db');
 async function seed() {
   console.log(' Starting Neon PostgreSQL DB Initialization & Seeding...');
   const client = await pool.connect();
-  
+
   try {
     // 1. Read and apply schema
     const schemaPath = path.join(__dirname, '..', '..', '..', 'neon_schema.sql');
@@ -238,8 +238,8 @@ async function seed() {
       -- Seed Payments for Completed Booking SLM-73658 (Part 1 Visit + Part 2 Spares/Labor)
       INSERT INTO payments (id, booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at, created_at)
       VALUES
-        ('ca000000-0000-0000-0000-000000000001', 'SLM-73658', 'order_visit_73658', 'pay_visit_73658', 99.00, 99.00, 0.00, 'settled', 'UPI (Instant Escrow)', 'UTR-VISIT-73658', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'),
-        ('ca000000-0000-0000-0000-000000000002', 'SLM-73658', 'order_final_73658', 'pay_final_73658', 900.00, 765.00, 135.00, 'settled', 'UPI (Instant Escrow)', 'UTR-FINAL-73658', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days')
+        ('ca000000-0000-0000-0000-000000000001', 'SLM-73658', 'order_visit_73658', 'pay_visit_73658', 99.00, 99.00, 0.00, 'settled', 'UPI (Instant .)', 'UTR-VISIT-73658', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days'),
+        ('ca000000-0000-0000-0000-000000000002', 'SLM-73658', 'order_final_73658', 'pay_final_73658', 900.00, 765.00, 135.00, 'settled', 'UPI (Instant .)', 'UTR-FINAL-73658', NOW() - INTERVAL '2 days', NOW() - INTERVAL '2 days')
       ON CONFLICT (id) DO NOTHING;
 
       INSERT INTO chat_messages (id, booking_id, sender_role, message_text, created_at)

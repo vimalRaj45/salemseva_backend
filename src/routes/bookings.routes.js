@@ -138,7 +138,7 @@ async function bookingsRoutes(fastify, options) {
           if (sRes.rows.length > 0 && sRes.rows[0].visit_fee !== null) {
             visitFee = parseFloat(sRes.rows[0].visit_fee);
           }
-        } catch (sErr) {}
+        } catch (sErr) { }
       }
       let couponDiscount = 0.00;
 
@@ -200,7 +200,7 @@ async function bookingsRoutes(fastify, options) {
                       }
                       isEligible = Boolean(validReferredBy || parseInt(u.referral_count, 10) > 0);
                     }
-                  } catch (_) {}
+                  } catch (_) { }
                 }
                 if (!isEligible) {
                   couponDiscount = 0.00;
@@ -476,8 +476,8 @@ async function bookingsRoutes(fastify, options) {
 
       return {
         success: true,
-        message: onlineTech 
-          ? 'Inspection booking created and placed into live matching radar' 
+        message: onlineTech
+          ? 'Inspection booking created and placed into live matching radar'
           : 'Booking placed in Shazu One Central Ops queue for assignment within 12 hours or scheduled slot',
         hasOnlineTech: Boolean(onlineTech),
         booking: result.rows[0]
@@ -545,7 +545,7 @@ async function bookingsRoutes(fastify, options) {
           payoutUtr = pRes.rows[0].payout_utr;
           customerUtr = pRes.rows[0].customer_utr;
         }
-      } catch (pErr) {}
+      } catch (pErr) { }
 
       // Fetch customer review if recorded for this booking
       let existingReview = null;
@@ -554,7 +554,7 @@ async function bookingsRoutes(fastify, options) {
         if (revRes.rows.length > 0) {
           existingReview = revRes.rows[0];
         }
-      } catch (rErr) {}
+      } catch (rErr) { }
 
       // Customer coordinates (Default to Fairlands, Salem if not set)
       const custLat = parseFloat(booking.customer_lat) || 11.6643;
@@ -576,13 +576,13 @@ async function bookingsRoutes(fastify, options) {
           } else {
             const techLat = parseFloat(t.current_lat) || 11.6780;
             const techLng = parseFloat(t.current_lng) || 78.1580;
-            
+
             // Calculate real-time distance and dynamic ETA
             const dLat = (custLat - techLat) * (Math.PI / 180);
             const dLon = (custLng - techLng) * (Math.PI / 180);
             const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                      Math.cos(techLat * (Math.PI / 180)) * Math.cos(custLat * (Math.PI / 180)) * 
-                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+              Math.cos(techLat * (Math.PI / 180)) * Math.cos(custLat * (Math.PI / 180)) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
             const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
             const distanceKm = Math.max(0.4, parseFloat((6371 * c * 1.3).toFixed(1)));
             const etaMinutes = Math.max(2, Math.round((distanceKm / 25) * 60));
@@ -658,7 +658,7 @@ async function bookingsRoutes(fastify, options) {
       // hasOnlineTech is true only if:
       // 1. For instant bookings: an online technician is active
       // 2. For scheduled bookings: a technician is officially assigned and ride has started or status is en_route/arrived/etc.
-      const hasOnlineTech = isScheduledBooking 
+      const hasOnlineTech = isScheduledBooking
         ? Boolean(technician && isRideStarted)
         : Boolean(technician && (technician.isOnline || booking.status !== 'matching'));
 
@@ -688,9 +688,9 @@ async function bookingsRoutes(fastify, options) {
             {
               stage: 1,
               id: 'payment_verified',
-              title: 'Request Received & Escrow Verified',
+              title: 'Request Received & . Verified',
               titleTa: 'கோரிக்கை பெறப்பட்டு கட்டணம் சரிபார்க்கப்பட்டது',
-              description: 'Booking token created. Doorstep visit fee held securely in Razorpay escrow.',
+              description: 'Booking token created. Doorstep visit fee held securely in Razorpay ..',
               status: 'completed',
               completedAt: createdAtStr,
               officer: 'Automated Gateway'
@@ -710,7 +710,7 @@ async function bookingsRoutes(fastify, options) {
               id: 'specialist_allocation',
               title: 'Specialist Allocation & Assignment',
               titleTa: 'தொழில்முறை நிபுணர் ஒதுக்கீடு',
-              description: technician 
+              description: technician
                 ? `Specialist assigned: ${technician.name} (${technician.rating} rating, ${technician.jobsCompleted}+ jobs completed).`
                 : 'Central Ops is allocating the highest-rated verified specialist in your Salem zone.',
               status: currentStage >= 3 ? (currentStage > 3 ? 'completed' : 'in_progress') : 'pending',
@@ -732,7 +732,7 @@ async function bookingsRoutes(fastify, options) {
               id: 'pre_dispatch_departure',
               title: 'Pre-Dispatch Readiness & Departure',
               titleTa: 'களப்பணி புறப்பாடு மற்றும் நேரலை கண்காணிப்பு',
-              description: currentStage >= 5 
+              description: currentStage >= 5
                 ? 'Technician has departed for your doorstep. Live GPS navigation active.'
                 : 'Live GPS navigation activates 30 minutes before your scheduled appointment window.',
               status: currentStage >= 5 ? 'completed' : 'scheduled',
@@ -783,9 +783,9 @@ async function bookingsRoutes(fastify, options) {
         dispatchQueueStatus: (!hasOnlineTech && (booking.status === 'matching' || booking.status === 'created')) ? {
           isQueued: true,
           notice: isScheduledBooking
-            ? (technician 
-                ? `Technician ${technician.name} is assigned. Live GPS tracking will unlock when they start their ride.`
-                : 'Your booking has been received by Shazu One Central Ops. We are assigning a certified specialist.')
+            ? (technician
+              ? `Technician ${technician.name} is assigned. Live GPS tracking will unlock when they start their ride.`
+              : 'Your booking has been received by Shazu One Central Ops. We are assigning a certified specialist.')
             : 'No verified technician is currently online in this Salem locality right now.',
           waitWindow: isScheduledBooking ? (booking.scheduled_slot || 'Scheduled Window') : '12 Hours Guarantee Window',
           scheduledSlot: booking.scheduled_slot || 'priority_12h',
@@ -898,7 +898,7 @@ async function bookingsRoutes(fastify, options) {
              VALUES ($1, $2, $3, $4, $5)`,
             [id, b.scheduled_slot, finalSlot, 'customer_accepted_tech_proposal', 'Customer accepted revised technician slot']
           );
-        } catch (_) {}
+        } catch (_) { }
 
         return {
           success: true,
@@ -925,7 +925,7 @@ async function bookingsRoutes(fastify, options) {
              VALUES ($1, $2, $3, $4, $5)`,
             [id, b.scheduled_slot, b.scheduled_slot, 'customer_kept_original_slot', reason || 'Customer declined early arrival and kept original scheduled appointment slot']
           );
-        } catch (_) {}
+        } catch (_) { }
 
         return {
           success: true,
@@ -957,7 +957,7 @@ async function bookingsRoutes(fastify, options) {
                VALUES ($1, $2, $3, $4, $5)`,
               [id, b.scheduled_slot, b.scheduled_slot, 'customer_rejected_tech_proposal', 'Customer requested reassignment by Shazu One Central Ops']
             );
-          } catch (_) {}
+          } catch (_) { }
 
           return {
             success: true,
@@ -988,7 +988,7 @@ async function bookingsRoutes(fastify, options) {
                VALUES ($1, $2, $3, $4, $5)`,
               [id, b.scheduled_slot, targetSlot, 'customer_counter_proposal', reason || 'Customer counter-proposed slot']
             );
-          } catch (_) {}
+          } catch (_) { }
 
           return {
             success: true,
@@ -1173,7 +1173,7 @@ async function bookingsRoutes(fastify, options) {
               transaction_id: `TXN-FINAL-${b.id}`,
               amount: finalQuoteSubtotal,
               status: 'SETTLED',
-              payment_method: 'UPI (Instant Escrow Released)',
+              payment_method: 'UPI (Instant . Released)',
               created_at: b.completed_at || b.created_at
             }
           ];
@@ -1234,7 +1234,7 @@ async function bookingsRoutes(fastify, options) {
               finalSettlementPaid: parseFloat(part2PaidAmt.toFixed(2))
             },
             platformCommission: isCompleted ? parseFloat((finalQuoteSubtotal * (feeSettings.partnerCommPercent / 100.0)).toFixed(2)) : 0,
-            escrowGuarantee: isCancelled ? 'Escrow Released & Refunded' : '100% Protected under Shazu One Escrow'
+            .Guarantee: isCancelled? '. Released & Refunded': '100% Protected under Shazu One .'
           }
         };
       });
@@ -1374,9 +1374,9 @@ async function bookingsRoutes(fastify, options) {
       if (status === 'quote_presented') {
         const qiRes = await query('SELECT * FROM quote_items WHERE booking_id = $1', [targetId]);
         if (qiRes.rows.length === 0) {
-          return reply.status(400).send({ 
-            success: false, 
-            error: 'Cannot present quote: no quote line items found. Technician must add real items first.' 
+          return reply.status(400).send({
+            success: false,
+            error: 'Cannot present quote: no quote line items found. Technician must add real items first.'
           });
         }
       }
@@ -1896,9 +1896,9 @@ async function bookingsRoutes(fastify, options) {
         RETURNING *
       `;
       const updateRes = await query(updateSql, [
-        booking.id, 
-        cancelReasonText, 
-        cancelDetailsText, 
+        booking.id,
+        cancelReasonText,
+        cancelDetailsText,
         cancelledBy,
         refundAmount,
         platformFeeDeduction,
@@ -1924,11 +1924,11 @@ async function bookingsRoutes(fastify, options) {
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'BOOKING_CANCELLED_REFUNDED', $2, $3, $4)
       `, [
-        booking.id, 
-        booking.customer_phone || 'customer', 
-        cancelledBy, 
-        JSON.stringify({ 
-          reason: cancelReasonText, 
+        booking.id,
+        booking.customer_phone || 'customer',
+        cancelledBy,
+        JSON.stringify({
+          reason: cancelReasonText,
           reasonDetails: cancelDetailsText,
           previousStatus: booking.status,
           originalAmount,

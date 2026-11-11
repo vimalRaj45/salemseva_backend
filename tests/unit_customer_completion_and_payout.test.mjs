@@ -38,10 +38,10 @@ describe('Customer-Only Job Completion & Manual Admin Settlement Verification', 
         VALUES ($1, 'Test Customer', '9123456789', $2, 'quote_approved', $3, 600.00, 99.00, '12 Fairlands Main Rd, Salem', 'Fairlands')
       `, [testBookingId, serviceId, techId]);
 
-      // 3. Insert customer payment in escrow_held
+      // 3. Insert customer payment in ._held
       await client.query(`
         INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method)
-        VALUES ($1, 600.00, 590.00, 10.00, 'escrow_held', 'upi')
+        VALUES ($1, 600.00, 590.00, 10.00, '._held', 'upi')
       `, [testBookingId]);
 
       // 4. Simulate Customer completing the job via customer-complete logic
@@ -66,7 +66,7 @@ describe('Customer-Only Job Completion & Manual Admin Settlement Verification', 
       `, [testBookingId, techId]);
 
       assert.strictEqual(pendingCheck.rows.length, 1);
-      assert.strictEqual(pendingCheck.rows[0].payment_status, 'escrow_held');
+      assert.strictEqual(pendingCheck.rows[0].payment_status, '._held');
       assert.strictEqual(pendingCheck.rows[0].payout_utr, null, 'payout_utr must be NULL before Admin confirms');
       assert.strictEqual(pendingCheck.rows[0].payout_status, 'PENDING_DISBURSAL');
       assert.strictEqual(pendingCheck.rows[0].utr_ref, null, 'utr_ref must be NULL before Admin confirms');

@@ -1,5 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const {
+  resolveTechnicianReferrer,
+  resolveCustomerReferrer
+} = require('../src/services/referral.service.js');
 
 describe('Unit Test: Customer Referral Code Verification & Waiver Security', () => {
   it('should reject random referral code in referral check logic', () => {
@@ -75,5 +82,88 @@ describe('Unit Test: Customer Referral Code Verification & Waiver Security', () 
     assert.equal(checkEligibility(unreferredUser), false);
     assert.equal(checkEligibility(fakeReferredUser), false);
     assert.equal(checkEligibility(validReferredUser), true);
+  });
+});
+
+describe('Unit Test: Technician Partner Referral Code Resolution', () => {
+  const sampleTechs = [
+    { id: 'tech-uuid-1', full_name: 'S. Venkatesh', phone: '+91 9842711234', referral_code: 'TECH-1234' },
+    { id: 'tech-uuid-2', full_name: 'M. Karthik', phone: '+91 9443288901', referral_code: null }
+  ];
+
+  const mockQuery = async (sql, params) => {
+    if (sql.includes('FROM technicians')) {
+      const [normCode, phone10] = params;
+      const found = sampleTechs.find((t) => {
+        const storedNorm = String(t.referral_code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const techDigits = t.phone.replace(/[^0-9]/g, '').slice(-10);
+        const defaultNorm = `TECH${techDigits.slice(-4)}`;
+        return (
+          (normCode && storedNorm === normCode) ||
+          (normCode && defaultNorm === normCode) ||
+          (phone10 && techDigits === phone10)
+        );
+      });
+      return { rows: found ? [found] : [] };
+    }
+    if (sql.includes('FROM users')) {
+      const [refTrim, phone10] = params;
+      const sampleUsers = [
+        { id: 'user-1', full_name: 'Murugan', phone: '+919443288901', referral_code: 'SEVA9482' }
+      ];
+      const found = sampleUsers.find((u) => {
+        const uDigits = u.phone.replace(/[^0-9]/g, '').slice(-10);
+        return u.referral_code.toUpperCase() === refTrim || (phone10 && uDigits === phone10);
+      });
+      return { rows: found ? [found] : [] };
+    }
+    return { rows: [] };
+  };
+
+  it('should match hyphenated, unhyphenated, and phone-based technician referral codes', async () => {
+    const byHyphen = await resolveTechnicianReferrer(mockQuery, 'tech-1234', '9000011111');
+    assert.equal(byHyphen.ok, true);
+    assert.equal(byHyphen.referrer.id, 'tech-uuid-1');
+
+    const byPlain = await resolveTechnicianReferrer(mockQuery, 'TECH1234', '9000011111');
+    assert.equal(byPlain.ok, true);
+    assert.equal(byPlain.referrer.id, 'tech-uuid-1');
+
+    const byFallbackDefault = await resolveTechnicianReferrer(mockQuery, 'TECH8901', '9000011111');
+    assert.equal(byFallbackDefault.ok, true);
+    assert.equal(byFallbackDefault.referrer.id, 'tech-uuid-2');
+    assert.equal(byFallbackDefault.referralCode, 'TECH8901');
+
+    const byPhone = await resolveTechnicianReferrer(mockQuery, '9842711234', '9000011111');
+    assert.equal(byPhone.ok, true);
+    assert.equal(byPhone.referrer.id, 'tech-uuid-1');
+  });
+
+  it('should reject invalid or unknown technician referral codes', async () => {
+    const res = await resolveTechnicianReferrer(mockQuery, 'TECH-9999', '9000011111');
+    assert.equal(res.ok, false);
+    assert.equal(res.status, 404);
+    assert.match(res.error, /Wrong referral code/);
+  });
+
+  it('should reject technician self-referrals by code or phone', async () => {
+    const byCode = await resolveTechnicianReferrer(mockQuery, 'TECH-1234', '9842711234');
+    assert.equal(byCode.ok, false);
+    assert.equal(byCode.status, 400);
+    assert.match(byCode.error, /own referral code/i);
+
+    const byPhone = await resolveTechnicianReferrer(mockQuery, '9842711234', '+91 98427 11234');
+    assert.equal(byPhone.ok, false);
+    assert.equal(byPhone.status, 400);
+  });
+
+  it('should resolve customer referral codes consistently', async () => {
+    const valid = await resolveCustomerReferrer(mockQuery, 'SEVA9482', '9000011111');
+    assert.equal(valid.ok, true);
+    assert.equal(valid.referrerName, 'Murugan');
+
+    const invalid = await resolveCustomerReferrer(mockQuery, 'BADCODE', '9000011111');
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.status, 404);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * SHAZU ONE: THREE-SIDED MONEY FLOW & ESCROW INTEGRITY TEST SUITE
+ * SHAZU ONE: THREE-SIDED MONEY FLOW & . INTEGRITY TEST SUITE
  * Validates perfect mathematical alignment across Customer, Technician, and Admin
  * ============================================================================
  * Scenario Tested:

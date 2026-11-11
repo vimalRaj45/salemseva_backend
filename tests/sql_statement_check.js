@@ -12,22 +12,22 @@ require('dotenv').config();
 const { query, pool } = require('../src/db/db');
 
 const CASES = [
-  ['webhook escrow insert', `
+  ['webhook . insert', `
     INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-    VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+    VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
     ON CONFLICT (razorpay_order_id) DO UPDATE
       SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
           amount_total = EXCLUDED.amount_total,
-          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END`,
+          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END`,
     ['probe-booking', 'order_probe', 'pay_probe', 99]],
 
-  ['/payments/verify escrow insert', `
+  ['/payments/verify . insert', `
     INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-    VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
+    VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
     ON CONFLICT (razorpay_order_id) DO UPDATE
       SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
           amount_total = EXCLUDED.amount_total,
-          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
+          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
     RETURNING *`,
     ['probe-booking', 'order_probe', 'pay_probe', 99]],
 
@@ -37,7 +37,7 @@ const CASES = [
         amount_total = $2,
         tech_payout_amount = $3,
         platform_commission = $4,
-        payment_method = 'UPI (Instant Escrow Released)',
+        payment_method = 'UPI (Instant . Released)',
         payout_utr = $5,
         settled_at = NOW()
     WHERE id = (
@@ -48,7 +48,7 @@ const CASES = [
 
   ['settlement insert fallback', `
     INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-    VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant Escrow Released)', $5, NOW())`,
+    VALUES ($1, $2, $3, $4, 'settled', 'UPI (Instant . Released)', $5, NOW())`,
     ['probe-booking', 250, 200, 50, 'UPI-1234567-OKAXIS']],
 
   ['admin travel allowance insert', `
@@ -96,7 +96,7 @@ const CASES = [
     SELECT e.enumlabel FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid
     WHERE t.typname = 'payment_status' ORDER BY e.enumsortorder`);
   const present = labels.rows.map(r => r.enumlabel);
-  const used = ['escrow_held', 'settled', 'refunded'];
+  const used = ['._held', 'settled', 'refunded'];
   const missing = used.filter(l => !present.includes(l));
   console.log(`payment_status labels: ${present.join(', ')}`);
   if (missing.length) {
@@ -111,6 +111,6 @@ const CASES = [
   process.exit(failures === 0 ? 0 : 1);
 })().catch(async (err) => {
   console.error('PROBE ERROR', err.message);
-  try { await pool.end(); } catch (_) {}
+  try { await pool.end(); } catch (_) { }
   process.exit(1);
 });

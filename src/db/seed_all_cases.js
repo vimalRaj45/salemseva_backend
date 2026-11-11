@@ -354,8 +354,8 @@ async function seedAllCases() {
     await query(`
       INSERT INTO payments (id, booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at, created_at)
       VALUES
-        ('ca000000-0000-0000-0000-000000000101', 'SLM-PAST-10', 'order_past_10', 'pay_past_10', 999.00, 979.02, 19.98, 'settled', 'UPI (Instant Escrow)', 'UTR-SLM-1010-UPI', NOW() - INTERVAL '7 days', NOW() - INTERVAL '7 days'),
-        ('ca000000-0000-0000-0000-000000000102', 'SLM-PAST-14', 'order_past_14', 'pay_past_14', 849.00, 832.02, 16.98, 'settled', 'UPI (Instant Escrow)', 'UTR-SLM-1410-UPI', NOW() - INTERVAL '3 days', NOW() - INTERVAL '3 days')
+        ('ca000000-0000-0000-0000-000000000101', 'SLM-PAST-10', 'order_past_10', 'pay_past_10', 999.00, 979.02, 19.98, 'settled', 'UPI (Instant .)', 'UTR-SLM-1010-UPI', NOW() - INTERVAL '7 days', NOW() - INTERVAL '7 days'),
+        ('ca000000-0000-0000-0000-000000000102', 'SLM-PAST-14', 'order_past_14', 'pay_past_14', 849.00, 832.02, 16.98, 'settled', 'UPI (Instant .)', 'UTR-SLM-1410-UPI', NOW() - INTERVAL '3 days', NOW() - INTERVAL '3 days')
       ON CONFLICT (id) DO NOTHING;
     `);
 

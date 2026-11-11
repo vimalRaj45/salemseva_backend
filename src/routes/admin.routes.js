@@ -203,14 +203,14 @@ async function adminRoutes(fastify, options) {
             timestamp: new Date().toISOString()
           })
         ]);
-      } catch (auditErr) {}
+      } catch (auditErr) { }
 
-      return { 
-        success: true, 
-        message: isApproved 
+      return {
+        success: true,
+        message: isApproved
           ? `KYC verified for ${tech.full_name}. Partner is now certified to accept doorstep jobs.`
-          : `KYC rejected for ${tech.full_name}. Partner duty access remains locked until re-verification.`, 
-        technician: tech 
+          : `KYC rejected for ${tech.full_name}. Partner duty access remains locked until re-verification.`,
+        technician: tech
       };
     } catch (err) {
       fastify.log.error(err);
@@ -255,7 +255,7 @@ async function adminRoutes(fastify, options) {
             timestamp: new Date().toISOString()
           })
         ]);
-      } catch (auditErr) {}
+      } catch (auditErr) { }
 
       return {
         success: true,
@@ -312,7 +312,7 @@ async function adminRoutes(fastify, options) {
             timestamp: new Date().toISOString()
           })
         ]);
-      } catch (auditErr) {}
+      } catch (auditErr) { }
 
       return {
         success: true,
@@ -770,9 +770,9 @@ async function adminRoutes(fastify, options) {
             txStatus = (r.refund_status === 'REFUNDED' || r.payout_utr) ? 'REFUNDED' : 'REFUND_PENDING';
           }
         } else if (isCompleted) {
-          txStatus = r.payout_utr ? 'SETTLED' : 'ESCROW_HELD';
+          txStatus = r.payout_utr ? 'SETTLED' : '._HELD';
         } else if (verifiedInflow > 0) {
-          txStatus = 'ESCROW_HELD';
+          txStatus = '._HELD';
         } else if (pendingInflow > 0) {
           txStatus = 'UNVERIFIED';
         } else {
@@ -931,7 +931,7 @@ async function adminRoutes(fastify, options) {
       await query(`
         UPDATE payments
         SET payout_utr = $1,
-            status = CASE WHEN status = 'escrow_held' THEN 'settled' ELSE status END,
+            status = CASE WHEN status = '._held' THEN 'settled' ELSE status END,
             settled_at = COALESCE(settled_at, NOW())
         WHERE booking_id = $2
       `, [cleanUtr, bookingId]);
@@ -1514,8 +1514,8 @@ async function adminRoutes(fastify, options) {
       }
 
       const fullReason = `Customer Unresponsive: ${reason}`;
-      const fullDetails = adminNotes 
-        ? `${reasonDetails} [Admin Note: ${adminNotes}]` 
+      const fullDetails = adminNotes
+        ? `${reasonDetails} [Admin Note: ${adminNotes}]`
         : (reasonDetails || 'Customer did not respond to technician/ops attempts. Technician released by central dispatch.');
 
       const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
@@ -1796,8 +1796,8 @@ async function adminRoutes(fastify, options) {
         // 100% of Advance / Travel fee goes to technician
         techPayoutAmount = parsedAmount;
         platformCommission = 0.00;
-        targetPaymentStatus = 'escrow_held';
-        
+        targetPaymentStatus = '._held';
+
         // If booking is waiting for payment in created or matching, advance to en_route (if tech assigned) or matching/accepted
         if (booking.status === 'created' || booking.status === 'matching') {
           targetStatus = booking.technician_id ? 'en_route' : 'matching';
@@ -1913,7 +1913,7 @@ async function adminRoutes(fastify, options) {
               bookingId: id
             }
           });
-        } catch (pushErr) {}
+        } catch (pushErr) { }
       }
 
       return {
@@ -1990,7 +1990,7 @@ async function adminRoutes(fastify, options) {
             ('staff_01', 'Operations Lead', 'admin@shazuone.in', '+91 94432 10001', 'super_admin', 'Salem Central HQ', 'active', '["all"]'::jsonb),
             ('staff_02', 'Dispatch Controller', 'dispatch@shazuone.in', '+91 98421 22340', 'ops_dispatcher', 'Suramangalam Control Hub', 'active', '["dispatch", "tracking", "technicians"]'::jsonb),
             ('staff_03', 'Quality & Support', 'support@shazuone.in', '+91 97890 33411', 'support_quality', 'Customer Grievance Cell', 'active', '["reviews", "feedback", "customers"]'::jsonb),
-            ('staff_04', 'Finance & Escrow', 'finance@shazuone.in', '+91 96555 44122', 'finance_officer', 'Accounts & Escrow Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
+            ('staff_04', 'Finance & .', 'finance@shazuone.in', '+91 96555 44122', 'finance_officer', 'Accounts & . Desk', 'active', '["settlements", "pricing", "rewards"]'::jsonb)
         `);
       }
     } catch (err) {
