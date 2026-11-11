@@ -15,6 +15,8 @@ const {
 } = require('../utils/privacy');
 const { checkCancellationWindow } = require('../services/cancellation_policy.service');
 const { getSalemOpsContact } = require('../services/support_agent.service');
+const { resolveLocalityCoords } = require('../utils/salemLocalities');
+const { processTechnicianReferralOnCompletion } = require('../services/referral.service');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -556,9 +558,10 @@ async function bookingsRoutes(fastify, options) {
         }
       } catch (rErr) { }
 
-      // Customer coordinates (Default to Fairlands, Salem if not set)
-      const custLat = parseFloat(booking.customer_lat) || 11.6643;
-      const custLng = parseFloat(booking.customer_lng) || 78.1460;
+      // Customer coordinates (Resolve from assigned Salem locality if lat/lng not set)
+      const custFallback = resolveLocalityCoords(booking.locality || booking.service_address);
+      const custLat = parseFloat(booking.customer_lat) || custFallback.lat;
+      const custLng = parseFloat(booking.customer_lng) || custFallback.lng;
 
       // Check if booking is scheduled
       const isScheduledBooking = booking.booking_type === 'scheduled' || (Boolean(booking.scheduled_slot) && booking.scheduled_slot !== 'instant_now');
@@ -574,8 +577,9 @@ async function bookingsRoutes(fastify, options) {
           if (booking.status === 'matching' && !t.is_online && !isScheduledBooking) {
             technician = null;
           } else {
-            const techLat = parseFloat(t.current_lat) || 11.6780;
-            const techLng = parseFloat(t.current_lng) || 78.1580;
+            const techFallback = resolveLocalityCoords(t.assigned_localities);
+            const techLat = parseFloat(t.current_lat) || techFallback.lat;
+            const techLng = parseFloat(t.current_lng) || techFallback.lng;
 
             // Calculate real-time distance and dynamic ETA
             const dLat = (custLat - techLat) * (Math.PI / 180);
@@ -632,8 +636,9 @@ async function bookingsRoutes(fastify, options) {
         `, [booking.service_id || 'ac', booking.locality || '', booking.service_address || '']);
         if (anyOnlineTech.rows.length > 0) {
           const t = anyOnlineTech.rows[0];
-          const techLat = parseFloat(t.current_lat) || 11.6780;
-          const techLng = parseFloat(t.current_lng) || 78.1580;
+          const techFallback = resolveLocalityCoords(t.assigned_localities);
+          const techLat = parseFloat(t.current_lat) || techFallback.lat;
+          const techLng = parseFloat(t.current_lng) || techFallback.lng;
           const distanceKm = 1.8;
           const etaMinutes = 8;
 
@@ -1409,17 +1414,7 @@ async function bookingsRoutes(fastify, options) {
           pushBody = 'Your service job has been finished. Thank you for choosing Shazu One.';
 
           if (booking.technician_id) {
-            try {
-              await query(`
-                UPDATE technicians 
-                SET jobs_completed_count = (
-                  SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
-                )
-                WHERE id = $1
-              `, [booking.technician_id]);
-            } catch (syncErr) {
-              console.warn('Could not update tech jobs_completed_count:', syncErr.message);
-            }
+            await processTechnicianReferralOnCompletion(query, booking.technician_id, fastify.log);
           }
         }
 
@@ -1519,13 +1514,7 @@ async function bookingsRoutes(fastify, options) {
             ]);
           }
 
-          await query(`
-            UPDATE technicians 
-            SET jobs_completed_count = (
-              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
-            )
-            WHERE id = $1
-          `, [updatedBooking.technician_id]);
+          await processTechnicianReferralOnCompletion(query, updatedBooking.technician_id, fastify.log);
         } catch (syncErr) {
           fastify.log.warn('Could not sync technician payout queue or jobs count on customer complete: ' + syncErr.message);
         }
@@ -1669,13 +1658,7 @@ async function bookingsRoutes(fastify, options) {
 
       if (nextStatus === 'completed' && updatedBooking?.technician_id) {
         try {
-          await query(`
-            UPDATE technicians 
-            SET jobs_completed_count = (
-              SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
-            )
-            WHERE id = $1
-          `, [updatedBooking.technician_id]);
+          await processTechnicianReferralOnCompletion(query, updatedBooking.technician_id, fastify.log);
         } catch (syncErr) {
           console.warn('Could not update tech jobs_completed_count on completion OTP:', syncErr.message);
         }

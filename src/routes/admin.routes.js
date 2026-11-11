@@ -333,15 +333,19 @@ async function adminRoutes(fastify, options) {
       const result = await query(`
         WITH people AS (
           SELECT
-            RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) as phone_key,
-            MAX(phone) as phone,
-            MAX(full_name) as full_name,
-            MAX(locality) as locality,
-            BOOL_OR(COALESCE(is_blocked, FALSE)) as is_blocked,
-            MAX(block_reason) as block_reason,
-            MAX(blocked_at) as blocked_at
-          FROM users
-          WHERE role != 'admin'
+            RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10) as phone_key,
+            MAX(u.phone) as phone,
+            MAX(u.full_name) as full_name,
+            MAX(u.locality) as locality,
+            BOOL_OR(COALESCE(u.is_blocked, FALSE)) as is_blocked,
+            MAX(u.block_reason) as block_reason,
+            MAX(u.blocked_at) as blocked_at
+          FROM users u
+          WHERE LOWER(COALESCE(u.role, 'customer')) = 'customer'
+            AND NOT EXISTS (
+              SELECT 1 FROM technicians t
+              WHERE RIGHT(REGEXP_REPLACE(t.phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10)
+            )
           GROUP BY 1
         ),
         orders AS (

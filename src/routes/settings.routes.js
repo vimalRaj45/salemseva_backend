@@ -90,7 +90,7 @@ async function settingsRoutes(fastify, options) {
         settings: {
           referee_discount_amount: parseFloat(row.referee_discount_amount || 50),
           partner_referral_incentive: parseFloat(row.partner_referral_incentive || 100),
-          partner_welcome_bonus: parseFloat(row.partner_welcome_bonus || 0),
+          partner_welcome_bonus: 0.00,
           platform_commission_percent: partnerComm,
           partner_commission_percent: partnerComm,
           partner_payout_percent: partnerPayout,
@@ -209,7 +209,7 @@ async function settingsRoutes(fastify, options) {
 
       const newRefDisc = referee_discount_amount !== undefined ? Math.max(0, parseFloat(referee_discount_amount)) : parseFloat(current.referee_discount_amount || 50);
       const newPartnerIncentive = partner_referral_incentive !== undefined ? Math.max(0, parseFloat(partner_referral_incentive)) : parseFloat(current.partner_referral_incentive || 100);
-      const newPartnerBonus = partner_welcome_bonus !== undefined ? Math.max(0, parseFloat(partner_welcome_bonus)) : parseFloat(current.partner_welcome_bonus || 0);
+      const newPartnerBonus = 0.00;
       const rawComm = partner_commission_percent !== undefined ? partner_commission_percent : platform_commission_percent;
       const newCommission = rawComm !== undefined
         ? Math.max(0, Math.min(100, parseFloat(rawComm)))

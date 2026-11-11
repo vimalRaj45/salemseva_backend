@@ -5,6 +5,7 @@ const { hashPassword } = require('../services/password.service');
 const { getPartnerCommissionPercent, getLiveFeeSettings, getLiveQualitySettings, calculateDualCommissionInvoice } = require('../services/commission.service');
 const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/privacy');
 const { resolveTechnicianReferrer } = require('../services/referral.service');
+const { resolveLocalityCoords } = require('../utils/salemLocalities');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -831,24 +832,26 @@ async function partnerRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Technician phone or ID is required to toggle duty status' });
       }
 
-      // Enforce KYC Gate: Unverified technicians cannot go online
-      if (Boolean(isOnline)) {
-        let techCheck;
-        if (technicianId) {
-          techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE id = $1::uuid`, [technicianId]);
-        } else {
-          techCheck = await query(`SELECT is_kyc_verified, full_name FROM technicians WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1`, [cleanPhone]);
-        }
+      // Enforce KYC Gate & seed locality coords when going online
+      let techRow = null;
+      if (technicianId) {
+        const tc = await query(`SELECT is_kyc_verified, is_blocked, block_reason, full_name, assigned_localities FROM technicians WHERE id = $1::uuid`, [technicianId]);
+        techRow = tc.rows[0] || null;
+      } else {
+        const tc = await query(`SELECT is_kyc_verified, is_blocked, block_reason, full_name, assigned_localities FROM technicians WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $1`, [cleanPhone]);
+        techRow = tc.rows[0] || null;
+      }
 
-        if (techCheck.rows.length > 0 && techCheck.rows[0].is_blocked) {
+      if (Boolean(isOnline) && techRow) {
+        if (techRow.is_blocked) {
           return reply.status(403).send({
             success: false,
             code: 'ACCOUNT_SUSPENDED',
-            error: `Your partner account has been suspended by Shazu One Central Operations: ${techCheck.rows[0].block_reason || 'Administrative restriction'}. You cannot go online.`
+            error: `Your partner account has been suspended by Shazu One Central Operations: ${techRow.block_reason || 'Administrative restriction'}. You cannot go online.`
           });
         }
 
-        if (techCheck.rows.length > 0 && !techCheck.rows[0].is_kyc_verified) {
+        if (!techRow.is_kyc_verified) {
           return reply.status(403).send({
             success: false,
             code: 'KYC_PENDING',
@@ -857,21 +860,31 @@ async function partnerRoutes(fastify, options) {
         }
       }
 
+      const localityCoords = resolveLocalityCoords(techRow?.assigned_localities);
+      const seedLat = Boolean(isOnline) ? localityCoords.lat : null;
+      const seedLng = Boolean(isOnline) ? localityCoords.lng : null;
+
       let result;
       if (technicianId) {
         result = await query(`
           UPDATE technicians 
-          SET is_online = $1, last_location_update = NOW() 
+          SET is_online = $1,
+              current_lat = COALESCE(current_lat, $3),
+              current_lng = COALESCE(current_lng, $4),
+              last_location_update = NOW() 
           WHERE id = $2::uuid
           RETURNING *
-        `, [Boolean(isOnline), technicianId]);
+        `, [Boolean(isOnline), technicianId, seedLat, seedLng]);
       } else {
         result = await query(`
           UPDATE technicians 
-          SET is_online = $1, last_location_update = NOW() 
+          SET is_online = $1,
+              current_lat = COALESCE(current_lat, $3),
+              current_lng = COALESCE(current_lng, $4),
+              last_location_update = NOW() 
           WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') = $2
           RETURNING *
-        `, [Boolean(isOnline), cleanPhone]);
+        `, [Boolean(isOnline), cleanPhone, seedLat, seedLng]);
       }
 
       const updatedTech = result.rows[0];
@@ -1114,12 +1127,12 @@ async function partnerRoutes(fastify, options) {
       return {
         success: true,
         message: hasReferral
-          ? `Partner onboarded! Welcome bonus of INR ${referralBonus} unlocked via referral code ${referralCode.toUpperCase()}`
+          ? `Partner onboarded! Referral code ${referralCode.toUpperCase()} linked — your referrer unlocks their incentive once you complete your 1st service job.`
           : 'Partner onboarded and DigiLocker KYC verified successfully in Neon DB',
         technician: createdTech,
         user: techUser,
         referralApplied: hasReferral,
-        welcomeToolBonus: referralBonus
+        welcomeToolBonus: 0
       };
     } catch (err) {
       fastify.log.error(err);

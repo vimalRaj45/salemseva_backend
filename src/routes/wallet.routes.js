@@ -460,13 +460,14 @@ async function walletRoutes(fastify, options) {
         }
       });
 
-      // Also check legacy referrals for available payout
+      // Also check legacy referrals for available payout (only unlocked once completed/available)
       legacyRefRes.rows.forEach(r => {
         const amt = parseFloat(r.incentiveAmount || 0);
-        totalIncentiveEarned += amt;
         if (r.payoutStatus === 'AVAILABLE_FOR_PAYOUT') {
+          totalIncentiveEarned += amt;
           availablePayout += amt;
-        } else {
+        } else if (r.payoutStatus === 'SETTLED_TO_PHONE' || r.payoutStatus === 'SETTLED_TO_UPI' || r.payoutStatus === 'SETTLED') {
+          totalIncentiveEarned += amt;
           settledPayout += amt;
         }
       });
@@ -506,7 +507,7 @@ async function walletRoutes(fastify, options) {
     }
   });
 
-  // POST /partner/refer - Onboard and reward referring technician with ₹250 + 3 Star Points in DB
+  // POST /partner/refer - Record referred technician (incentive unlocks strictly after their 1st completed job)
   fastify.post('/partner/refer', async (req, reply) => {
     try {
       const {
@@ -529,9 +530,10 @@ async function walletRoutes(fastify, options) {
 
       const cleanReferrer = sanitizePhone(referrerPhone);
       const cleanReferred = sanitizePhone(referredPhone);
-      const incentiveAmount = 250.00;
+      const sRes = await query(`SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+      const incentiveAmount = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].partner_referral_incentive || 100) : 100.00;
 
-      // 1. Insert referral record into PostgreSQL
+      // 1. Insert referral record into PostgreSQL (pending 1st job completion)
       const refInsertRes = await query(`
         INSERT INTO technician_referrals (
           referrer_phone, 
@@ -543,7 +545,7 @@ async function walletRoutes(fastify, options) {
           incentive_amount, 
           payout_status
         )
-        VALUES ($1, $2, $3, $4, $5, 'Verified & Active', $6, 'AVAILABLE_FOR_PAYOUT')
+        VALUES ($1, $2, $3, $4, $5, 'Awaiting 1st Job Completion', $6, 'AWAITING_1ST_JOB')
         RETURNING 
           id, 
           referred_name as name, 
@@ -558,29 +560,27 @@ async function walletRoutes(fastify, options) {
 
       const newRef = refInsertRes.rows[0];
 
-      // 2. Update technician's star points in PostgreSQL
-      const techUpdateRes = await query(`
-        UPDATE technicians 
-        SET 
-          star_points = LEAST(30, COALESCE(star_points, 0) + 3),
-          zero_comm_unlocked = CASE WHEN COALESCE(star_points, 0) + 3 >= 30 THEN TRUE ELSE zero_comm_unlocked END
+      // 2. Read current star points (never pre-credit points before job completion)
+      const techReadRes = await query(`
+        SELECT star_points, zero_comm_unlocked
+        FROM technicians
         WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
-        RETURNING star_points, zero_comm_unlocked
+        LIMIT 1
       `, [cleanReferrer]);
 
-      const updatedTech = techUpdateRes.rows[0] || { star_points: 27, zero_comm_unlocked: false };
+      const currentTech = techReadRes.rows[0] || { star_points: 0, zero_comm_unlocked: false };
 
       // 3. Log into audit_logs table
       try {
         await query(`
           INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
-          VALUES ('PARTNER-REFERRAL', 'TECH_REFERRAL_INCENTIVE_EARNED', $1, 'technician', $2)
+          VALUES ('PARTNER-REFERRAL', 'TECH_REFERRAL_RECORDED_AWAITING_FIRST_JOB', $1, 'technician', $2)
         `, [
           cleanReferrer,
           JSON.stringify({
             referredName,
             referredTrade,
-            incentiveAmount,
+            potentialIncentiveAmount: incentiveAmount,
             timestamp: new Date().toISOString()
           })
         ]);
@@ -589,7 +589,7 @@ async function walletRoutes(fastify, options) {
       // 4. Fetch updated totals from DB
       const totalsRes = await query(`
         SELECT 
-          COALESCE(SUM(incentive_amount), 0)::numeric as total_earned,
+          COALESCE(SUM(incentive_amount) FILTER (WHERE payout_status IN ('AVAILABLE_FOR_PAYOUT', 'SETTLED_TO_PHONE', 'SETTLED_TO_UPI', 'SETTLED')), 0)::numeric as total_earned,
           COALESCE(SUM(incentive_amount) FILTER (WHERE payout_status = 'AVAILABLE_FOR_PAYOUT'), 0)::numeric as available_payout
         FROM technician_referrals
         WHERE RIGHT(REGEXP_REPLACE(referrer_phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($1, '\\D', '', 'g'), 10)
@@ -597,12 +597,13 @@ async function walletRoutes(fastify, options) {
 
       return {
         success: true,
-        message: `Successfully referred ${referredName}! ₹250 added to your partner incentives ledger.`,
-        incentiveEarned: incentiveAmount,
+        message: `Referred ${referredName}. You will receive ₹${incentiveAmount} once they complete their first service job.`,
+        incentiveEarned: 0,
+        pendingIncentive: incentiveAmount,
         totalIncentives: parseFloat(totalsRes.rows[0]?.total_earned || 0),
         availablePayout: parseFloat(totalsRes.rows[0]?.available_payout || 0),
-        starPoints: updatedTech.star_points,
-        milestoneBonusUnlocked: (updatedTech.star_points >= 30),
+        starPoints: currentTech.star_points || 0,
+        milestoneBonusUnlocked: ((currentTech.star_points || 0) >= 30),
         milestoneBonusAmount: 500,
         zeroCommUnlocked: false,
         referredTechnician: newRef,
@@ -610,10 +611,10 @@ async function walletRoutes(fastify, options) {
           id: `inc-${newRef.id}`,
           title: `Technician Referral: ${referredName} (${referredTrade})`,
           amount: incentiveAmount,
-          type: 'CREDIT',
-          status: 'AVAILABLE',
+          type: 'PENDING',
+          status: 'AWAITING_1ST_JOB',
           date: newRef.onboardedAt,
-          description: `Direct ₹250 incentive + 3 Star Points for referring certified partner in ${referredLocality}`
+          description: `₹${incentiveAmount} incentive unlocks when ${referredName} completes their 1st service job in ${referredLocality}`
         }
       };
     } catch (err) {

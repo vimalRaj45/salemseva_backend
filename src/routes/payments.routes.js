@@ -12,6 +12,7 @@ const {
   calculateDualCommissionInvoice,
   calculateCommissionSplit
 } = require('../services/commission.service');
+const { processTechnicianReferralOnCompletion } = require('../services/referral.service');
 
 async function paymentsRoutes(fastify, options) {
   // No hardcoded key material: the pair that used to sit here as a fallback is in source
@@ -26,49 +27,9 @@ async function paymentsRoutes(fastify, options) {
 
   // Helper: Process Referral Rewards on First Job Completion (Technicians and Customers)
   async function processJobCompletionReferrals(bookingId, techId, log = console) {
-    // 1. Process Technician Referral Incentive (Settled directly into technician_payouts)
+    // 1. Process Technician Referral Incentive (only after referred tech's 1st completed job)
     if (techId) {
-      try {
-        await query(`
-          UPDATE technicians 
-          SET jobs_completed_count = (
-            SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
-          )
-          WHERE id = $1
-        `, [techId]);
-
-        const techRes = await query(`
-          SELECT id, full_name, phone, jobs_completed_count, referred_by_tech_id, referral_incentive_paid
-          FROM technicians WHERE id = $1
-        `, [techId]);
-
-        const currentTech = techRes.rows[0];
-        if (currentTech && currentTech.jobs_completed_count >= 1 && currentTech.referred_by_tech_id && !currentTech.referral_incentive_paid) {
-          const sRes = await query(`SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
-          const incentiveAmount = sRes.rows.length > 0 ? parseFloat(sRes.rows[0].partner_referral_incentive || 100) : 100.00;
-          if (incentiveAmount > 0) {
-            const referrerRes = await query(`SELECT id, phone, upi_vpa, full_name FROM technicians WHERE id = $1`, [currentTech.referred_by_tech_id]);
-            if (referrerRes.rows.length > 0) {
-              const referrerTech = referrerRes.rows[0];
-              const refUtr = 'REF-' + Math.floor(100000 + Math.random() * 900000);
-              await query(`
-                INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
-                VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
-              `, [
-                referrerTech.phone,
-                referrerTech.id,
-                incentiveAmount,
-                referrerTech.upi_vpa || '',
-                refUtr,
-                `Partner Referral Incentive: ${currentTech.full_name} completed first service job!`
-              ]);
-              await query(`UPDATE technicians SET referral_incentive_paid = TRUE WHERE id = $1`, [techId]);
-            }
-          }
-        }
-      } catch (techRefErr) {
-        if (log && log.warn) log.warn('Could not process technician referral incentive: ' + techRefErr.message);
-      }
+      await processTechnicianReferralOnCompletion(query, techId, log);
     }
 
     // 2. Process Customer Referral Direct Cash Reward (1 Rupee = 1 Rupee direct discount, no virtual credits)

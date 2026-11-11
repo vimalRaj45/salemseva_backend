@@ -5,8 +5,10 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
   resolveTechnicianReferrer,
-  resolveCustomerReferrer
+  resolveCustomerReferrer,
+  processTechnicianReferralOnCompletion
 } = require('../src/services/referral.service.js');
+const { resolveLocalityCoords, SALEM_CENTER } = require('../src/utils/salemLocalities.js');
 
 describe('Unit Test: Customer Referral Code Verification & Waiver Security', () => {
   it('should reject random referral code in referral check logic', () => {
@@ -165,5 +167,101 @@ describe('Unit Test: Technician Partner Referral Code Resolution', () => {
     const invalid = await resolveCustomerReferrer(mockQuery, 'BADCODE', '9000011111');
     assert.equal(invalid.ok, false);
     assert.equal(invalid.status, 404);
+  });
+});
+
+describe('Unit Test: First-Job Referral Incentive Payout & Idempotency', () => {
+  it('pays referrer strictly after referred tech completes 1st job and never double-pays', async () => {
+    const state = {
+      completedBookings: 0,
+      techs: {
+        'tech-referrer': { id: 'tech-referrer', full_name: 'Referrer Tech', phone: '+919842711234', upi_vpa: '9842711234@ybl' },
+        'tech-referee': {
+          id: 'tech-referee',
+          full_name: 'Referee Tech',
+          phone: '+919000011111',
+          jobs_completed_count: 0,
+          referred_by_tech_id: 'tech-referrer',
+          referral_incentive_paid: false
+        }
+      },
+      payouts: []
+    };
+
+    const queryFn = async (sql, params = []) => {
+      if (sql.includes('UPDATE technicians') && sql.includes('SET jobs_completed_count')) {
+        const t = state.techs[params[0]];
+        if (t) t.jobs_completed_count = state.completedBookings;
+        return { rows: [] };
+      }
+      if (sql.includes('SELECT id, full_name, phone, jobs_completed_count, referred_by_tech_id, referral_incentive_paid')) {
+        const t = state.techs[params[0]];
+        return { rows: t ? [t] : [] };
+      }
+      if (sql.includes('SELECT partner_referral_incentive FROM platform_settings')) {
+        return { rows: [{ partner_referral_incentive: '100.00' }] };
+      }
+      if (sql.includes('SELECT id, phone, upi_vpa, full_name FROM technicians')) {
+        const t = state.techs[params[0]];
+        return { rows: t ? [t] : [] };
+      }
+      if (sql.includes('UPDATE technicians') && sql.includes('SET referral_incentive_paid = TRUE')) {
+        const t = state.techs[params[0]];
+        if (t && t.jobs_completed_count >= 1 && t.referred_by_tech_id && !t.referral_incentive_paid) {
+          t.referral_incentive_paid = true;
+          return { rows: [{ id: t.id }] };
+        }
+        return { rows: [] };
+      }
+      if (sql.includes('INSERT INTO technician_payouts')) {
+        state.payouts.push({
+          phone: params[0],
+          technicianId: params[1],
+          amount: params[2],
+          upi: params[3],
+          utr: params[4],
+          description: params[5]
+        });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    };
+
+    // 1. Before any completed job -> NO incentive awarded
+    const beforeJob = await processTechnicianReferralOnCompletion(queryFn, 'tech-referee');
+    assert.equal(beforeJob.rewarded, false);
+    assert.equal(beforeJob.reason, 'first_job_not_completed');
+    assert.equal(state.payouts.length, 0);
+
+    // 2. First job completed -> Referrer receives 100 incentive payout
+    state.completedBookings = 1;
+    const onFirstJob = await processTechnicianReferralOnCompletion(queryFn, 'tech-referee');
+    assert.equal(onFirstJob.rewarded, true);
+    assert.equal(onFirstJob.incentiveAmount, 100);
+    assert.equal(onFirstJob.referrerId, 'tech-referrer');
+    assert.equal(state.payouts.length, 1);
+    assert.equal(state.techs['tech-referee'].referral_incentive_paid, true);
+
+    // 3. Second job completed / duplicate callback -> Idempotent (no duplicate payout)
+    state.completedBookings = 2;
+    const onSecondJob = await processTechnicianReferralOnCompletion(queryFn, 'tech-referee');
+    assert.equal(onSecondJob.rewarded, false);
+    assert.equal(onSecondJob.reason, 'already_paid');
+    assert.equal(state.payouts.length, 1);
+  });
+});
+
+describe('Unit Test: Salem Locality Coordinate Resolution', () => {
+  it('resolves assigned technician localities and falls back to Salem center', () => {
+    const ammapet = resolveLocalityCoords(['Ammapet', 'Hasthampatti']);
+    assert.equal(ammapet.localityName, 'Ammapet');
+    assert.equal(ammapet.lat, 11.654);
+
+    const byPin = resolveLocalityCoords('636007 Salem');
+    assert.equal(byPin.localityName, 'Hasthampatti');
+
+    const unknown = resolveLocalityCoords('');
+    assert.equal(unknown.lat, SALEM_CENTER.lat);
+    assert.equal(unknown.lng, SALEM_CENTER.lng);
   });
 });

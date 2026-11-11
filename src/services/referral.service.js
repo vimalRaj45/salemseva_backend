@@ -124,9 +124,123 @@ async function resolveCustomerReferrer(queryFn, rawCode, applicantPhone = '') {
   };
 }
 
+/**
+ * Processes the referring technician's referral incentive strictly when the referred
+ * technician completes their first service job (jobs_completed_count >= 1).
+ * Idempotent across multiple completion endpoints via atomic referral_incentive_paid update.
+ */
+async function processTechnicianReferralOnCompletion(queryFn, techId, log = console) {
+  if (!techId) {
+    return { rewarded: false, reason: 'missing_tech_id' };
+  }
+
+  try {
+    await queryFn(
+      `
+        UPDATE technicians
+        SET jobs_completed_count = (
+          SELECT count(*)::int FROM bookings WHERE technician_id = $1 AND status = 'completed'
+        )
+        WHERE id = $1
+      `,
+      [techId]
+    );
+
+    const techRes = await queryFn(
+      `
+        SELECT id, full_name, phone, jobs_completed_count, referred_by_tech_id, referral_incentive_paid
+        FROM technicians
+        WHERE id = $1
+      `,
+      [techId]
+    );
+
+    const currentTech = techRes.rows?.[0];
+    if (!currentTech) {
+      return { rewarded: false, reason: 'technician_not_found' };
+    }
+    if (!currentTech.referred_by_tech_id) {
+      return { rewarded: false, reason: 'no_referrer' };
+    }
+    if (Number(currentTech.jobs_completed_count || 0) < 1) {
+      return { rewarded: false, reason: 'first_job_not_completed' };
+    }
+    if (currentTech.referral_incentive_paid) {
+      return { rewarded: false, reason: 'already_paid' };
+    }
+
+    const sRes = await queryFn(
+      `SELECT partner_referral_incentive FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`
+    );
+    const incentiveAmount = sRes.rows?.length > 0
+      ? parseFloat(sRes.rows[0].partner_referral_incentive ?? 100)
+      : 100.00;
+
+    if (!Number.isFinite(incentiveAmount) || incentiveAmount <= 0) {
+      return { rewarded: false, reason: 'zero_incentive' };
+    }
+
+    const referrerRes = await queryFn(
+      `SELECT id, phone, upi_vpa, full_name FROM technicians WHERE id = $1`,
+      [currentTech.referred_by_tech_id]
+    );
+    if (!referrerRes.rows || referrerRes.rows.length === 0) {
+      return { rewarded: false, reason: 'referrer_not_found' };
+    }
+    const referrerTech = referrerRes.rows[0];
+
+    const claimRes = await queryFn(
+      `
+        UPDATE technicians
+        SET referral_incentive_paid = TRUE
+        WHERE id = $1
+          AND jobs_completed_count >= 1
+          AND referred_by_tech_id IS NOT NULL
+          AND COALESCE(referral_incentive_paid, FALSE) = FALSE
+        RETURNING id
+      `,
+      [techId]
+    );
+
+    if (!claimRes.rows || claimRes.rows.length === 0) {
+      return { rewarded: false, reason: 'already_claimed' };
+    }
+
+    const refUtr = 'REF-' + Math.floor(100000 + Math.random() * 900000);
+    await queryFn(
+      `
+        INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
+        VALUES ($1, $2, $3, $4, 'DISBURSED_100%', $5, $6, NOW())
+      `,
+      [
+        referrerTech.phone,
+        referrerTech.id,
+        incentiveAmount,
+        referrerTech.upi_vpa || '',
+        refUtr,
+        `Partner Referral Incentive: ${currentTech.full_name} completed first service job!`
+      ]
+    );
+
+    return {
+      rewarded: true,
+      incentiveAmount,
+      referrerId: referrerTech.id,
+      refereeId: currentTech.id,
+      utr: refUtr
+    };
+  } catch (err) {
+    if (log && typeof log.warn === 'function') {
+      log.warn('Could not process technician referral incentive: ' + err.message);
+    }
+    return { rewarded: false, reason: 'error', error: err.message };
+  }
+}
+
 module.exports = {
   sanitizePhone10,
   normalizeReferralInput,
   resolveTechnicianReferrer,
-  resolveCustomerReferrer
+  resolveCustomerReferrer,
+  processTechnicianReferralOnCompletion
 };
