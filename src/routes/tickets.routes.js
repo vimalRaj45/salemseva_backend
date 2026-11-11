@@ -1,4 +1,5 @@
 const { query } = require('../db/db');
+const pushService = require('../services/pushNotification.service');
 
 async function ticketsRoutes(fastify, options) {
   // 1. Create a support ticket (authenticated or auth help guest)
@@ -204,6 +205,8 @@ async function ticketsRoutes(fastify, options) {
         RETURNING *;
       `, [status, adminNotes, resolutionSummary || 'Resolved by Salem Central Desk', resolvedBy, existing.id]);
 
+      const updatedTicket = updateRes.rows[0];
+
       // Audit log entry
       try {
         await query(`
@@ -216,10 +219,48 @@ async function ticketsRoutes(fastify, options) {
         ]);
       } catch (auditErr) {}
 
+      // Push notification to the ticket creator across Web Push subscriptions
+      if (existing.creator_phone) {
+        const normalizedStatus = String(status || '').toLowerCase();
+        const ticketRef = existing.ticket_number || existing.id;
+        let pushTitle = `Ticket ${ticketRef} Updated`;
+        let pushBody = resolutionSummary || adminNotes || `Your support ticket status is now ${normalizedStatus.replace(/_/g, ' ')}.`;
+
+        if (normalizedStatus === 'resolved') {
+          pushTitle = `Support Ticket ${ticketRef} Resolved`;
+          pushBody = resolutionSummary || 'Your support ticket has been resolved by the Shazu One Central Desk.';
+        } else if (normalizedStatus === 'in_progress') {
+          pushTitle = `Support Ticket ${ticketRef} In Progress`;
+          pushBody = resolutionSummary || adminNotes || 'Our operations team is reviewing your support request.';
+        } else if (normalizedStatus === 'closed') {
+          pushTitle = `Support Ticket ${ticketRef} Closed`;
+          pushBody = resolutionSummary || 'Your support ticket has been closed.';
+        }
+
+        const targetRole = existing.creator_role === 'technician' ? 'technician' : 'customer';
+        pushService.sendPushToPhone({
+          phone: existing.creator_phone,
+          role: targetRole,
+          payload: {
+            type: 'ticket_update',
+            ticketId: existing.id,
+            ticketNumber: existing.ticket_number,
+            status: normalizedStatus,
+            role: targetRole,
+            tag: `ticket-${existing.id}-${normalizedStatus}`,
+            title: pushTitle,
+            body: pushBody,
+            url: '/support?tab=history'
+          }
+        }).catch((pushErr) => {
+          fastify.log.warn({ err: pushErr.message, ticketId: existing.id }, 'Ticket resolution push send warning');
+        });
+      }
+
       return {
         success: true,
         message: `Ticket ${existing.ticket_number} updated to status "${status}"`,
-        ticket: updateRes.rows[0]
+        ticket: updatedTicket
       };
     } catch (err) {
       fastify.log.error(err);

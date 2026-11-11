@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 // Password hashing lives in one place so onboarding and sign-in agree on the format.
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
@@ -1195,7 +1195,7 @@ async function partnerRoutes(fastify, options) {
           primaryTrade: tech.primary_trade,
           secondaryTrades: tech.secondary_trades || [],
           secondary_trades: tech.secondary_trades || [],
-          ratingAvg: parseFloat(tech.rating_avg || 5.0),
+          ratingAvg: parseInt(tech.rating_count || 0, 10) > 0 && tech.rating_avg != null ? parseFloat(tech.rating_avg) : 0,
           ratingCount: parseInt(tech.rating_count || 0, 10),
           jobsCompleted: completedJobs,
           jobs_completed_count: completedJobs,
@@ -1204,7 +1204,7 @@ async function partnerRoutes(fastify, options) {
           today_earnings: todayEarnings,
           totalEarnings,
           total_earnings: totalEarnings,
-          yearsExperience: parseInt(tech.years_experience || 5, 10),
+          yearsExperience: tech.years_experience != null ? parseInt(tech.years_experience, 10) : 0,
           isOnline: Boolean(tech.is_online),
           isKycVerified: Boolean(tech.is_kyc_verified),
           is_kyc_verified: Boolean(tech.is_kyc_verified),
