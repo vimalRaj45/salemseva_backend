@@ -13,8 +13,20 @@ const {
   calculateCommissionSplit
 } = require('../services/commission.service');
 const { processTechnicianReferralOnCompletion } = require('../services/referral.service');
+const {
+  ensureMerchantAlertsSchema,
+  processIncomingMerchantAlert,
+  claimMatchingAlertForPayment,
+  reconcileBankCsvRows,
+  normalizeBookingRef
+} = require('../services/merchantAlert.service');
 
 async function paymentsRoutes(fastify, options) {
+  try {
+    await ensureMerchantAlertsSchema(query);
+  } catch (schemaErr) {
+    fastify.log.warn('Merchant alerts schema init note: ' + schemaErr.message);
+  }
   // No hardcoded key material: the pair that used to sit here as a fallback is in source
   // control and must be treated as compromised. Missing keys now fail loudly.
   const KEY_ID = process.env.RAZORPAY_KEY_ID || '';
@@ -232,28 +244,68 @@ async function paymentsRoutes(fastify, options) {
     }
   });
 
-  // 1c. Reconcile Payment Status (Polled by Mobile App after UPI App Switching or Restart)
+  // 1c. Reconcile Payment Status (Polled by Mobile App after UPI App Switching or Merchant Alert)
   fastify.get('/payments/status/:bookingId', async (req, reply) => {
     try {
       const { bookingId } = req.params;
-      const bRes = await query('SELECT id, status, visit_fee, final_amount FROM bookings WHERE id = $1', [bookingId]);
-      if (bRes.rows.length === 0) {
-        return reply.status(404).send({ success: false, error: 'Booking not found' });
-      }
+      const expectedAmount = req.query?.amount ? parseFloat(req.query.amount) : null;
+      const bRes = await query('SELECT id, status, visit_fee, final_amount, quote_subtotal, advance_amount_paid FROM bookings WHERE id = $1', [bookingId]);
+      const booking = bRes.rows[0] || null;
 
-      const booking = bRes.rows[0];
       const pRes = await query('SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at DESC LIMIT 1', [bookingId]);
       const payment = pRes.rows[0] || null;
 
-      const isPaid = ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status)
+      let matchedAlert = null;
+      try {
+        const normRef = normalizeBookingRef(bookingId);
+        if (normRef) {
+          const alertParams = [normRef];
+          let alertSql = `
+            SELECT id, source_app, amount, utr, booking_ref, created_at
+            FROM merchant_credit_alerts
+            WHERE matched_payment_id IS NULL
+              AND booking_ref = $1
+              AND created_at >= NOW() - INTERVAL '24 hours'
+          `;
+          if (Number.isFinite(expectedAmount) && expectedAmount > 0) {
+            alertParams.push(expectedAmount);
+            alertSql += ` AND ABS(COALESCE(amount, 0) - $2) <= 0.50`;
+          }
+          alertSql += ` ORDER BY created_at DESC LIMIT 1`;
+          const aRes = await query(alertSql, alertParams);
+          if (aRes.rows.length > 0) {
+            const a = aRes.rows[0];
+            matchedAlert = {
+              id: a.id,
+              sourceApp: a.source_app,
+              amount: parseFloat(a.amount),
+              utr: a.utr || null,
+              bookingRef: a.booking_ref
+            };
+          }
+        }
+      } catch (alertErr) { }
+
+      if (!booking && !payment && !matchedAlert) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const isPaid = (booking && ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status))
         || (payment && (payment.status === '._held' || payment.status === 'captured' || payment.status === 'settled'));
+
+      const verificationStatus = payment?.verification_status || null;
+      const verifiedBy = payment?.verified_by || null;
 
       return {
         success: true,
-        bookingId: booking.id,
-        status: booking.status,
+        bookingId: booking ? booking.id : bookingId,
+        status: booking ? booking.status : 'created',
         isPaid: Boolean(isPaid),
-        payment: payment
+        verificationStatus,
+        verifiedBy,
+        autoVerified: verificationStatus === 'verified' && ['AUTO_BANK_EMAIL_ALERT', 'BANK_CSV_RECONCILED', 'AUTO_MERCHANT_ALERT'].includes(verifiedBy),
+        matchedAlert,
+        payment
       };
     } catch (err) {
       fastify.log.error(err);
@@ -775,6 +827,21 @@ async function paymentsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Please provide a valid transaction reference / UTR number (at least 6 characters)' });
       }
 
+      // Duplicate UTR anti-fraud guard
+      const dupUtrRes = await query(`
+        SELECT id, booking_id
+        FROM payments
+        WHERE REGEXP_REPLACE(COALESCE(customer_utr, ''), '\\s', '', 'g') = $1
+          AND COALESCE(verification_status, 'pending') <> 'rejected'
+        LIMIT 1
+      `, [cleanUtr]);
+      if (dupUtrRes.rows.length > 0) {
+        return reply.status(409).send({
+          success: false,
+          error: `Duplicate UTR ${cleanUtr}: This transaction reference was already submitted for booking #${dupUtrRes.rows[0].booking_id}.`
+        });
+      }
+
       const parsedAmount = parseFloat(amount);
 
       // Check if booking exists
@@ -883,6 +950,23 @@ async function paymentsRoutes(fastify, options) {
         screenshotUrl || null
       ]);
 
+      let finalPaymentRow = insertRes.rows[0];
+      let autoVerified = false;
+      try {
+        const alertMatch = await claimMatchingAlertForPayment(query, {
+          paymentId: finalPaymentRow.id,
+          bookingId,
+          amount: txnAmount,
+          utr: cleanUtr
+        });
+        if (alertMatch.matched && alertMatch.payment) {
+          finalPaymentRow = alertMatch.payment;
+          autoVerified = true;
+        }
+      } catch (claimErr) {
+        fastify.log.warn('Merchant alert pre-claim check note: ' + claimErr.message);
+      }
+
       const nextBookingStatus = isFinalSettlement
         ? 'completed'
         : (booking.status === 'created'
@@ -981,20 +1065,285 @@ async function paymentsRoutes(fastify, options) {
             ocrDetectedUtr,
             hasScreenshot: Boolean(screenshotUrl),
             paymentType,
-            status: 'pending_admin_verification'
+            status: autoVerified ? 'verified' : 'pending_admin_verification',
+            autoVerified
           })
         ]);
       } catch (aErr) { }
 
       return {
         success: true,
-        message: 'Payment proof submitted successfully! Our central desk will verify your transaction.',
-        payment: insertRes.rows[0],
+        autoVerified,
+        verificationStatus: finalPaymentRow?.verification_status || (autoVerified ? 'verified' : 'pending'),
+        message: autoVerified
+          ? 'Payment verified automatically via bank credit email alert!'
+          : 'Payment proof submitted successfully! Verified via bank email alert or end-of-day bank CSV.',
+        payment: finalPaymentRow,
         bookingId,
         nextStatus: nextBookingStatus
       };
     } catch (err) {
       fastify.log.error('Submit manual QR error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3b. Partner Physical Confirmation for 2nd (Doorstep Final Settlement) Payment via Partner-Phone QR
+  fastify.post('/payments/partner-confirm-doorstep', async (req, reply) => {
+    try {
+      const {
+        bookingId,
+        technicianId,
+        amount,
+        customerUtr = ''
+      } = req.body || {};
+
+      if (!bookingId) {
+        return reply.status(400).send({ success: false, error: 'Booking ID is required' });
+      }
+
+      const parsedAmount = parseFloat(amount);
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return reply.status(400).send({ success: false, error: 'Valid doorstep collection amount is required' });
+      }
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const booking = bRes.rows[0];
+
+      if (technicianId && booking.technician_id && String(booking.technician_id) !== String(technicianId)) {
+        return reply.status(403).send({ success: false, error: 'Only the assigned technician can confirm doorstep collection for this booking.' });
+      }
+
+      const cleanOptionalUtr = String(customerUtr || '').trim().replace(/\s+/g, '');
+      if (cleanOptionalUtr && cleanOptionalUtr.length < 6) {
+        return reply.status(400).send({ success: false, error: 'If entering a UTR / Ref No, please enter at least 6 characters.' });
+      }
+
+      if (cleanOptionalUtr) {
+        const dupRes = await query(`
+          SELECT id, booking_id
+          FROM payments
+          WHERE REGEXP_REPLACE(COALESCE(customer_utr, ''), '\\s', '', 'g') = $1
+            AND COALESCE(verification_status, 'pending') <> 'rejected'
+          LIMIT 1
+        `, [cleanOptionalUtr]);
+        if (dupRes.rows.length > 0) {
+          return reply.status(409).send({
+            success: false,
+            error: `Duplicate UTR ${cleanOptionalUtr}: Already recorded on booking #${dupRes.rows[0].booking_id}.`
+          });
+        }
+      }
+
+      const feeSettings = await getLiveFeeSettings();
+      const advancePaid = parseFloat(
+        booking.advance_amount_paid !== null && booking.advance_amount_paid !== undefined
+          ? booking.advance_amount_paid
+          : Math.max(0, parseFloat(booking.visit_fee || 99) - parseFloat(booking.coupon_discount || 0))
+      );
+      const targetJobTotal = parseFloat(booking.quote_subtotal || (parsedAmount + advancePaid));
+
+      const inv = calculateDualCommissionInvoice({
+        totalJobAmount: targetJobTotal,
+        actualAdvancePaid: advancePaid,
+        customerFeePercent: feeSettings.customerFeePercent,
+        gatewayFeePercent: feeSettings.gatewayFeePercent,
+        partnerCommPercent: feeSettings.partnerCommPercent,
+        paymentMethod: booking.payment_method || 'online'
+      });
+
+      const priorPaymentsRes = await query(`
+        SELECT 
+          COALESCE(SUM(tech_payout_amount), 0) as prior_tech_payout,
+          COALESCE(SUM(platform_commission), 0) as prior_platform_comm
+        FROM payments 
+        WHERE booking_id = $1 AND status != 'failed'
+      `, [bookingId]);
+      const priorTechPayout = parseFloat(priorPaymentsRes.rows[0]?.prior_tech_payout || 0);
+      const priorPlatformComm = parseFloat(priorPaymentsRes.rows[0]?.prior_platform_comm || 0);
+
+      const techPayout = Math.max(0, parseFloat((inv.partnerDirectRouteTransfer - priorTechPayout).toFixed(2)));
+      const platformComm = Math.max(0, parseFloat((inv.platformTotalRetained - priorPlatformComm).toFixed(2)));
+      const storedUtr = cleanOptionalUtr || `TECH-${String(bookingId).slice(-6).toUpperCase()}-${Date.now().toString().slice(-6)}`;
+
+      const insertRes = await query(`
+        INSERT INTO payments (
+          booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
+          tech_payout_amount, platform_commission, status, payment_method,
+          customer_utr, ocr_detected_utr, screenshot_url, verification_status, verified_by,
+          created_at
+        ) VALUES (
+          $1, $2, $3, $4,
+          $5, $6, '._held', 'DYNAMIC_UPI_QR',
+          $7, $8, NULL, 'tech_confirmed', 'PARTNER_PHYSICAL_CHECK',
+          NOW()
+        )
+        RETURNING *;
+      `, [
+        bookingId,
+        `qr_door_${bookingId}_${Date.now()}`,
+        `qr_door_pay_${storedUtr}`,
+        parsedAmount,
+        techPayout,
+        platformComm,
+        storedUtr,
+        cleanOptionalUtr || null
+      ]);
+
+      let finalPaymentRow = insertRes.rows[0];
+      let autoVerified = false;
+      try {
+        const alertMatch = await claimMatchingAlertForPayment(query, {
+          paymentId: finalPaymentRow.id,
+          bookingId,
+          amount: parsedAmount,
+          utr: cleanOptionalUtr || null
+        });
+        if (alertMatch.matched && alertMatch.payment) {
+          finalPaymentRow = alertMatch.payment;
+          autoVerified = true;
+        }
+      } catch (claimErr) {
+        fastify.log.warn('Doorstep merchant alert claim note: ' + claimErr.message);
+      }
+
+      await query(`
+        UPDATE bookings
+        SET status = 'completed',
+            completed_at = COALESCE(completed_at, NOW()),
+            final_amount = $1
+        WHERE id = $2
+      `, [targetJobTotal, bookingId]);
+
+      const techId = booking.technician_id || technicianId || null;
+      if (techId) {
+        try {
+          const totalTechPayout = inv.partnerDirectRouteTransfer;
+          let techPhone = '';
+          let techUpi = '';
+          const tRes = await query('SELECT phone, upi_vpa FROM technicians WHERE id = $1', [techId]);
+          if (tRes.rows.length > 0) {
+            techUpi = tRes.rows[0].upi_vpa || '';
+            techPhone = tRes.rows[0].phone || '';
+          }
+          await query(`
+            INSERT INTO technician_payouts (technician_phone, technician_id, amount, upi_id, status, utr_ref, description, created_at)
+            VALUES ($1, $2, $3, $4, 'PENDING_DISBURSAL', NULL, $5, NOW())
+          `, [
+            techPhone,
+            techId,
+            totalTechPayout,
+            techUpi,
+            `Pending Admin settlement for #${bookingId} (Doorstep QR Final ₹${parsedAmount.toFixed(2)}, Status: ${autoVerified ? 'AUTO_BANK_EMAIL_ALERT' : 'PARTNER_PHYSICAL_CHECK'})`
+          ]);
+        } catch (payoutErr) {
+          fastify.log.warn('Could not queue payout on partner doorstep confirm: ' + payoutErr.message);
+        }
+
+        await processJobCompletionReferrals(bookingId, techId, fastify.log);
+      }
+
+      try {
+        await query(`
+          INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+          VALUES ($1, $2, $3, 'technician', $4)
+        `, [
+          bookingId,
+          autoVerified ? 'DOORSTEP_PAYMENT_AUTO_VERIFIED' : 'DOORSTEP_PAYMENT_TECH_CONFIRMED',
+          String(techId || 'technician'),
+          JSON.stringify({ amount: parsedAmount, utr: storedUtr, autoVerified })
+        ]);
+      } catch (aErr) { }
+
+      return {
+        success: true,
+        autoVerified,
+        verificationStatus: finalPaymentRow?.verification_status || (autoVerified ? 'verified' : 'tech_confirmed'),
+        message: autoVerified
+          ? 'Doorstep payment confirmed and verified automatically via bank credit alert!'
+          : 'Doorstep collection recorded! Payment will clear once verified via bank email alert or end-of-day CSV.',
+        payment: finalPaymentRow,
+        bookingId
+      };
+    } catch (err) {
+      fastify.log.error('Partner doorstep confirm error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3c. Bank Credit Email Alert Webhook (forwards HDFC/ICICI/SBI/Axis/bank credit alert emails)
+  const handleBankAlertWebhook = async (req, reply) => {
+    try {
+      const configuredSecret = process.env.BANK_EMAIL_WEBHOOK_SECRET || process.env.MERCHANT_ALERT_WEBHOOK_SECRET || '';
+      if (!configuredSecret) {
+        return reply.status(503).send({
+          success: false,
+          error: 'BANK_EMAIL_WEBHOOK_SECRET is not configured in the backend environment.'
+        });
+      }
+
+      const providedSecret = req.headers['x-bank-webhook-secret'] || req.headers['x-merchant-webhook-secret'] || req.headers['x-webhook-secret'] || '';
+      if (!providedSecret || !secureEqual(String(providedSecret), String(configuredSecret))) {
+        return reply.status(401).send({ success: false, error: 'Unauthorized bank credit webhook secret.' });
+      }
+
+      const result = await processIncomingMerchantAlert(query, req.body || {}, fastify.log);
+      return {
+        success: true,
+        ...result
+      };
+    } catch (err) {
+      fastify.log.error('Bank email alert webhook error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  };
+  fastify.post('/payments/bank-email-alert', handleBankAlertWebhook);
+  fastify.post('/payments/merchant-notification', handleBankAlertWebhook);
+
+  // 3d. Admin: View Recent Bank Credit Email & CSV Alerts
+  const handleGetBankAlerts = async (req, reply) => {
+    try {
+      const res = await query(`
+        SELECT id, source_app, amount, utr, booking_ref, sender_label, raw_message, matched_payment_id, matched_at, created_at
+        FROM merchant_credit_alerts
+        ORDER BY created_at DESC
+        LIMIT 50
+      `);
+      return {
+        success: true,
+        webhookConfigured: Boolean(process.env.BANK_EMAIL_WEBHOOK_SECRET || process.env.MERCHANT_ALERT_WEBHOOK_SECRET),
+        count: res.rows.length,
+        alerts: res.rows
+      };
+    } catch (err) {
+      fastify.log.error('Fetch bank alerts error:', err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  };
+  fastify.get('/admin/payments/bank-alerts', handleGetBankAlerts);
+  fastify.get('/admin/payments/merchant-alerts', handleGetBankAlerts);
+
+  // 3e. Admin: End-of-Day Bank Statement CSV Bulk Reconciliation & Verify
+  fastify.post('/admin/payments/reconcile-csv', async (req, reply) => {
+    try {
+      const csvText = typeof req.body === 'string' ? req.body : String(req.body?.csvText || '');
+      const verifiedBy = req.body?.verifiedBy || 'BANK_CSV_RECONCILED';
+
+      if (!csvText || !csvText.trim()) {
+        return reply.status(400).send({ success: false, error: 'Bank statement CSV content is required.' });
+      }
+
+      const summary = await reconcileBankCsvRows(query, csvText, verifiedBy, fastify.log);
+      return {
+        success: true,
+        message: `Processed ${summary.validCreditRows} bank credit row(s): ${summary.matchedCount} payment(s) auto-verified, ${summary.unmatchedCount} unmatched.`,
+        ...summary
+      };
+    } catch (err) {
+      fastify.log.error('Bank CSV reconciliation error:', err);
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
@@ -1065,7 +1414,7 @@ async function paymentsRoutes(fastify, options) {
       return {
         success: true,
         count: res.rows.length,
-        pendingCount: res.rows.filter(r => r.verification_status === 'pending').length,
+        pendingCount: res.rows.filter(r => r.verification_status === 'pending' || r.verification_status === 'tech_confirmed').length,
         payments: res.rows
       };
     } catch (err) {

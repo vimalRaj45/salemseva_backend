@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs",
-    "test:unit": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs",
+    "test": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_merchant_alert_verification.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs",
+    "test:unit": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_merchant_alert_verification.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs",
     "test:e2e": "node tests/e2e_full_suite.test.js",
     "test:integrity": "node tests/production_data_integrity.test.js",
     "test:integrity:strict": "node tests/production_data_integrity.test.js --strict --no-spawn",
