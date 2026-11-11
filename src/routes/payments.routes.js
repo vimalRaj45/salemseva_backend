@@ -225,11 +225,11 @@ async function paymentsRoutes(fastify, options) {
           const ledgerOrderId = orderId || `order_${paymentId || Date.now()}`;
           await query(`
             INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-            VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
+            VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
             ON CONFLICT (razorpay_order_id) DO UPDATE
               SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
                   amount_total = EXCLUDED.amount_total,
-                  status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
+                  status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
           `, [bookingId, ledgerOrderId, paymentId || `pay_${Date.now()}`, parsedAmount]);
 
           // Check if this was a diagnostic advance or quote approval
@@ -307,7 +307,7 @@ async function paymentsRoutes(fastify, options) {
       }
 
       const isPaid = (booking && ['en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'completed'].includes(booking.status))
-        || (payment && (payment.status === '._held' || payment.status === 'captured' || payment.status === 'settled'));
+        || (payment && (payment.status === 'escrow_held' || payment.status === 'captured' || payment.status === 'settled'));
 
       const verificationStatus = payment?.verification_status || null;
       const verifiedBy = payment?.verified_by || null;
@@ -380,11 +380,11 @@ async function paymentsRoutes(fastify, options) {
       // Record in Neon DB Payments . Ledger
       const insertSql = `
         INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-        VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
+        VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
         ON CONFLICT (razorpay_order_id) DO UPDATE
           SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
               amount_total = EXCLUDED.amount_total,
-              status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
+              status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
         RETURNING *;
       `;
 
@@ -674,10 +674,10 @@ async function paymentsRoutes(fastify, options) {
         }
       }
 
-      // 4. Record Payment in payments table as ._held (awaiting Admin disbursal confirmation)
+      // 4. Record Payment in payments table as escrow_held (awaiting Admin disbursal confirmation)
       const settledRes = await query(`
         UPDATE payments
-        SET status = '._held',
+        SET status = 'escrow_held',
             amount_total = $2,
             tech_payout_amount = $3,
             platform_commission = $4,
@@ -693,7 +693,7 @@ async function paymentsRoutes(fastify, options) {
       if (settledRes.rowCount === 0) {
         await query(`
           INSERT INTO payments (booking_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at)
-          VALUES ($1, $2, $3, $4, '._held', 'UPI (Pending Partner Disbursal)', NULL, NULL)
+          VALUES ($1, $2, $3, $4, 'escrow_held', 'UPI (Pending Partner Disbursal)', NULL, NULL)
         `, [targetId, invoice.totalJobAmount, totalTechPayout, platformCut]);
       }
 
@@ -821,6 +821,7 @@ async function paymentsRoutes(fastify, options) {
 
   // 3. Submit Manual Dynamic QR Payment with Screenshot & UTR
   fastify.post('/payments/submit-manual-qr', async (req, reply) => {
+    let step = 'parse_request';
     try {
       const {
         bookingId,
@@ -843,6 +844,7 @@ async function paymentsRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Please provide a valid transaction reference / UTR number (at least 6 characters)' });
       }
 
+      step = 'check_duplicate_utr';
       // Duplicate UTR anti-fraud guard
       const dupUtrRes = await query(`
         SELECT id, booking_id
@@ -867,6 +869,7 @@ async function paymentsRoutes(fastify, options) {
           ? screenshotUrl
           : null;
 
+      step = 'lookup_booking';
       // Check if booking exists
       let bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
       if (bRes.rows.length === 0) {
@@ -947,6 +950,7 @@ async function paymentsRoutes(fastify, options) {
       const ledgerOrderId = `qr_ord_${bookingId}_${Date.now()}`;
       const ledgerPaymentId = `qr_pay_${cleanUtr}_${Date.now()}`;
 
+      step = 'insert_payment';
       // Insert or update payment record
       const insertRes = await query(`
         INSERT INTO payments (
@@ -956,7 +960,7 @@ async function paymentsRoutes(fastify, options) {
           created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, '._held', 'DYNAMIC_UPI_QR',
+          $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
           $7, $8, $9, 'pending',
           NOW()
         )
@@ -996,6 +1000,7 @@ async function paymentsRoutes(fastify, options) {
           ? (booking.technician_id ? 'accepted' : 'matching')
           : booking.status);
 
+      step = 'update_booking';
       if (isFinalSettlement) {
         await query(`
           UPDATE bookings
@@ -1106,7 +1111,22 @@ async function paymentsRoutes(fastify, options) {
         nextStatus: nextBookingStatus
       };
     } catch (err) {
-      fastify.log.error('Submit manual QR error:', err);
+      fastify.log.error(
+        {
+          err,
+          step,
+          requestId: String(req.id),
+          bookingId: req.body?.bookingId || null,
+          paymentType: req.body?.paymentType || null,
+          amount: req.body?.amount || null,
+          pgCode: err?.code || null,
+          pgDetail: err?.detail || null,
+          pgColumn: err?.column || null,
+          pgConstraint: err?.constraint || null,
+          pgTable: err?.table || null
+        },
+        `Submit manual QR failed at step=${step}: ${err?.message || 'Unknown error'}`
+      );
       if (err && err.code === '23505') {
         return reply.status(409).send({
           success: false,
@@ -1218,7 +1238,7 @@ async function paymentsRoutes(fastify, options) {
           created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, '._held', 'DYNAMIC_UPI_QR',
+          $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
           $7, $8, NULL, 'tech_confirmed', 'PARTNER_PHYSICAL_CHECK',
           NOW()
         )
@@ -1481,7 +1501,7 @@ async function paymentsRoutes(fastify, options) {
         SET verification_status = 'verified',
             verified_by = $1,
             verified_at = NOW(),
-            status = '._held'
+            status = 'escrow_held'
         WHERE id = $2
         RETURNING *;
       `, [verifiedBy, payment.id]);

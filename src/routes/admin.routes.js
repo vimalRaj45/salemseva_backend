@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
 const {
   getPlatformCommissionPercent,
@@ -774,9 +774,9 @@ async function adminRoutes(fastify, options) {
             txStatus = (r.refund_status === 'REFUNDED' || r.payout_utr) ? 'REFUNDED' : 'REFUND_PENDING';
           }
         } else if (isCompleted) {
-          txStatus = r.payout_utr ? 'SETTLED' : '._HELD';
+          txStatus = r.payout_utr ? 'SETTLED' : 'escrow_held';
         } else if (verifiedInflow > 0) {
-          txStatus = '._HELD';
+          txStatus = 'escrow_held';
         } else if (pendingInflow > 0) {
           txStatus = 'UNVERIFIED';
         } else {
@@ -935,7 +935,7 @@ async function adminRoutes(fastify, options) {
       await query(`
         UPDATE payments
         SET payout_utr = $1,
-            status = CASE WHEN status = '._held' THEN 'settled' ELSE status END,
+            status = CASE WHEN status = 'escrow_held' THEN 'settled' ELSE status END,
             settled_at = COALESCE(settled_at, NOW())
         WHERE booking_id = $2
       `, [cleanUtr, bookingId]);
@@ -1800,7 +1800,7 @@ async function adminRoutes(fastify, options) {
         // 100% of Advance / Travel fee goes to technician
         techPayoutAmount = parsedAmount;
         platformCommission = 0.00;
-        targetPaymentStatus = '._held';
+        targetPaymentStatus = 'escrow_held';
 
         // If booking is waiting for payment in created or matching, advance to en_route (if tech assigned) or matching/accepted
         if (booking.status === 'created' || booking.status === 'matching') {

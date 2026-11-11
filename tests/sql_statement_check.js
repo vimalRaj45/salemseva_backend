@@ -1,4 +1,4 @@
-// Every payment-ledger statement in the codebase, planned against the real database.
+﻿// Every payment-ledger statement in the codebase, planned against the real database.
 //
 // EXPLAIN builds the plan without executing, so a column that does not exist or a status
 // label outside the payment_status enum fails here instead of failing silently inside a
@@ -14,20 +14,20 @@ const { query, pool } = require('../src/db/db');
 const CASES = [
   ['webhook . insert', `
     INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-    VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
+    VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
     ON CONFLICT (razorpay_order_id) DO UPDATE
       SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
           amount_total = EXCLUDED.amount_total,
-          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END`,
+          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END`,
     ['probe-booking', 'order_probe', 'pay_probe', 99]],
 
   ['/payments/verify . insert', `
     INSERT INTO payments (booking_id, razorpay_order_id, razorpay_payment_id, amount_total, tech_payout_amount, platform_commission, status, payment_method, created_at)
-    VALUES ($1, $2, $3, $4, 0.00, 0.00, '._held', 'RAZORPAY_.', NOW())
+    VALUES ($1, $2, $3, $4, 0.00, 0.00, 'escrow_held', 'RAZORPAY_ESCROW', NOW())
     ON CONFLICT (razorpay_order_id) DO UPDATE
       SET razorpay_payment_id = EXCLUDED.razorpay_payment_id,
           amount_total = EXCLUDED.amount_total,
-          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE '._held' END
+          status = CASE WHEN payments.status = 'settled' THEN payments.status ELSE 'escrow_held' END
     RETURNING *`,
     ['probe-booking', 'order_probe', 'pay_probe', 99]],
 
@@ -75,7 +75,41 @@ const CASES = [
       settled_at, created_at
     ) VALUES ($1, $2, $3, $4, $5, $6, $7::payment_status, $8, $9, CASE WHEN $7 = 'settled' THEN NOW() ELSE NULL END, NOW())
     RETURNING *`,
-    ['probe-booking', 'manual_ord', 'manual_pay', 250, 200, 50, 'settled', 'Direct UPI (Company QR)', 'UTR123']]
+    ['probe-booking', 'manual_ord', 'manual_pay', 250, 200, 50, 'settled', 'Direct UPI (Company QR)', 'UTR123']],
+  ['submit-manual-qr payments insert', `
+    INSERT INTO payments (
+      booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
+      tech_payout_amount, platform_commission, status, payment_method,
+      customer_utr, ocr_detected_utr, screenshot_url, verification_status,
+      created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
+      $7, $8, $9, 'pending', NOW()
+    ) RETURNING *`,
+    ['probe-booking', 'qr_ord_probe', 'qr_pay_probe', 99, 0, 0, '123456789012', null, null]],
+  ['submit-manual-qr booking advance update', `
+    UPDATE bookings
+    SET status = $1, advance_amount_paid = COALESCE(advance_amount_paid, 0) + $2
+    WHERE id = $3 AND status IN ('created', 'matching')`,
+    ['matching', 99, 'probe-booking']],
+  ['partner-confirm-doorstep payments insert', `
+    INSERT INTO payments (
+      booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
+      tech_payout_amount, platform_commission, status, payment_method,
+      customer_utr, ocr_detected_utr, screenshot_url, verification_status, verified_by,
+      created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, 'escrow_held', 'DYNAMIC_UPI_QR',
+      $7, $8, NULL, 'tech_confirmed', 'PARTNER_PHYSICAL_CHECK', NOW()
+    ) RETURNING *`,
+    ['probe-booking', 'qr_door_probe', 'qr_door_pay_probe', 500, 400, 100, 'DOOR_SLM', null]],
+  ['merchant_credit_alerts upsert', `
+    INSERT INTO merchant_credit_alerts (
+      source_app, amount, utr, booking_ref, sender_label, raw_message, alert_hash
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+    ON CONFLICT (alert_hash) DO NOTHING
+    RETURNING *`,
+    ['BANK_ALERT', 99, '123456789012', 'SLM-00001', 'Bank', 'Credit alert', 'probe_hash_001']]
 ];
 
 (async () => {
@@ -96,7 +130,7 @@ const CASES = [
     SELECT e.enumlabel FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid
     WHERE t.typname = 'payment_status' ORDER BY e.enumsortorder`);
   const present = labels.rows.map(r => r.enumlabel);
-  const used = ['._held', 'settled', 'refunded'];
+  const used = ['escrow_held', 'settled', 'refunded'];
   const missing = used.filter(l => !present.includes(l));
   console.log(`payment_status labels: ${present.join(', ')}`);
   if (missing.length) {

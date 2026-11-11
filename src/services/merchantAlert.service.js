@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+﻿const crypto = require('crypto');
 
 function normalizeBookingRef(rawRef) {
   if (!rawRef) return null;
@@ -247,7 +247,7 @@ async function promotePaymentWithAlert(
       SET verification_status = 'verified',
           verified_by = $3,
           verified_at = NOW(),
-          status = '._held',
+          status = 'escrow_held',
           ocr_detected_utr = COALESCE(ocr_detected_utr, $2)
       WHERE id = $1
       RETURNING *

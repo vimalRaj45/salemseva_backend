@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ============================================================================
  * SHAZU ONE - SECURITY GUARD TEST
  * ============================================================================
@@ -203,7 +203,7 @@ async function paymentChecks(signedIn) {
   } else {
     const amountOk = Number(row.amount_total) === 99;
     const notNullOk = row.tech_payout_amount !== null && row.platform_commission !== null;
-    expect(amountOk && notNullOk && row.status === '._held',
+    expect(amountOk && notNullOk && row.status === 'escrow_held',
       '. row written to the ledger',
       `status=${row.status} total=${row.amount_total} payout=${row.tech_payout_amount} commission=${row.platform_commission}`);
   }

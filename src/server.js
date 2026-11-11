@@ -84,10 +84,22 @@ fastify.addHook('onSend', async (req, reply, payload) => {
   try {
     const body = JSON.parse(payload);
     if (!body || typeof body !== 'object') return payload;
+    const originalError = body.error || body.message || null;
     if ('error' in body) body.error = GENERIC_500;
     if ('message' in body && typeof body.message === 'string') body.message = GENERIC_500;
     body.requestId = String(req.id);
-    req.log.error(`[${req.id}] 5xx detail withheld from the client`);
+    req.log.error(
+      {
+        requestId: String(req.id),
+        method: req.method,
+        url: req.url,
+        route: pattern,
+        statusCode: reply.statusCode,
+        originalError
+      },
+      `[${req.id}] 5xx detail withheld from the client`
+    );
+    console.error(`[5XX][${req.id}] ${req.method} ${req.url} (${reply.statusCode}):`, originalError);
     return JSON.stringify(body);
   } catch (_) {
     return payload;

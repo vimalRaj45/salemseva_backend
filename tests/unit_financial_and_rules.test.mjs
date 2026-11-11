@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ============================================================================
  * SHAZU ONE: UNIT TEST SUITE
  * Financial . Splits, Coupon Rules, Cancellation Policies & State Machine
@@ -436,7 +436,7 @@ describe('Unit Test: Advance Payment Verification & Lead Visibility Guard', () =
 describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger', () => {
   it('should exclude failed payment attempts from Gross Revenue and Customer Inflow', () => {
     const rawPayments = [
-      { id: 'pay_1', amount_total: 99.00, status: '._held', part: 1 },
+      { id: 'pay_1', amount_total: 99.00, status: 'escrow_held', part: 1 },
       { id: 'pay_2_fail', amount_total: 257.55, status: 'failed', part: 2 },
       { id: 'pay_2_success', amount_total: 257.55, status: 'settled', part: 2 }
     ];
@@ -457,8 +457,8 @@ describe('Unit Test: Payment Split-Up & Failed Payment Exclusion in Admin Ledger
     const customerFeePercent = 2.0; // 2%
     const gatewayFeePercent = 1.0; // 1% ~ 1.02%
 
-    const part1Txn = { id: 'txn_part1', amount_total: 99.00, status: '._held' };
-    const part2Txn = { id: 'txn_part2', amount_total: 257.55, status: '._held' };
+    const part1Txn = { id: 'txn_part1', amount_total: 99.00, status: 'escrow_held' };
+    const part2Txn = { id: 'txn_part2', amount_total: 257.55, status: 'escrow_held' };
 
     // Itemized deductions calculation
     const netWorkBase = quoteTotal;

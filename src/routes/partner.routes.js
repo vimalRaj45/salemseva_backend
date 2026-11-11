@@ -1,4 +1,4 @@
-const { query } = require('../db/db');
+﻿const { query } = require('../db/db');
 // Password hashing lives in one place so onboarding and sign-in agree on the format.
 // See services/password.service.js.
 const { hashPassword } = require('../services/password.service');
@@ -1606,7 +1606,7 @@ async function partnerRoutes(fastify, options) {
           techShare = parseFloat((totalJob - platformCut).toFixed(2));
         }
 
-        let settlementStatus = '._HELD';
+        let settlementStatus = 'escrow_held';
         if (row.status === 'completed') {
           if (row.payout_utr && row.payment_status === 'settled') {
             settlementStatus = 'SETTLED_TO_BANK';
