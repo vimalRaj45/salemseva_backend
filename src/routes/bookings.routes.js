@@ -1234,7 +1234,7 @@ async function bookingsRoutes(fastify, options) {
               finalSettlementPaid: parseFloat(part2PaidAmt.toFixed(2))
             },
             platformCommission: isCompleted ? parseFloat((finalQuoteSubtotal * (feeSettings.partnerCommPercent / 100.0)).toFixed(2)) : 0,
-            .Guarantee: isCancelled? '. Released & Refunded': '100% Protected under Shazu One .'
+            paymentGuarantee: isCancelled ? 'Released & Refunded' : '100% Protected under Shazu One Guarantee'
           }
         };
       });

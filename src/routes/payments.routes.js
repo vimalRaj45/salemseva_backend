@@ -471,8 +471,8 @@ async function paymentsRoutes(fastify, options) {
         verified: true,
         paymentId: paymentTxId,
         orderId: orderTxId,
-        .Status: 'HELD_IN_.',
-        guarantee: '100% Protected under Shazu One . Policy',
+        paymentStatus: 'HELD_IN_PROTECTION',
+        guarantee: '100% Protected under Shazu One Policy',
         invoice: dualInvoice,
         routeTransfer: routeTransferResult,
         disbursalSummary: {

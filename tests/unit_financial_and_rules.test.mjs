@@ -33,7 +33,7 @@ const { checkCancellationWindow } = require('../src/services/cancellation_policy
  * Dynamic . Payout Split
  * Platform fee = commissionPercent % (default 2%), Technician = (100 - commissionPercent)%
  */
-export function calculate.Split(totalAmount, commissionPercent = 2) {
+export function calculateSplit(totalAmount, commissionPercent = 2) {
   if (typeof totalAmount !== 'number' || isNaN(totalAmount) || totalAmount <= 0) {
     throw new Error('Total amount must be a positive number');
   }
@@ -164,7 +164,7 @@ export function isValidStateTransition(currentStatus, nextStatus) {
 
 describe('Unit Test: Dynamic Platform Commission & . Payout Split', () => {
   it('should accurately split ₹1000 at default 2% commission into ₹20 platform fee and ₹980 technician payout', () => {
-    const split = calculate.Split(1000, 2);
+    const split = calculateSplit(1000, 2);
     assert.equal(split.platformFee, 20);
     assert.equal(split.technicianPayout, 980);
     assert.equal(split.platformFee + split.technicianPayout, 1000);
@@ -172,35 +172,35 @@ describe('Unit Test: Dynamic Platform Commission & . Payout Split', () => {
 
   it('should dynamically adapt when commission is increased in .env (e.g. 5% or 10%) as business grows', () => {
     // At 5% platform commission
-    const split5 = calculate.Split(1000, 5);
+    const split5 = calculateSplit(1000, 5);
     assert.equal(split5.platformFee, 50);
     assert.equal(split5.technicianPayout, 950);
     assert.equal(split5.platformFee + split5.technicianPayout, 1000);
 
     // At 8.5% platform commission on ₹1250 job
-    const split8_5 = calculate.Split(1250, 8.5);
+    const split8_5 = calculateSplit(1250, 8.5);
     assert.equal(split8_5.platformFee, 106.25);
     assert.equal(split8_5.technicianPayout, 1143.75);
     assert.equal(split8_5.platformFee + split8_5.technicianPayout, 1250);
 
     // At 10% platform commission on ₹2500 job
-    const split10 = calculate.Split(2500, 10);
+    const split10 = calculateSplit(2500, 10);
     assert.equal(split10.platformFee, 250);
     assert.equal(split10.technicianPayout, 2250);
     assert.equal(split10.platformFee + split10.technicianPayout, 2500);
   });
 
   it('should accurately calculate split for standard visitation fee ₹149', () => {
-    const split = calculate.Split(149, 2);
+    const split = calculateSplit(149, 2);
     assert.equal(split.platformFee, 2.98);
     assert.equal(split.technicianPayout, 146.02);
     assert.equal(Math.round((split.platformFee + split.technicianPayout) * 100) / 100, 149);
   });
 
   it('should reject invalid or negative numbers', () => {
-    assert.throws(() => calculate.Split(-500), /positive number/);
-    assert.throws(() => calculate.Split(0), /positive number/);
-    assert.throws(() => calculate.Split('invalid'), /positive number/);
+    assert.throws(() => calculateSplit(-500), /positive number/);
+    assert.throws(() => calculateSplit(0), /positive number/);
+    assert.throws(() => calculateSplit('invalid'), /positive number/);
   });
 });
 
