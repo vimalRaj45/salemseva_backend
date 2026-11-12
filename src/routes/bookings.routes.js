@@ -1959,6 +1959,106 @@ async function bookingsRoutes(fastify, options) {
     }
   });
 
+  // 6b. Customer stops booking after inspection (forfeits advance fee, releases technician immediately)
+  fastify.post('/bookings/:id/stop-after-inspection', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      const booking = bRes.rows[0];
+
+      if (!booking) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      if (booking.status === 'completed') {
+        return reply.status(400).send({ success: false, error: 'Completed bookings cannot be stopped' });
+      }
+
+      if (booking.status === 'cancelled') {
+        return {
+          success: true,
+          message: 'Booking was already closed.',
+          booking,
+          forfeitedAmount: parseFloat(booking.visit_fee || booking.advance_paid || booking.final_amount || 99.00)
+        };
+      }
+
+      const allowedStatuses = ['arrived', 'inspecting', 'in_progress', 'quote_presented', 'quote_approved'];
+      if (!allowedStatuses.includes(booking.status)) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Inspection-only stop is only available after the technician has arrived for inspection.'
+        });
+      }
+
+      const forfeitedAmount = parseFloat(booking.visit_fee || booking.advance_paid || booking.final_amount || 99.00);
+
+      const updateRes = await query(
+        `UPDATE bookings
+         SET status = 'cancelled',
+             cancellation_reason = 'Inspection only - no further work needed',
+             cancellation_details = 'Customer stopped booking after inspection; advance booking fee retained as inspection visit charge.',
+             cancelled_by = 'customer',
+             cancelled_at = NOW(),
+             refund_amount = 0.00,
+             refund_status = 'FORFEITED_INSPECTION_FEE'
+         WHERE id = $1
+         RETURNING *`,
+        [booking.id]
+      );
+      const updatedBooking = updateRes.rows[0];
+
+      if (booking.technician_id) {
+        try {
+          await query('UPDATE technicians SET is_busy = false WHERE id = $1', [booking.technician_id]);
+        } catch (_) {
+          // is_busy column may not exist in all schemas; active-job query filters cancelled bookings
+        }
+      }
+
+      try {
+        await query(
+          `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+           VALUES ($1, 'INSPECTION_ONLY_STOPPED', $2, 'customer', $3)`,
+          [
+            booking.id,
+            booking.customer_phone || 'customer',
+            JSON.stringify({
+              previousStatus: booking.status,
+              forfeitedAmount,
+              technicianId: booking.technician_id || null,
+              stoppedAt: new Date().toISOString()
+            })
+          ]
+        );
+      } catch (auditErr) {
+        fastify.log.warn('Audit log failed for stop-after-inspection ' + booking.id + ': ' + auditErr.message);
+      }
+
+      try {
+        await pushService.sendPushToBookingParty({
+          bookingId: booking.id,
+          targetRole: 'technician',
+          title: 'Inspection Closed by Customer',
+          body: `Customer opted for inspection only on #${booking.id}. You are now free for the next job.`,
+          data: { type: 'inspection_only_stopped', bookingId: booking.id }
+        });
+      } catch (pushErr) {
+        fastify.log.warn('Technician push failed for stop-after-inspection ' + booking.id + ': ' + pushErr.message);
+      }
+
+      return {
+        success: true,
+        message: 'Inspection closed and technician released for the next job.',
+        booking: updatedBooking,
+        forfeitedAmount
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 14. Lightweight Booking Summary Lookup (used by partner quote/approval checks)
   fastify.get('/bookings/:id', async (req, reply) => {
     try {
