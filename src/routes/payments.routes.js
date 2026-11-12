@@ -784,9 +784,12 @@ async function paymentsRoutes(fastify, options) {
         WHERE id = 'reward_settings' 
         LIMIT 1
       `);
-      const vpa = getEnvUpiId() || sRes.rows[0]?.business_upi_id || '';
-      const merchantName = getEnvMerchantName() || sRes.rows[0]?.business_merchant_name || '';
-      console.log('[BACKEND /payments/qr-intent] Env UPI ID:', vpa, '| Env Merchant Name:', merchantName);
+      const rawVpa = getEnvUpiId() || sRes.rows[0]?.business_upi_id || '';
+      const vpa = String(rawVpa).trim().toLowerCase();
+      const rawMerchantName = getEnvMerchantName() || sRes.rows[0]?.business_merchant_name || 'Shazu One';
+      const merchantName = (String(rawMerchantName).replace(/[^a-zA-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim() || 'Shazu One').slice(0, 40);
+      const merchantCode = String(process.env.BUSINESS_UPI_MC || '').replace(/\D/g, '').slice(0, 4);
+      console.log('[BACKEND /payments/qr-intent] Env UPI ID:', vpa, '| Env Merchant Name:', merchantName, '| MC:', merchantCode || 'none');
 
       if (!vpa) {
         return reply.status(500).send({
@@ -795,14 +798,27 @@ async function paymentsRoutes(fastify, options) {
         });
       }
 
-      const cleanAmount = parseFloat(amount).toFixed(2);
-      const bId = bookingId || `SLM-${Date.now()}`;
-      const suffix = paymentType === 'FINAL_SETTLEMENT' ? 'FIN' : 'ADV';
-      const txnRef = `${bId}-${suffix}`;
-      const txnNote = `${merchantName || 'Order'} ${bId}`;
+      if (!/^[a-z0-9._-]+@[a-z0-9.-]+$/i.test(vpa)) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Configured Business UPI ID format is invalid.'
+        });
+      }
 
-      // Standard Indian UPI Intent URI
-      const upiUri = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent(merchantName)}&am=${cleanAmount}&tr=${encodeURIComponent(txnRef)}&tn=${encodeURIComponent(txnNote)}&cu=INR`;
+      const cleanAmount = parseFloat(amount).toFixed(2);
+      const bId = bookingId || `SLM${Date.now()}`;
+      const suffix = paymentType === 'FINAL_SETTLEMENT' ? 'FIN' : 'ADV';
+      // NPCI UPI spec requires `tr` to be strictly alphanumeric (no hyphens), max 35 chars.
+      const txnRef = `${bId}${suffix}`.replace(/[^a-zA-Z0-9]/g, '').slice(0, 35);
+      const txnNote = `${merchantName} ${bId}`.replace(/[^a-zA-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 50);
+
+      // Standard NPCI UPI Intent URI.
+      // Only attach `tr` + `mc` when a 4-digit Merchant Category Code is configured;
+      // sending `tr` without `mc` causes strict PSPs (GPay/PhonePe/BHIM) to reject non-MCC VPAs as invalid.
+      let upiUri = `upi://pay?pa=${encodeURIComponent(vpa)}&pn=${encodeURIComponent(merchantName)}&am=${cleanAmount}&tn=${encodeURIComponent(txnNote)}&cu=INR`;
+      if (merchantCode.length === 4 && txnRef) {
+        upiUri += `&mc=${encodeURIComponent(merchantCode)}&tr=${encodeURIComponent(txnRef)}`;
+      }
 
       return {
         success: true,
