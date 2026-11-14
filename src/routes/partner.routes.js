@@ -232,8 +232,8 @@ async function partnerRoutes(fastify, options) {
 
         query(`
         SELECT 
-          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_jobs_count
+          COALESCE(SUM(CASE WHEN status IN ('completed', 'inspection_only') AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COUNT(CASE WHEN status IN ('completed', 'inspection_only') THEN 1 END) as completed_jobs_count
         FROM bookings WHERE technician_id = $1
       `, [tech.id, partnerEarningsMultiplier])
       ]);
@@ -1170,9 +1170,9 @@ async function partnerRoutes(fastify, options) {
       const partnerEarningsMultiplier = Math.max(0, (100 - liveFees.partnerCommPercent) / 100.0);
       const statsRes = await query(`
         SELECT 
-          COALESCE(SUM(CASE WHEN status = 'completed' AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
-          COALESCE(SUM(CASE WHEN status = 'completed' THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as total_earnings,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END)::int as completed_jobs_count,
+          COALESCE(SUM(CASE WHEN status IN ('completed', 'inspection_only') AND created_at >= CURRENT_DATE THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as today_earnings,
+          COALESCE(SUM(CASE WHEN status IN ('completed', 'inspection_only') THEN COALESCE(final_amount * $2::numeric, visit_fee, 0) ELSE 0 END), 0) as total_earnings,
+          COUNT(CASE WHEN status IN ('completed', 'inspection_only') THEN 1 END)::int as completed_jobs_count,
           COUNT(CASE WHEN status IN ('accepted', 'en_route', 'arrived', 'inspecting', 'quote_presented', 'quote_approved', 'in_progress') THEN 1 END)::int as active_jobs_count
         FROM bookings WHERE technician_id = $1
       `, [tech.id, partnerEarningsMultiplier]);
@@ -1472,7 +1472,7 @@ async function partnerRoutes(fastify, options) {
           COUNT(DISTINCT b.id) as completed_jobs
         FROM bookings b
         LEFT JOIN payments p ON b.id = p.booking_id
-        WHERE b.status = 'completed'
+        WHERE b.status IN ('completed', 'inspection_only')
       `;
       const params = [];
       if (techId) {

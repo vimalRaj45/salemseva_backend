@@ -1,4 +1,4 @@
-﻿const { query } = require('../db/db');
+const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
 const {
   getPlatformCommissionPercent,
@@ -90,7 +90,7 @@ async function adminRoutes(fastify, options) {
           COALESCE(
             NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
             NULLIF(t.rating_avg, 0),
-            CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+            CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status IN ('completed', 'inspection_only')) > 0 THEN 5.0 ELSE 0 END
           ) as rating_avg,
           GREATEST(
             COALESCE(t.rating_count, 0),
@@ -98,7 +98,7 @@ async function adminRoutes(fastify, options) {
           ) as rating_count,
           GREATEST(
             COALESCE(t.jobs_completed_count, 0),
-            (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
+            (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status IN ('completed', 'inspection_only'))
           ) as jobs_completed_count,
           (
             SELECT count(*) 
@@ -434,7 +434,7 @@ async function adminRoutes(fastify, options) {
             COALESCE(
               NULLIF(ROUND((SELECT AVG(r.rating)::numeric FROM reviews r WHERE r.technician_id = t.id), 1), 0),
               NULLIF(t.rating_avg, 0),
-              CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed') > 0 THEN 5.0 ELSE 0 END
+              CASE WHEN (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status IN ('completed', 'inspection_only')) > 0 THEN 5.0 ELSE 0 END
             ) as rating_avg,
             GREATEST(
               COALESCE(t.rating_count, 0),
@@ -442,7 +442,7 @@ async function adminRoutes(fastify, options) {
             ) as rating_count,
             GREATEST(
               COALESCE(t.jobs_completed_count, 0),
-              (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status = 'completed')
+              (SELECT count(*)::int FROM bookings b WHERE b.technician_id = t.id AND b.status IN ('completed', 'inspection_only'))
             ) as jobs_completed_count
           FROM technicians t
           WHERE t.id = $1
@@ -459,7 +459,7 @@ async function adminRoutes(fastify, options) {
         `, [id]),
         query(`
           SELECT 
-            COALESCE(SUM(CASE WHEN b.status = 'completed' THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * $2::numeric, 0) ELSE 0 END), 0) as lifetime_earnings,
+            COALESCE(SUM(CASE WHEN b.status IN ('completed', 'inspection_only') THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * $2::numeric, 0) ELSE 0 END), 0) as lifetime_earnings,
             COALESCE(SUM(COALESCE(p.amount_total, b.final_amount, 0)), 0) as gross_job_volume
           FROM bookings b
           LEFT JOIN payments p ON p.booking_id = b.id
