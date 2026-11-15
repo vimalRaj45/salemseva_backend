@@ -376,6 +376,10 @@ async function partnerRoutes(fastify, options) {
           voiceNoteUrl: activeJob.voice_note_url || null,
           bookingType: activeJob.booking_type || 'instant',
           scheduledSlot: activeJob.scheduled_slot || null,
+          rescheduleStatus: activeJob.reschedule_status || 'none',
+          proposedRescheduledSlot: activeJob.proposed_rescheduled_slot || null,
+          rescheduleReason: activeJob.reschedule_reason || null,
+          proposedRescheduledBy: activeJob.proposed_rescheduled_by || null,
           customerOtp: activeJob.customer_otp || null,
           customer_otp: activeJob.customer_otp || null,
           createdAt: activeJob.created_at
@@ -1947,6 +1951,88 @@ async function partnerRoutes(fastify, options) {
         };
       } else {
         return reply.status(400).send({ success: false, error: 'Invalid mode. Must be propose_slot or request_handover' });
+      }
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 11. Partner: Respond to Customer Reschedule Request (Approve or Reject)
+  fastify.post('/partner/bookings/:id/respond-reschedule', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { action = 'approve', technicianId, reason } = req.body || {};
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const b = bRes.rows[0];
+
+      if (action === 'approve') {
+        const targetSlot = b.proposed_rescheduled_slot || b.scheduled_slot;
+        const updateRes = await query(
+          `UPDATE bookings
+           SET scheduled_slot = $1,
+               proposed_rescheduled_slot = NULL,
+               proposed_rescheduled_by = NULL,
+               reschedule_status = 'approved',
+               reschedule_count = COALESCE(reschedule_count, 0) + 1,
+               last_rescheduled_by = 'technician',
+               last_rescheduled_at = CURRENT_TIMESTAMP,
+               reschedule_reason = $2
+           WHERE id = $3
+           RETURNING *`,
+          [targetSlot, reason || 'Technician approved customer requested reschedule', id]
+        );
+
+        try {
+          await query(
+            `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, b.scheduled_slot, targetSlot, 'technician', reason || 'Technician approved customer reschedule']
+          );
+          await query(
+            `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+             VALUES ($1, 'RESCHEDULE_APPROVED_BY_TECH', $2, 'technician', $3)`,
+            [id, technicianId || b.technician_id || 'technician', JSON.stringify({ oldSlot: b.scheduled_slot, newSlot: targetSlot, reason })]
+          );
+        } catch (_) { }
+
+        return {
+          success: true,
+          message: 'Appointment reschedule approved. Revised time confirmed.',
+          booking: updateRes.rows[0]
+        };
+      } else {
+        // Decline customer proposal, retain original slot
+        const updateRes = await query(
+          `UPDATE bookings
+           SET proposed_rescheduled_slot = NULL,
+               proposed_rescheduled_by = NULL,
+               reschedule_status = 'rejected',
+               reschedule_reason = $1,
+               last_rescheduled_at = CURRENT_TIMESTAMP
+           WHERE id = $2
+           RETURNING *`,
+          [reason || 'Technician declined proposed time; original slot retained', id]
+        );
+
+        try {
+          await query(
+            `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+             VALUES ($1, 'RESCHEDULE_REJECTED_BY_TECH', $2, 'technician', $3)`,
+            [id, technicianId || b.technician_id || 'technician', JSON.stringify({ retainedSlot: b.scheduled_slot, reason })]
+          );
+        } catch (_) { }
+
+        return {
+          success: true,
+          message: 'Proposed slot declined. Original appointment slot retained.',
+          booking: updateRes.rows[0]
+        };
       }
     } catch (err) {
       fastify.log.error(err);

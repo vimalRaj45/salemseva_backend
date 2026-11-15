@@ -1766,6 +1766,105 @@ async function adminRoutes(fastify, options) {
   fastify.post('/admin/bookings/cancel-order', handleCancelBooking);
   fastify.post('/admin/bookings/:id/cancel', handleCancelBooking);
 
+  // 10a-2. Admin: Approve Customer or Technician Reschedule Request
+  fastify.post('/admin/bookings/:id/approve-reschedule', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { adminUser = 'Salem Central Operations Desk', notes } = req.body || {};
+      const actualAdmin = extractAdminActor(adminUser, 'Salem Central Operations Desk');
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const b = bRes.rows[0];
+      const targetSlot = b.proposed_rescheduled_slot || b.scheduled_slot;
+
+      const updateRes = await query(
+        `UPDATE bookings
+         SET scheduled_slot = $1,
+             proposed_rescheduled_slot = NULL,
+             proposed_rescheduled_by = NULL,
+             reschedule_status = 'approved',
+             reschedule_count = COALESCE(reschedule_count, 0) + 1,
+             last_rescheduled_by = $2,
+             last_rescheduled_at = CURRENT_TIMESTAMP,
+             reschedule_reason = $3
+         WHERE id = $4
+         RETURNING *`,
+        [targetSlot, actualAdmin, notes || 'Approved by Central Operations Admin', id]
+      );
+
+      try {
+        await query(
+          `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, b.scheduled_slot, targetSlot, actualAdmin, notes || 'Admin approved reschedule']
+        );
+        await query(
+          `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+           VALUES ($1, 'RESCHEDULE_APPROVED_BY_ADMIN', $2, 'admin', $3)`,
+          [id, actualAdmin, JSON.stringify({ oldSlot: b.scheduled_slot, newSlot: targetSlot, notes })]
+        );
+      } catch (_) { }
+
+      return {
+        success: true,
+        message: 'Reschedule request approved by Central Operations.',
+        booking: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 10a-3. Admin: Reject Reschedule Request (Retain Original Slot)
+  fastify.post('/admin/bookings/:id/reject-reschedule', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { adminUser = 'Salem Central Operations Desk', reason } = req.body || {};
+      const actualAdmin = extractAdminActor(adminUser, 'Salem Central Operations Desk');
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+
+      const b = bRes.rows[0];
+
+      const updateRes = await query(
+        `UPDATE bookings
+         SET proposed_rescheduled_slot = NULL,
+             proposed_rescheduled_by = NULL,
+             reschedule_status = 'rejected',
+             reschedule_reason = $1,
+             last_rescheduled_at = CURRENT_TIMESTAMP
+         WHERE id = $2
+         RETURNING *`,
+        [reason || 'Rejected by Central Operations Admin; original slot retained', id]
+      );
+
+      try {
+        await query(
+          `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+           VALUES ($1, 'RESCHEDULE_REJECTED_BY_ADMIN', $2, 'admin', $3)`,
+          [id, actualAdmin, JSON.stringify({ retainedSlot: b.scheduled_slot, reason })]
+        );
+      } catch (_) { }
+
+      return {
+        success: true,
+        message: 'Reschedule request rejected. Original appointment slot retained.',
+        booking: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 10b. Emergency Admin Payment Override ("Mark as Paid")
   fastify.post('/admin/bookings/:id/payment-override', async (req, reply) => {
     try {

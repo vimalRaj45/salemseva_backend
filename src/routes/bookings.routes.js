@@ -851,6 +851,46 @@ async function bookingsRoutes(fastify, options) {
         });
       }
 
+      // If a technician is already assigned, rescheduling requires approval by technician or operations admin
+      const hasAssignedTech = Boolean(b.technician_id);
+
+      if (hasAssignedTech) {
+        const updateRes = await query(
+          `UPDATE bookings 
+           SET proposed_rescheduled_slot = $1,
+               proposed_rescheduled_by = 'customer',
+               reschedule_status = 'pending_tech_approval',
+               reschedule_reason = $2,
+               last_rescheduled_at = CURRENT_TIMESTAMP
+           WHERE id = $3 
+           RETURNING *`,
+          [scheduledSlot, reason || 'Customer requested revised appointment slot', id]
+        );
+
+        try {
+          await query(
+            `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [id, b.scheduled_slot || 'Unassigned', scheduledSlot, 'customer_pending_approval', reason || 'Customer requested revised slot awaiting tech/admin approval']
+          );
+          await query(
+            `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+             VALUES ($1, 'RESCHEDULE_REQUESTED_BY_CUSTOMER', $2, 'customer', $3)`,
+            [id, b.customer_phone || b.customer_id || 'customer', JSON.stringify({ oldSlot: b.scheduled_slot, proposedSlot: scheduledSlot, reason })]
+          );
+        } catch (logErr) {
+          fastify.log.warn('Failed to insert reschedule log: ' + logErr.message);
+        }
+
+        return {
+          success: true,
+          requiresApproval: true,
+          message: 'Reschedule request submitted for approval by your assigned technician or central operations desk.',
+          booking: updateRes.rows[0]
+        };
+      }
+
+      // If unassigned / matching, update directly without needing approval
       const updateRes = await query(
         `UPDATE bookings 
          SET scheduled_slot = $1,
@@ -879,6 +919,7 @@ async function bookingsRoutes(fastify, options) {
 
       return {
         success: true,
+        requiresApproval: false,
         message: 'Appointment slot rescheduled successfully without additional fee',
         booking: updateRes.rows[0]
       };
