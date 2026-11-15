@@ -1475,7 +1475,10 @@ async function partnerRoutes(fastify, options) {
           COALESCE(SUM(p.tech_payout_amount), 0) as total_earnings,
           COUNT(DISTINCT b.id) as completed_jobs
         FROM bookings b
-        LEFT JOIN payments p ON b.id = p.booking_id
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as tech_payout_amount
+          FROM payments WHERE booking_id = b.id
+        ) p ON true
         WHERE b.status IN ('completed', 'inspection_only')
       `;
       const params = [];

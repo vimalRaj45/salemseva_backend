@@ -1210,6 +1210,31 @@ async function paymentsRoutes(fastify, options) {
       }
       const booking = bRes.rows[0];
 
+      if (booking.status === 'completed') {
+        return reply.send({
+          success: true,
+          alreadySettled: true,
+          message: 'Final payment has already been confirmed and completed for this booking.',
+          verificationStatus: 'verified'
+        });
+      }
+
+      const existingSettlement = await query(`
+        SELECT * FROM payments 
+        WHERE booking_id = $1 
+          AND (payment_type = 'FINAL_SETTLEMENT' OR payment_method = 'ADVANCE_COVERED' OR payment_method = 'DYNAMIC_UPI_QR')
+          AND status = 'success'
+        LIMIT 1
+      `, [bookingId]);
+      if (existingSettlement.rows.length > 0) {
+        return reply.send({
+          success: true,
+          alreadySettled: true,
+          message: 'Doorstep final payment was already processed and confirmed.',
+          verificationStatus: existingSettlement.rows[0].verification_status || 'verified'
+        });
+      }
+
       if (technicianId && booking.technician_id && String(booking.technician_id) !== String(technicianId)) {
         return reply.status(403).send({ success: false, error: 'Only the assigned technician can confirm doorstep collection for this booking.' });
       }

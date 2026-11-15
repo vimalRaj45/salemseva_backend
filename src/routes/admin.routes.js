@@ -450,19 +450,51 @@ async function adminRoutes(fastify, options) {
         query(`
           SELECT 
             b.*,
-            p.tech_payout_amount,
-            p.status as payment_status
+            COALESCE(p.tech_payout_amount, 0) as tech_payout_amount,
+            p.payment_status,
+            p.payment_amount_total,
+            p.payout_utr
           FROM bookings b
-          LEFT JOIN payments p ON b.id = p.booking_id
+          LEFT JOIN LATERAL (
+            SELECT 
+              COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as tech_payout_amount,
+              COALESCE(SUM(amount_total) FILTER (WHERE status != 'failed'), 0) as payment_amount_total,
+              MAX(status::text) as payment_status,
+              MAX(payout_utr) as payout_utr
+            FROM payments 
+            WHERE booking_id = b.id
+          ) p ON true
           WHERE b.technician_id = $1
           ORDER BY b.created_at DESC
         `, [id]),
         query(`
           SELECT 
-            COALESCE(SUM(CASE WHEN b.status IN ('completed', 'inspection_only') THEN COALESCE(NULLIF(p.tech_payout_amount, 0), b.final_amount * $2::numeric, 0) ELSE 0 END), 0) as lifetime_earnings,
-            COALESCE(SUM(COALESCE(p.amount_total, b.final_amount, 0)), 0) as gross_job_volume
+            COALESCE(SUM(
+              CASE 
+                WHEN b.status IN ('completed', 'inspection_only') THEN 
+                  COALESCE(
+                    NULLIF(p.tech_payout_amount, 0), 
+                    b.final_amount * $2::numeric, 
+                    0
+                  ) 
+                ELSE 0 
+              END
+            ), 0) as lifetime_earnings,
+            COALESCE(SUM(
+              COALESCE(
+                NULLIF(p.payment_amount_total, 0),
+                b.final_amount, 
+                0
+              )
+            ), 0) as gross_job_volume
           FROM bookings b
-          LEFT JOIN payments p ON p.booking_id = b.id
+          LEFT JOIN LATERAL (
+            SELECT 
+              COALESCE(SUM(tech_payout_amount) FILTER (WHERE status != 'failed'), 0) as tech_payout_amount,
+              COALESCE(SUM(amount_total) FILTER (WHERE status != 'failed'), 0) as payment_amount_total
+            FROM payments 
+            WHERE booking_id = b.id
+          ) p ON true
           WHERE b.technician_id = $1
         `, [id, techPayoutRate]),
         query(`
