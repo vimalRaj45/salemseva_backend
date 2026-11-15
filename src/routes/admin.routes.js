@@ -341,7 +341,7 @@ async function adminRoutes(fastify, options) {
             MAX(u.block_reason) as block_reason,
             MAX(u.blocked_at) as blocked_at
           FROM users u
-          WHERE LOWER(COALESCE(u.role, 'customer')) = 'customer'
+          WHERE LOWER(COALESCE(u.role::text, 'customer')) = 'customer'
             AND NOT EXISTS (
               SELECT 1 FROM technicians t
               WHERE RIGHT(REGEXP_REPLACE(t.phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(u.phone, '\\D', '', 'g'), 10)
