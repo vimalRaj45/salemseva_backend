@@ -823,7 +823,14 @@ async function bookingsRoutes(fastify, options) {
   fastify.post('/bookings/:id/reschedule', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { scheduledSlot, reason } = req.body || {};
+      const scheduledSlot = (
+        req.body?.scheduledSlot ||
+        req.body?.newSlot ||
+        req.body?.slot ||
+        req.body?.proposedSlot ||
+        ''
+      ).trim();
+      const reason = req.body?.reason || req.body?.rescheduleReason || '';
 
       if (!scheduledSlot) {
         return reply.status(400).send({ success: false, error: 'scheduledSlot is required' });
@@ -1790,6 +1797,22 @@ async function bookingsRoutes(fastify, options) {
     try {
       const { id } = req.params;
       const { reason, reasonDetails, cancelledBy = 'customer' } = req.body || {};
+      let safeCancelledBy = 'customer';
+      if (typeof cancelledBy === 'object' && cancelledBy !== null) {
+        safeCancelledBy = String(cancelledBy.email || cancelledBy.name || cancelledBy.id || 'customer').substring(0, 50);
+      } else if (typeof cancelledBy === 'string') {
+        const trimmed = cancelledBy.trim();
+        if (trimmed.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            safeCancelledBy = String(parsed.email || parsed.name || parsed.id || 'customer').substring(0, 50);
+          } catch (_) {
+            safeCancelledBy = trimmed.substring(0, 50);
+          }
+        } else {
+          safeCancelledBy = trimmed.substring(0, 50);
+        }
+      }
 
       // Fetch current booking
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
@@ -1895,7 +1918,7 @@ async function bookingsRoutes(fastify, options) {
         booking.id,
         cancelReasonText,
         cancelDetailsText,
-        cancelledBy,
+        safeCancelledBy,
         refundAmount,
         platformFeeDeduction,
         gatewayChargeDeduction

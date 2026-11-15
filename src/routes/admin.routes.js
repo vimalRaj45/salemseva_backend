@@ -1372,7 +1372,8 @@ async function adminRoutes(fastify, options) {
   const handleBookingDispatch = async (req, reply) => {
     try {
       const bookingId = req.params?.id || req.body?.bookingId;
-      const { technicianId, force = false } = req.body || {};
+      const { technicianId, force = false, dispatcher } = req.body || {};
+      const safeDispatcher = extractAdminActor(dispatcher, 'admin_salem_central');
 
       if (!bookingId) {
         return reply.status(400).send({ success: false, error: 'bookingId is required' });
@@ -1413,8 +1414,8 @@ async function adminRoutes(fastify, options) {
       // Record Audit Log
       await query(`
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
-        VALUES ($1, 'MANUAL_DISPATCH', 'admin_salem_central', 'admin', $2)
-      `, [bookingId, JSON.stringify({ technicianId, timestamp: new Date().toISOString() })]);
+        VALUES ($1, 'MANUAL_DISPATCH', $2, 'admin', $3)
+      `, [bookingId, safeDispatcher, JSON.stringify({ technicianId, timestamp: new Date().toISOString() })]);
 
       // Dispatch real-time background push notifications to both parties
       try {
@@ -1592,6 +1593,24 @@ async function adminRoutes(fastify, options) {
     }
   });
 
+  const extractAdminActor = (userVal, fallback = 'admin_ops') => {
+    if (!userVal) return fallback;
+    if (typeof userVal === 'object' && userVal !== null) {
+      return String(userVal.email || userVal.name || userVal.id || fallback).substring(0, 50);
+    }
+    if (typeof userVal === 'string') {
+      const trimmed = userVal.trim();
+      if (trimmed.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return String(parsed.email || parsed.name || parsed.id || fallback).substring(0, 50);
+        } catch (_) {}
+      }
+      return trimmed.substring(0, 50);
+    }
+    return String(userVal).substring(0, 50);
+  };
+
   // 10C. Admin General-Purpose Cancel Order & Release Technician
   const handleCancelBooking = async (req, reply) => {
     try {
@@ -1607,7 +1626,7 @@ async function adminRoutes(fastify, options) {
       } = req.body || {};
 
       const actualDetails = details || reasonDetails;
-      const actualAdmin = adminUser || adminId;
+      const actualAdmin = extractAdminActor(adminUser || adminId, 'admin_ops');
 
       if (!bookingId) {
         return reply.status(400).send({ success: false, error: 'bookingId is required' });
@@ -1758,8 +1777,10 @@ async function adminRoutes(fastify, options) {
         transactionRef,
         reason = 'razorpay_gateway_down',
         notes = '',
-        adminId = 'admin_central_ops'
+        adminId = 'admin_central_ops',
+        adminUser
       } = req.body || {};
+      const safeAdminId = extractAdminActor(adminUser || adminId, 'admin_central_ops');
 
       // 1. Fetch booking
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
@@ -1886,7 +1907,7 @@ async function adminRoutes(fastify, options) {
         VALUES ($1, 'ADMIN_MANUAL_PAYMENT_OVERRIDE', $2, 'admin', $3)
       `, [
         id,
-        adminId,
+        safeAdminId,
         JSON.stringify({
           amountPaid: parsedAmount,
           paymentStage,
