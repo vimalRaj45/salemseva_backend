@@ -21,15 +21,35 @@ const {
   normalizeBookingRef
 } = require('../services/merchantAlert.service');
 
+const extractActor = (userVal, fallback = 'Salem Operations Admin') => {
+  if (!userVal) return fallback;
+  if (typeof userVal === 'object') {
+    return userVal.email || userVal.name || userVal.id || fallback;
+  }
+  if (typeof userVal === 'string') {
+    const trimmed = userVal.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed.email || parsed.name || parsed.id || fallback;
+      } catch {
+        return trimmed.slice(0, 250);
+      }
+    }
+    return trimmed.slice(0, 250);
+  }
+  return String(userVal).slice(0, 250);
+};
+
 async function paymentsRoutes(fastify, options) {
   try {
     await query(`
       ALTER TABLE payments
-        ADD COLUMN IF NOT EXISTS customer_utr VARCHAR(64),
-        ADD COLUMN IF NOT EXISTS ocr_detected_utr VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS customer_utr VARCHAR(100),
+        ADD COLUMN IF NOT EXISTS ocr_detected_utr VARCHAR(100),
         ADD COLUMN IF NOT EXISTS screenshot_url TEXT,
-        ADD COLUMN IF NOT EXISTS verification_status VARCHAR(30) DEFAULT 'pending',
-        ADD COLUMN IF NOT EXISTS verified_by VARCHAR(64),
+        ADD COLUMN IF NOT EXISTS verification_status VARCHAR(50) DEFAULT 'pending',
+        ADD COLUMN IF NOT EXISTS verified_by VARCHAR(255),
         ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITH TIME ZONE,
         ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
     `);
@@ -1511,7 +1531,8 @@ async function paymentsRoutes(fastify, options) {
   fastify.post('/admin/payments/:id/verify', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { verifiedBy = 'Salem Operations Admin', adminNotes = '' } = req.body || {};
+      const { verifiedBy: rawVerifiedBy = 'Salem Operations Admin', adminNotes = '' } = req.body || {};
+      const verifiedBy = extractActor(rawVerifiedBy, 'Salem Operations Admin');
 
       const pRes = await query('SELECT * FROM payments WHERE id::text = $1 OR customer_utr = $1', [id]);
       if (pRes.rows.length === 0) {
@@ -1556,7 +1577,8 @@ async function paymentsRoutes(fastify, options) {
   fastify.post('/admin/payments/:id/reject', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { rejectionReason = 'Invalid UTR or screenshot does not match bank record', verifiedBy = 'Salem Operations Admin' } = req.body || {};
+      const { rejectionReason = 'Invalid UTR or screenshot does not match bank record', verifiedBy: rawVerifiedBy = 'Salem Operations Admin' } = req.body || {};
+      const verifiedBy = extractActor(rawVerifiedBy, 'Salem Operations Admin');
 
       const pRes = await query('SELECT * FROM payments WHERE id::text = $1', [id]);
       if (pRes.rows.length === 0) {

@@ -1996,8 +1996,8 @@ async function adminRoutes(fastify, options) {
       await query(`
         CREATE TABLE IF NOT EXISTS admin_team (
           id VARCHAR(64) PRIMARY KEY,
-          name VARCHAR(128) NOT NULL,
-          email VARCHAR(128) NOT NULL UNIQUE,
+          name VARCHAR(255) NOT NULL,
+          email VARCHAR(255) NOT NULL UNIQUE,
           phone VARCHAR(32),
           role VARCHAR(64) NOT NULL DEFAULT 'ops_dispatcher',
           hub_locality VARCHAR(128) DEFAULT 'Salem Central HQ',

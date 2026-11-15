@@ -1,12 +1,32 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
 
+const extractActor = (userVal, fallback = 'Salem Operations Admin') => {
+  if (!userVal) return fallback;
+  if (typeof userVal === 'object') {
+    return userVal.email || userVal.name || userVal.id || fallback;
+  }
+  if (typeof userVal === 'string') {
+    const trimmed = userVal.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed.email || parsed.name || parsed.id || fallback;
+      } catch {
+        return trimmed.slice(0, 250);
+      }
+    }
+    return trimmed.slice(0, 250);
+  }
+  return String(userVal).slice(0, 250);
+};
+
 async function ticketsRoutes(fastify, options) {
   // 1. Create a support ticket (authenticated or auth help guest)
   fastify.post('/tickets/create', async (req, reply) => {
     try {
       const body = req.body || {};
-      const creatorId = body.creatorId || body.creator_id || null;
+      const creatorId = body.creatorId || body.creator_id ? extractActor(body.creatorId || body.creator_id, null) : null;
       const creatorRole = body.creatorRole || body.creator_role || 'customer';
       const creatorName = body.creatorName || body.creator_name || 'Citizen User';
       const rawPhone = body.creatorPhone || body.creator_phone || body.phone || '';
@@ -183,8 +203,9 @@ async function ticketsRoutes(fastify, options) {
         status = 'resolved',
         adminNotes = '',
         resolutionSummary = '',
-        resolvedBy = 'Shazu One Central Operations Desk'
+        resolvedBy: rawResolvedBy = 'Shazu One Central Operations Desk'
       } = req.body || {};
+      const resolvedBy = extractActor(rawResolvedBy, 'Shazu One Central Operations Desk');
 
       const check = await query('SELECT * FROM support_tickets WHERE id = $1 OR UPPER(ticket_number) = UPPER($1)', [id]);
       if (check.rows.length === 0) {

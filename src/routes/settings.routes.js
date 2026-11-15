@@ -7,6 +7,26 @@ const {
   getEnvMerchantName
 } = require('../services/commission.service');
 
+const extractActor = (userVal, fallback = 'admin_salem_central') => {
+  if (!userVal) return fallback;
+  if (typeof userVal === 'object') {
+    return userVal.email || userVal.name || userVal.id || fallback;
+  }
+  if (typeof userVal === 'string') {
+    const trimmed = userVal.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed.email || parsed.name || parsed.id || fallback;
+      } catch {
+        return trimmed.slice(0, 250);
+      }
+    }
+    return trimmed.slice(0, 250);
+  }
+  return String(userVal).slice(0, 250);
+};
+
 async function settingsRoutes(fastify, options) {
   // Ensure platform_settings table exists and seed default configuration if empty
   try {
@@ -18,7 +38,7 @@ async function settingsRoutes(fastify, options) {
         partner_welcome_bonus NUMERIC(10,2) DEFAULT 0.00,
         platform_commission_percent NUMERIC(5,2) DEFAULT 2.00,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_by VARCHAR(100) DEFAULT 'admin'
+        updated_by VARCHAR(255) DEFAULT 'admin'
       );
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS platform_commission_percent NUMERIC(5,2) DEFAULT 2.00;
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS customer_platform_fee_percent NUMERIC(5,2) DEFAULT 2.00;
@@ -201,8 +221,9 @@ async function settingsRoutes(fastify, options) {
         quality_priority_min_rating,
         quality_suspension_rating,
         quality_suspension_min_reviews,
-        updated_by = 'admin_salem_central'
+        updated_by: rawUpdatedBy = 'admin_salem_central'
       } = req.body || {};
+      const updated_by = extractActor(rawUpdatedBy, 'admin_salem_central');
 
       const currentRes = await query(`SELECT * FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
       const current = currentRes.rows[0] || {};
