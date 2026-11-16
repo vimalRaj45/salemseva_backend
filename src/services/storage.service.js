@@ -7,7 +7,7 @@ const endpoint = clean(process.env.AWS_ENDPOINT_URL_S3) || 'https://br-twilight-
 const accessKeyId = clean(process.env.AWS_ACCESS_KEY_ID);
 const secretAccessKey = clean(process.env.AWS_SECRET_ACCESS_KEY);
 const region = clean(process.env.AWS_REGION) || 'us-east-2';
-const bucketName = clean(process.env.S3_BUCKET_NAME) || 'Shazu One-uploads';
+const bucketName = clean(process.env.S3_BUCKET_NAME) || 'docs';
 
 let s3Client = null;
 
