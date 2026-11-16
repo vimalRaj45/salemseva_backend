@@ -31,7 +31,19 @@ async function ticketsRoutes(fastify, options) {
       const creatorName = body.creatorName || body.creator_name || 'Citizen User';
       const rawPhone = body.creatorPhone || body.creator_phone || body.phone || '';
       const creatorPhone = String(rawPhone).trim();
-      const bookingId = body.bookingId || body.booking_id || null;
+      // Booking ID is not required when raising a support ticket
+      const rawBookingId = body.bookingId || body.booking_id || null;
+      let bookingId = null;
+      if (rawBookingId && typeof rawBookingId === 'string' && rawBookingId.trim() && !['null', 'none', 'n/a', 'undefined'].includes(rawBookingId.trim().toLowerCase())) {
+        try {
+          const bCheck = await query('SELECT id FROM bookings WHERE id = $1 LIMIT 1', [rawBookingId.trim()]);
+          if (bCheck.rows.length > 0) {
+            bookingId = bCheck.rows[0].id;
+          }
+        } catch (_) {
+          bookingId = null;
+        }
+      }
       const category = body.category || 'general';
       const priority = body.priority || 'normal';
       const subject = body.subject;
