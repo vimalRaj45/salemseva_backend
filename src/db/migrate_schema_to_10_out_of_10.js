@@ -18,7 +18,7 @@ async function migrateToTenOutOfTen() {
           ALTER TABLE passkey_credentials DROP CONSTRAINT IF EXISTS fk_passkey_user;
           
           -- Clean up any invalid or non-UUID entries if any exist
-          DELETE FROM passkey_credentials WHERE user_id IS NULL OR user_id NOT IN (SELECT id::text FROM users);
+          DELETE FROM passkey_credentials WHERE user_id IS NULL OR user_id::text NOT IN (SELECT id::text FROM users);
           
           -- Alter column to UUID if not already UUID
           ALTER TABLE passkey_credentials 

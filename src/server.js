@@ -88,6 +88,13 @@ fastify.addHook('onSend', async (req, reply, payload) => {
     if ('error' in body) body.error = GENERIC_500;
     if ('message' in body && typeof body.message === 'string') body.message = GENERIC_500;
     body.requestId = String(req.id);
+
+    // In development or when explicitly requested with x-debug, provide exact error detail
+    const isDev = process.env.NODE_ENV !== 'production' || req.headers['x-debug'] === '1';
+    if (isDev && originalError) {
+      body.detail = typeof originalError === 'object' ? (originalError.message || JSON.stringify(originalError)) : String(originalError);
+      body.route = pattern || req.url;
+    }
     req.log.error(
       {
         requestId: String(req.id),
