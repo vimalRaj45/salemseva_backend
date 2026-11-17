@@ -20,15 +20,66 @@ fastify.register(cors, {
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 });
 
-// Rate limiting to prevent automated form submission and brute-force flooding
+// Rate limiting to prevent automated form submission and brute-force flooding.
+// Technicians and Administrators are 100% exempted to ensure uninterrupted duty, tracking, and management.
 fastify.register(require('@fastify/rate-limit'), {
-  max: process.env.NODE_ENV === 'test' ? 2000 : 180,
+  max: process.env.NODE_ENV === 'test' ? 2000 : (parseInt(process.env.RATE_LIMIT_MAX, 10) || 600),
   timeWindow: '1 minute',
+  allowList: (req) => {
+    const rawUrl = req.raw ? req.raw.url : (req.url || '');
+    const url = String(rawUrl).toLowerCase();
+
+    // 1. Completely exempt all Technician / Partner endpoints
+    if (
+      url.startsWith('/api/v1/partner') ||
+      url.startsWith('/partner') ||
+      url.includes('/wallet/technician') ||
+      url.includes('/technician')
+    ) {
+      return true; // Zero rate limiting for technicians
+    }
+
+    // 2. Completely exempt all Admin endpoints
+    if (
+      url.startsWith('/api/v1/admin') ||
+      url.startsWith('/admin')
+    ) {
+      return true; // Zero rate limiting for administrators
+    }
+
+    // 3. Exempt public settings and notifications polling
+    if (
+      url.startsWith('/api/v1/notifications') ||
+      url.startsWith('/notifications') ||
+      url.startsWith('/api/v1/settings') ||
+      url.startsWith('/settings')
+    ) {
+      return true;
+    }
+
+    // 3. Exempt authenticated admin or technician requests based on role headers
+    const headers = req.headers || {};
+    const roleHeader = String(headers['x-user-role'] || headers['x-role'] || '').toLowerCase();
+    if (
+      headers['x-admin-token'] ||
+      roleHeader === 'admin' ||
+      roleHeader === 'technician'
+    ) {
+      return true;
+    }
+
+    // 4. Exempt background system health checks and sync telemetry
+    if (url === '/health' || url.startsWith('/health')) {
+      return true;
+    }
+
+    return false;
+  },
   errorResponseBuilder: (req, context) => ({
     statusCode: 429,
     success: false,
     error: 'Too Many Requests',
-    message: `Rate limit reached. You can make up to ${context.max} requests per ${context.after}. Please slow down.`,
+    message: `Rate limit reached. Please slow down.`,
     code: 'RATE_LIMIT_EXCEEDED'
   })
 });

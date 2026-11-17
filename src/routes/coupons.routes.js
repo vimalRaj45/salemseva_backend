@@ -17,22 +17,14 @@ async function couponsRoutes(fastify, options) {
         valid_until TIMESTAMP WITH TIME ZONE DEFAULT NULL,
         usage_limit INT DEFAULT NULL,
         times_used INT DEFAULT 0,
+        is_first_booking BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
+      ALTER TABLE coupons ADD COLUMN IF NOT EXISTS is_first_booking BOOLEAN DEFAULT FALSE;
     `);
 
-    // Seed default coupons if none exist, or ensure default active codes exist
-    await query(`
-      INSERT INTO coupons (code, discount_type, discount_value, min_order_amount, description, is_active)
-      VALUES 
-        ('REFERWAIVER50', 'flat', 50.00, 0.00, 'Referral Reward: Flat ₹50 waiver on service booking', TRUE),
-        ('SALEM100', 'flat', 100.00, 0.00, 'INR 100 off on first home service in Salem', TRUE),
-        ('SALEM50', 'flat', 50.00, 49.00, 'Flat INR 50 discount on doorstep inspection', TRUE),
-        ('WELCOME20', 'percent', 20.00, 49.00, '20% off for new Salem customers (up to INR 60)', TRUE),
-        ('FESTIVE30', 'flat', 30.00, 49.00, 'Salem Festive Special flat INR 30 off', TRUE)
-      ON CONFLICT (code) DO UPDATE SET discount_value = EXCLUDED.discount_value, is_active = TRUE;
-    `);
+    // Table definition kept intact; no auto-seeding or re-activation on server restart
   } catch (err) {
     fastify.log.warn('Coupons table initialization warning: ' + err.message);
   }
@@ -78,7 +70,10 @@ async function couponsRoutes(fastify, options) {
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
 
       let isReferralEligible = false;
+      let isFirstBookingUser = true;
+
       if (cleanPhone || userId) {
+        // Check referral eligibility
         const uRes = await query(`
           SELECT id, referral_code, referred_by,
             (SELECT COUNT(*)::int FROM users u2 WHERE u2.referred_by = users.referral_code OR (u2.referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(u2.referred_by, '[^0-9]', '', 'g'), 10) = RIGHT(REGEXP_REPLACE(users.phone, '[^0-9]', '', 'g'), 10))) as referral_count
@@ -102,15 +97,30 @@ async function couponsRoutes(fastify, options) {
           }
           isReferralEligible = Boolean(validReferredBy || parseInt(u.referral_count, 10) > 0);
         }
+
+        // Check if user has prior bookings
+        try {
+          const bRes = await query(`
+            SELECT COUNT(*)::int as count FROM bookings 
+            WHERE status != 'cancelled'
+              AND (
+                ($1::text IS NOT NULL AND customer_id = $1)
+                OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g'), 10) = $2)
+              )
+          `, [userId, cleanPhone]);
+          if (bRes.rows.length > 0 && parseInt(bRes.rows[0].count, 10) > 0) {
+            isFirstBookingUser = false;
+          }
+        } catch (_) {}
       }
 
       const res = await query(`
-        SELECT id, code, discount_type, discount_value, min_order_amount, max_discount_cap, description, valid_until
+        SELECT id, code, discount_type, discount_value, min_order_amount, max_discount_cap, description, valid_until, is_first_booking
         FROM coupons
         WHERE is_active = TRUE
           AND (valid_until IS NULL OR valid_until >= NOW())
           AND (usage_limit IS NULL OR times_used < usage_limit)
-        ORDER BY created_at DESC
+        ORDER BY is_first_booking DESC, created_at DESC
         LIMIT 20
       `);
 
@@ -118,7 +128,15 @@ async function couponsRoutes(fastify, options) {
         success: true,
         coupons: res.rows.map(r => {
           const isReferralCode = r.code === 'REFERWAIVER50';
-          const isLocked = isReferralCode && !isReferralEligible;
+          const isFirstBookingCoupon = Boolean(r.is_first_booking);
+          const isLocked = (isReferralCode && !isReferralEligible) || (isFirstBookingCoupon && !isFirstBookingUser);
+          let lockedReason = null;
+          if (isReferralCode && !isReferralEligible) {
+            lockedReason = 'Requires friend referral invite or referring a friend to unlock';
+          } else if (isFirstBookingCoupon && !isFirstBookingUser) {
+            lockedReason = 'Exclusive offer for new customers on their first booking only';
+          }
+
           return {
             id: r.id,
             code: r.code,
@@ -129,8 +147,9 @@ async function couponsRoutes(fastify, options) {
             description: r.description,
             validUntil: r.valid_until,
             referralExclusive: isReferralCode,
+            isFirstBooking: isFirstBookingCoupon,
             isLocked,
-            lockedReason: isLocked ? 'Requires friend referral invite or referring a friend to unlock' : null
+            lockedReason
           };
         })
       };
@@ -163,16 +182,6 @@ async function couponsRoutes(fastify, options) {
       `, [cleanCode]);
 
       if (res.rows.length === 0) {
-        if (cleanCode === 'SALEM100') {
-          return {
-            success: true,
-            valid: true,
-            code: 'SALEM100',
-            discountAmount: Math.min(100, evalAmount || 99),
-            message: 'Promo code SALEM100 applied: INR 100 OFF on your first home service'
-          };
-        }
-
         // Check if customer entered a friend's referral code or phone number
         const refDigits = cleanCode.replace(/[^0-9]/g, '').slice(-10);
         const reqPhone = (req.body?.customerPhone || req.body?.phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
@@ -289,6 +298,31 @@ async function couponsRoutes(fastify, options) {
         };
       }
 
+      if (coupon.is_first_booking) {
+        const reqPhone = (req.body?.customerPhone || req.body?.phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+        const reqUserId = req.body?.customerId || req.body?.userId || null;
+        if (reqPhone || reqUserId) {
+          try {
+            const bRes = await query(`
+              SELECT COUNT(*)::int as count FROM bookings
+              WHERE status != 'cancelled'
+                AND (
+                  ($1::text IS NOT NULL AND customer_id = $1)
+                  OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g'), 10) = $2)
+                )
+            `, [reqUserId, reqPhone]);
+            if (bRes.rows.length > 0 && parseInt(bRes.rows[0].count, 10) > 0) {
+              return reply.status(400).send({
+                success: false,
+                valid: false,
+                discountAmount: 0,
+                error: `Coupon "${cleanCode}" is only applicable for new customers on their first booking.`
+              });
+            }
+          } catch (_) {}
+        }
+      }
+
       if (coupon.valid_until && new Date(coupon.valid_until) < new Date()) {
         return {
           success: false,
@@ -325,6 +359,7 @@ async function couponsRoutes(fastify, options) {
         discountValue: parseFloat(coupon.discount_value),
         discountAmount: calc.discount,
         description: coupon.description,
+        isFirstBooking: Boolean(coupon.is_first_booking),
         message: calc.message
       };
     } catch (err) {
@@ -356,6 +391,7 @@ async function couponsRoutes(fastify, options) {
           maxDiscountCap: r.max_discount_cap ? parseFloat(r.max_discount_cap) : null,
           description: r.description,
           isActive: Boolean(r.is_active),
+          isFirstBooking: Boolean(r.is_first_booking),
           usageLimit: r.usage_limit,
           timesUsed: parseInt(r.times_used || 0, 10),
           validFrom: r.valid_from,
@@ -381,6 +417,7 @@ async function couponsRoutes(fastify, options) {
         maxDiscountCap = null,
         description = '',
         isActive = true,
+        isFirstBooking = false,
         validUntil = null,
         usageLimit = null
       } = req.body || {};
@@ -405,8 +442,8 @@ async function couponsRoutes(fastify, options) {
       const insertRes = await query(`
         INSERT INTO coupons (
           code, discount_type, discount_value, min_order_amount,
-          max_discount_cap, description, is_active, valid_until, usage_limit
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          max_discount_cap, description, is_active, is_first_booking, valid_until, usage_limit
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING *;
       `, [
         cleanCode,
@@ -416,6 +453,7 @@ async function couponsRoutes(fastify, options) {
         maxDiscountCap ? parseFloat(maxDiscountCap) : null,
         description.trim(),
         Boolean(isActive),
+        Boolean(isFirstBooking),
         validUntil ? new Date(validUntil) : null,
         usageLimit ? parseInt(usageLimit, 10) : null
       ]);
@@ -425,13 +463,16 @@ async function couponsRoutes(fastify, options) {
         await query(`
           INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
           VALUES ('COUPON-NEW', 'COUPON_CREATED', 'admin_salem_central', 'admin', $1)
-        `, [JSON.stringify({ code: cleanCode, discountType, discountValue: val, timestamp: new Date().toISOString() })]);
+        `, [JSON.stringify({ code: cleanCode, discountType, discountValue: val, isFirstBooking: Boolean(isFirstBooking), timestamp: new Date().toISOString() })]);
       } catch (auditErr) {}
 
       return {
         success: true,
         message: `Coupon "${cleanCode}" created successfully`,
-        coupon: insertRes.rows[0]
+        coupon: {
+          ...insertRes.rows[0],
+          isFirstBooking: Boolean(insertRes.rows[0].is_first_booking)
+        }
       };
     } catch (err) {
       fastify.log.error(err);
@@ -451,6 +492,7 @@ async function couponsRoutes(fastify, options) {
         maxDiscountCap,
         description,
         isActive,
+        isFirstBooking,
         validUntil,
         usageLimit
       } = req.body || {};
@@ -468,22 +510,26 @@ async function couponsRoutes(fastify, options) {
       const newCap = maxDiscountCap !== undefined ? (maxDiscountCap ? parseFloat(maxDiscountCap) : null) : cur.max_discount_cap;
       const newDesc = description !== undefined ? description : cur.description;
       const newActive = isActive !== undefined ? Boolean(isActive) : cur.is_active;
+      const newFirstBooking = isFirstBooking !== undefined ? Boolean(isFirstBooking) : Boolean(cur.is_first_booking);
       const newExpiry = validUntil !== undefined ? (validUntil ? new Date(validUntil) : null) : cur.valid_until;
       const newLimit = usageLimit !== undefined ? (usageLimit ? parseInt(usageLimit, 10) : null) : cur.usage_limit;
 
       const updateRes = await query(`
         UPDATE coupons
         SET code = $1, discount_type = $2, discount_value = $3, min_order_amount = $4,
-            max_discount_cap = $5, description = $6, is_active = $7, valid_until = $8,
-            usage_limit = $9, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $10
+            max_discount_cap = $5, description = $6, is_active = $7, is_first_booking = $8,
+            valid_until = $9, usage_limit = $10, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $11
         RETURNING *;
-      `, [newCode, newType, newVal, newMin, newCap, newDesc, newActive, newExpiry, newLimit, id]);
+      `, [newCode, newType, newVal, newMin, newCap, newDesc, newActive, newFirstBooking, newExpiry, newLimit, id]);
 
       return {
         success: true,
         message: `Coupon "${newCode}" updated successfully`,
-        coupon: updateRes.rows[0]
+        coupon: {
+          ...updateRes.rows[0],
+          isFirstBooking: Boolean(updateRes.rows[0].is_first_booking)
+        }
       };
     } catch (err) {
       fastify.log.error(err);

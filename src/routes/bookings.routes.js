@@ -273,10 +273,6 @@ async function bookingsRoutes(fastify, options) {
                 }
               }
             }
-          } else if (cleanCode === 'SALEM100') {
-            couponDiscount = Math.min(100.00, visitFee);
-          } else if (cleanCode === 'SALEM50') {
-            couponDiscount = Math.min(50.00, visitFee);
           } else {
             // Check if cleanCode is a valid friend referral code
             const refDigits = cleanCode.replace(/[^0-9]/g, '').slice(-10);
@@ -302,11 +298,7 @@ async function bookingsRoutes(fastify, options) {
             }
           }
         } catch (cErr) {
-          if (couponCode.toUpperCase() === 'SALEM100') {
-            couponDiscount = Math.min(100.00, visitFee);
-          } else if (couponCode.toUpperCase() === 'SALEM50') {
-            couponDiscount = Math.min(50.00, visitFee);
-          }
+          fastify.log.warn('Coupon evaluation error in booking: ' + (cErr.message || cErr));
         }
       }
 

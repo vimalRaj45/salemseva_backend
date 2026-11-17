@@ -249,6 +249,16 @@ async function seed() {
         NOW() - INTERVAL '5 minutes'
       )
       ON CONFLICT (id) DO NOTHING;
+
+      -- Seed Initial Promotional Coupons (only during explicit manual seed run)
+      INSERT INTO coupons (code, discount_type, discount_value, min_order_amount, description, is_active)
+      VALUES 
+        ('REFERWAIVER50', 'flat', 50.00, 0.00, 'Referral Reward: Flat INR 50 waiver on service booking', TRUE),
+        ('SALEM100', 'flat', 100.00, 0.00, 'INR 100 off on first home service in Salem', TRUE),
+        ('SALEM50', 'flat', 50.00, 49.00, 'Flat INR 50 discount on doorstep inspection', TRUE),
+        ('WELCOME20', 'percent', 20.00, 49.00, '20% off for new Salem customers (up to INR 60)', TRUE),
+        ('FESTIVE30', 'flat', 30.00, 49.00, 'Salem Festive Special flat INR 30 off', TRUE)
+      ON CONFLICT (code) DO NOTHING;
     `);
 
     console.log(' Seed completed successfully with persistent customer wallets, technician referrals, and trade technicians!');
