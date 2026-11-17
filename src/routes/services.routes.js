@@ -97,7 +97,7 @@ async function servicesRoutes(fastify, options) {
 
       // Check verified, unblocked technicians for this trade in Salem
       const techsRes = await query(`
-        SELECT id, full_name, phone, is_online, rating_avg, primary_trade, secondary_trades, assigned_localities
+        SELECT id, full_name, phone, is_online, rating_avg, primary_trade, secondary_trades, assigned_localities, COALESCE(daily_job_capacity, 4) as daily_job_capacity
         FROM technicians 
         WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
           AND is_blocked = FALSE 
@@ -131,19 +131,50 @@ async function servicesRoutes(fastify, options) {
         };
       }
 
-      // Case 2: Technicians exist -> Calculate 14-day capacity and slot availability
-      const dailyCapacityPerTech = 4;
-      const totalDailyCapacity = Math.max(1, totalTechnicians * dailyCapacityPerTech);
+      // Check if client requested availability for a specific technician
+      const reqTechId = req.query.technicianId || req.query.technician_id || null;
+      let requestedTech = null;
+      if (reqTechId) {
+        const singleTechRes = await query(`
+          SELECT id, full_name, is_blocked, is_kyc_verified, COALESCE(daily_job_capacity, 4) as daily_job_capacity
+          FROM technicians WHERE id = $1
+        `, [reqTechId]);
+        if (singleTechRes.rows.length > 0) {
+          requestedTech = singleTechRes.rows[0];
+        }
+      }
 
-      // Fetch existing active bookings for this service
-      const bookingsRes = await query(`
-        SELECT id, scheduled_slot, status, created_at
-        FROM bookings
-        WHERE service_id = $1
-          AND status != 'cancelled';
-      `, [id]);
+      // Case 2: Calculate 14-day capacity and slot availability
+      let totalDailyCapacity = 4;
+      let activeBookings = [];
 
-      const activeBookings = bookingsRes.rows;
+      if (requestedTech) {
+        // Evaluate specifically for requested technician
+        const techCap = Math.min(4, Math.max(1, parseInt(requestedTech.daily_job_capacity, 10) || 4));
+        totalDailyCapacity = techCap;
+        const bookingsRes = await query(`
+          SELECT id, scheduled_slot, status, created_at
+          FROM bookings
+          WHERE technician_id = $1
+            AND status NOT IN ('cancelled', 'created');
+        `, [requestedTech.id]);
+        activeBookings = bookingsRes.rows;
+      } else {
+        // Evaluate aggregate domain capacity based on real configured limits
+        totalDailyCapacity = techsRes.rows.reduce((sum, t) => {
+          const cap = Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4));
+          return sum + cap;
+        }, 0);
+        totalDailyCapacity = Math.max(1, totalDailyCapacity);
+
+        const bookingsRes = await query(`
+          SELECT id, scheduled_slot, status, created_at
+          FROM bookings
+          WHERE service_id = $1
+            AND status NOT IN ('cancelled', 'created');
+        `, [id]);
+        activeBookings = bookingsRes.rows;
+      }
 
       // Generate 14-day slot map starting today
       const datesAvailability = {};
@@ -176,10 +207,11 @@ async function servicesRoutes(fastify, options) {
         const slotsStatus = {};
         for (const slotName of standardSlots) {
           const countInSlot = dateBookings.filter(b => (b.scheduled_slot || '').includes(slotName)).length;
+          const slotCap = requestedTech ? 1 : totalTechnicians;
           slotsStatus[slotName] = {
             booked: countInSlot,
-            capacity: totalTechnicians,
-            isFull: countInSlot >= totalTechnicians
+            capacity: slotCap,
+            isFull: countInSlot >= slotCap
           };
         }
 
@@ -190,7 +222,9 @@ async function servicesRoutes(fastify, options) {
           isFullyBooked,
           slots: slotsStatus,
           message: isFullyBooked 
-            ? (lang === 'ta' ? 'இந்த தேதியில் அனைத்து தொழில்நுட்ப வல்லுநர்களும் முன்பதிவு செய்யப்பட்டுள்ளனர். மற்றொரு தேதியைத் தேர்ந்தெடுக்கவும்.' : 'All technicians are booked on this date. Please choose another date.')
+            ? (requestedTech 
+                ? (lang === 'ta' ? `${requestedTech.full_name} இந்த தேதியில் அதிகபட்ச பணி வரம்பை (${totalDailyCapacity} பணிகள்) அடைந்துவிட்டார். மற்றொரு தேதியை தேர்ந்தெடுக்கவும்.` : `${requestedTech.full_name} has reached their daily limit (${totalDailyCapacity} jobs) on this date. Please pick another date.`)
+                : (lang === 'ta' ? 'இந்த தேதியில் அனைத்து தொழில்நுட்ப வல்லுநர்களும் முன்பதிவு செய்யப்பட்டுள்ளனர். மற்றொரு தேதியைத் தேர்ந்தெடுக்கவும்.' : 'All technicians are booked on this date. Please choose another date.'))
             : null
         };
       }

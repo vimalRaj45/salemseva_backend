@@ -1669,7 +1669,15 @@ async function partnerRoutes(fastify, options) {
   fastify.get('/technicians', async (req, reply) => {
     try {
       const res = await query(`
-        SELECT * FROM technicians 
+        SELECT t.*,
+          COALESCE(t.daily_job_capacity, 4)::int as daily_job_capacity,
+          (
+            SELECT COUNT(*)::int FROM bookings b
+            WHERE b.technician_id = t.id
+              AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+              AND b.status NOT IN ('cancelled', 'created')
+          ) as today_jobs_count
+        FROM technicians t 
         ORDER BY rating_avg DESC, jobs_completed_count DESC
       `);
 
@@ -1680,41 +1688,51 @@ async function partnerRoutes(fastify, options) {
         cleaning: 'Deep Home Sanitization Lead'
       };
 
-      const technicians = res.rows.map(t => ({
-        id: t.id,
-        role: 'technician',
-        name: t.full_name,
-        full_name: t.full_name,
-        phone: t.phone,
-        rawPhone: (t.phone || '').replace(/[\s\-]/g, ''),
-        email: t.email || `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@shazuone.in`,
-        trade: t.primary_trade,
-        primary_trade: t.primary_trade,
-        secondary_trades: t.secondary_trades || [],
-        secondaryTrades: t.secondary_trades || [],
-        tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
-        experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
-        status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
-        isKycVerified: Boolean(t.is_kyc_verified),
-        is_kyc_verified: Boolean(t.is_kyc_verified),
-        aadhaarCardUrl: t.aadhaar_card_url || null,
-        aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
-        isOnline: Boolean(t.is_online),
-        is_online: Boolean(t.is_online),
-        ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
-        rating_avg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
-        ratingCount: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
-        rating_count: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
-        jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
-        jobs_completed_count: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
-        todayEarnings: 0,
-        today_earnings: 0,
-        starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
-        serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
-        assignedLocalities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
-        assigned_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
-        working_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands']
-      }));
+      const technicians = res.rows.map(t => {
+        const cap = Math.min(4, Math.max(1, parseInt(t.daily_job_capacity, 10) || 4));
+        const todayCount = parseInt(t.today_jobs_count, 10) || 0;
+        const isLimitReached = todayCount >= cap;
+
+        return {
+          id: t.id,
+          role: 'technician',
+          name: t.full_name,
+          full_name: t.full_name,
+          phone: t.phone,
+          rawPhone: (t.phone || '').replace(/[\s\-]/g, ''),
+          email: t.email || `${t.full_name.toLowerCase().replace(/[^a-z0-9]/g, '')}@shazuone.in`,
+          trade: t.primary_trade,
+          primary_trade: t.primary_trade,
+          secondary_trades: t.secondary_trades || [],
+          secondaryTrades: t.secondary_trades || [],
+          tradeName: tradeNames[t.primary_trade] || 'Certified Trade Specialist',
+          experienceYears: t.years_experience != null ? parseInt(t.years_experience, 10) : 0,
+          status: t.is_kyc_verified ? 'Verified' : 'Pending Verification',
+          isKycVerified: Boolean(t.is_kyc_verified),
+          is_kyc_verified: Boolean(t.is_kyc_verified),
+          aadhaarCardUrl: t.aadhaar_card_url || null,
+          aadhaarUploadedAt: t.aadhaar_uploaded_at || null,
+          isOnline: Boolean(t.is_online),
+          is_online: Boolean(t.is_online),
+          ratingAvg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
+          rating_avg: t.rating_avg != null ? parseFloat(t.rating_avg) : 5.0,
+          ratingCount: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
+          rating_count: t.rating_count != null ? parseInt(t.rating_count, 10) : 0,
+          jobsCompleted: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+          jobs_completed_count: t.jobs_completed_count != null ? parseInt(t.jobs_completed_count, 10) : 0,
+          dailyJobCapacity: cap,
+          daily_job_capacity: cap,
+          todayJobsCount: todayCount,
+          isDailyLimitReached: isLimitReached,
+          todayEarnings: 0,
+          today_earnings: 0,
+          starTier: t.star_tier || (Number(t.jobs_completed_count) > 0 ? 'Verified Partner' : 'New Partner'),
+          serviceArea: (t.assigned_localities && t.assigned_localities[0]) ? `${t.assigned_localities[0]}, Salem` : 'Fairlands, Salem',
+          assignedLocalities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
+          assigned_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands'],
+          working_localities: Array.isArray(t.assigned_localities) && t.assigned_localities.length > 0 ? t.assigned_localities : ['Fairlands']
+        };
+      });
 
       return {
         success: true,

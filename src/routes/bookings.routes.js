@@ -352,38 +352,38 @@ async function bookingsRoutes(fastify, options) {
         });
       }
 
-      // Check if selected date is fully booked
+      // Resolve target booking date (from ISO in scheduledSlot, bookingDate, or today)
       const slotStr = String(scheduledSlot || '');
       const isoDateMatch = slotStr.match(/\b(202\d-\d{2}-\d{2})\b/);
-      if (isoDateMatch) {
-        const targetDate = isoDateMatch[1];
-        const dayBookingsRes = await query(`
-          SELECT COUNT(*) as count FROM bookings 
-          WHERE service_id = $1 
-            AND scheduled_slot LIKE $2
-            AND status NOT IN ('cancelled', 'created');
-        `, [serviceId || 'ac', `%${targetDate}%`]);
-        const dayBookingsCount = parseInt(dayBookingsRes.rows[0]?.count || 0, 10);
-        const maxDailyCapRes = await query(`
-          SELECT COALESCE(SUM(COALESCE(daily_job_capacity, 4)), 0)::int as capacity
-          FROM technicians
-          WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
-            AND is_blocked = FALSE 
-            AND is_kyc_verified = TRUE;
-        `, [serviceId || 'ac']);
-        const dynamicCapacity = parseInt(maxDailyCapRes.rows[0]?.capacity || 0, 10);
-        const maxDailyCapacity = Math.max(1, dynamicCapacity || (totalDomainTechs * 4));
+      const targetDate = isoDateMatch ? isoDateMatch[1] : (req.body?.bookingDate || new Date().toISOString().split('T')[0]);
 
-        if (dayBookingsCount >= maxDailyCapacity) {
-          return reply.status(400).send({
-            success: false,
-            code: 'DATE_FULLY_BOOKED',
-            error: 'All technicians are booked on this date. Please choose another date.'
-          });
-        }
+      // Check if domain is fully booked on this date across all technicians
+      const dayBookingsRes = await query(`
+        SELECT COUNT(*) as count FROM bookings 
+        WHERE service_id = $1 
+          AND (scheduled_slot LIKE $2 OR (scheduled_slot NOT LIKE '%202%' AND created_at::date = $3::date))
+          AND status NOT IN ('cancelled', 'created');
+      `, [serviceId || 'ac', `%${targetDate}%`, targetDate]);
+      const dayBookingsCount = parseInt(dayBookingsRes.rows[0]?.count || 0, 10);
+      const maxDailyCapRes = await query(`
+        SELECT COALESCE(SUM(COALESCE(daily_job_capacity, 4)), 0)::int as capacity
+        FROM technicians
+        WHERE (primary_trade = $1 OR (secondary_trades IS NOT NULL AND $1 = ANY(secondary_trades)))
+          AND is_blocked = FALSE 
+          AND is_kyc_verified = TRUE;
+      `, [serviceId || 'ac']);
+      const dynamicCapacity = parseInt(maxDailyCapRes.rows[0]?.capacity || 0, 10);
+      const maxDailyCapacity = Math.max(1, dynamicCapacity || (totalDomainTechs * 4));
+
+      if (dayBookingsCount >= maxDailyCapacity) {
+        return reply.status(400).send({
+          success: false,
+          code: 'DATE_FULLY_BOOKED',
+          error: `All technicians for this service are fully booked (${dayBookingsCount}/${maxDailyCapacity} jobs) on ${targetDate}. Please choose another date.`
+        });
       }
 
-      // Check if customer requested a specific active specialist (respect daily capacity limit)
+      // Check if customer requested a specific active specialist (strictly enforce daily job capacity)
       const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
       let assignedTechId = null;
 
@@ -399,17 +399,42 @@ async function bookingsRoutes(fastify, options) {
       if (requestedTechId) {
         const checkTech = await query(`
           SELECT t.id, t.full_name, t.phone, COALESCE(t.daily_job_capacity, 4) as capacity,
-            (SELECT COUNT(*)::int FROM bookings b WHERE b.technician_id = t.id AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%') AND b.status NOT IN ('cancelled', 'created')) as today_count
-          FROM technicians t WHERE t.id = $1
-        `, [requestedTechId]);
-        if (checkTech.rows.length > 0) {
-          const tRow = checkTech.rows[0];
-          if (parseInt(tRow.today_count, 10) < parseInt(tRow.capacity, 10)) {
-            assignedTechId = tRow.id;
-            // Only set accepted if payment is confirmed or zero-fee
-            initialStatus = isPaidUpfront ? 'accepted' : 'created';
-          }
+            (
+              SELECT COUNT(*)::int FROM bookings b 
+              WHERE b.technician_id = t.id 
+                AND (
+                  b.scheduled_slot LIKE '%' || $2 || '%' 
+                  OR (b.scheduled_slot NOT LIKE '%202%' AND b.created_at::date = $2::date)
+                ) 
+                AND b.status NOT IN ('cancelled', 'created')
+            ) as booked_count
+          FROM technicians t 
+          WHERE t.id = $1
+            AND t.is_blocked = FALSE
+        `, [requestedTechId, targetDate]);
+
+        if (checkTech.rows.length === 0) {
+          return reply.status(400).send({
+            success: false,
+            code: 'TECHNICIAN_NOT_FOUND',
+            error: 'The requested service specialist is currently unavailable or unverified in Salem.'
+          });
         }
+
+        const tRow = checkTech.rows[0];
+        const techCap = Math.min(4, Math.max(1, parseInt(tRow.capacity, 10) || 4));
+        const techBooked = parseInt(tRow.booked_count, 10) || 0;
+
+        if (techBooked >= techCap) {
+          return reply.status(400).send({
+            success: false,
+            code: 'TECHNICIAN_DAILY_LIMIT_REACHED',
+            error: `${tRow.full_name} has reached their daily job limit (${techBooked}/${techCap} jobs) on ${targetDate}. Bookings cannot be accepted for this specialist on this date. Please choose another date or select another specialist.`
+          });
+        }
+
+        assignedTechId = tRow.id;
+        initialStatus = isPaidUpfront ? 'accepted' : 'created';
       } else {
         // If no specific specialist requested and payment is completed upfront, place into live matching radar
         if (isPaidUpfront) {
@@ -440,11 +465,14 @@ async function bookingsRoutes(fastify, options) {
           AND (
             SELECT COUNT(*) FROM bookings b 
             WHERE b.technician_id = technicians.id 
-              AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+              AND (
+                b.scheduled_slot LIKE '%' || $4 || '%'
+                OR (b.scheduled_slot NOT LIKE '%202%' AND b.created_at::date = $4::date)
+              )
               AND b.status NOT IN ('cancelled', 'created')
           ) < COALESCE(daily_job_capacity, 4)
         LIMIT 1
-      `, [serviceId || null, locality || '', address || '']);
+      `, [serviceId || null, locality || '', address || '', targetDate]);
       const onlineTech = assignedTechId ? { id: assignedTechId } : (onlineTechRes.rows[0] || null);
 
       const isEmergency = Boolean(isUrgentDispatch || (scheduledSlot && String(scheduledSlot).toLowerCase().includes('emergency')));
