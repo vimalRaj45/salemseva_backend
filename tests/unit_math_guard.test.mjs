@@ -9,7 +9,8 @@ import {
   generateMathChallenge,
   verifyMathChallenge,
   isHoneypotTriggered,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 } from '../src/utils/mathGuard.js';
 
 test('generateMathChallenge creates valid arithmetic questions and signed tokens', () => {
@@ -131,4 +132,9 @@ test('evaluateRiskAndCheckChallenge: triggers on OTP pumping burst attacks', () 
   const r3 = evaluateRiskAndCheckChallenge({ req: mockReq, phone: targetPhone, formType: 'otp' });
   assert.equal(r3.challengeRequired, true);
   assert.ok(r3.reason.includes('Repeated OTP'));
+
+  // After solving challenge, clearRiskTracker resets the counters so user is unblocked
+  clearRiskTracker({ req: mockReq, phone: targetPhone, formType: 'otp' });
+  const r4 = evaluateRiskAndCheckChallenge({ req: mockReq, phone: targetPhone, formType: 'otp' });
+  assert.equal(r4.challengeRequired, false, 'Counter successfully reset after verification');
 });

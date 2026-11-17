@@ -20,7 +20,8 @@ const { processTechnicianReferralOnCompletion } = require('../services/referral.
 const {
   generateMathChallenge,
   verifyMathChallenge,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 } = require('../utils/mathGuard');
 
 async function bookingsRoutes(fastify, options) {
@@ -145,6 +146,7 @@ async function bookingsRoutes(fastify, options) {
             error: verifyRes.error
           });
         }
+        clearRiskTracker({ req, phone: customerPhone || phone, formType: 'booking' });
       }
 
       // Check if customer is blocked

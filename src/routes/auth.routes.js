@@ -24,7 +24,8 @@ const {
 const {
   generateMathChallenge,
   verifyMathChallenge,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 } = require('../utils/mathGuard');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
@@ -1111,6 +1112,7 @@ async function authRoutes(fastify, options) {
             error: verifyRes.error
           });
         }
+        clearRiskTracker({ req, phone: cleanPhone, formType: 'otp' });
       }
 
       // Check 60-second cooldown window

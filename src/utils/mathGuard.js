@@ -219,9 +219,22 @@ function evaluateRiskAndCheckChallenge({ req, phone, formType, body = {} }) {
   return { challengeRequired: false };
 }
 
+/**
+ * Reset attempt counters for an IP and phone once verification successfully passes.
+ */
+function clearRiskTracker({ req, phone, formType }) {
+  try {
+    const ip = req?.ip || req?.headers?.['x-forwarded-for'] || '127.0.0.1';
+    const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '').slice(-10) : '';
+    if (formType && ip) ipAttemptTracker.delete(`${formType}:${ip}`);
+    if (formType && cleanPhone) phoneAttemptTracker.delete(`${formType}:${cleanPhone}`);
+  } catch (_) {}
+}
+
 module.exports = {
   generateMathChallenge,
   verifyMathChallenge,
   isHoneypotTriggered,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 };

@@ -3,7 +3,8 @@ const pushService = require('../services/pushNotification.service');
 const {
   generateMathChallenge,
   verifyMathChallenge,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 } = require('../utils/mathGuard');
 
 const extractActor = (userVal, fallback = 'Salem Operations Admin') => {
@@ -102,6 +103,7 @@ async function ticketsRoutes(fastify, options) {
             error: verifyRes.error
           });
         }
+        clearRiskTracker({ req, phone: creatorPhone, formType: 'ticket' });
       }
 
       if (!subject || !String(subject).trim()) {

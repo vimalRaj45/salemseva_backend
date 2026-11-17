@@ -2,7 +2,8 @@ const { query } = require('../db/db');
 const {
   generateMathChallenge,
   verifyMathChallenge,
-  evaluateRiskAndCheckChallenge
+  evaluateRiskAndCheckChallenge,
+  clearRiskTracker
 } = require('../utils/mathGuard');
 
 async function feedbackRoutes(fastify, options) {
@@ -85,6 +86,7 @@ async function feedbackRoutes(fastify, options) {
             error: verifyRes.error
           });
         }
+        clearRiskTracker({ req, phone: userPhone, formType: 'feedback' });
       }
 
       const insertSql = `
