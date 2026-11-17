@@ -610,3 +610,77 @@ describe('Unit Test: Environment-Driven UPI ID & Merchant Name (No Hardcoding)',
     else delete process.env.MERCHANT_NAME;
   });
 });
+
+export function evaluateTechnicianDailyJobCapacity(technician, existingBookingsOnDate) {
+  const capacity = Math.min(4, Math.max(1, parseInt(technician?.daily_job_capacity ?? technician?.dailyJobCapacity ?? 4, 10)));
+  const nonCancelledBookings = (existingBookingsOnDate || []).filter(b => b.status !== 'cancelled' && b.status !== 'created');
+  const bookedCount = nonCancelledBookings.length;
+  const isLimitReached = bookedCount >= capacity;
+
+  return {
+    capacity,
+    bookedCount,
+    isLimitReached,
+    allowBooking: !isLimitReached,
+    code: isLimitReached ? 'TECHNICIAN_DAILY_LIMIT_REACHED' : 'OK'
+  };
+}
+
+describe('Unit Test: Technician Daily Job Capacity Enforcement & Booking Prohibition', () => {
+  it('should allow customer booking when technician booked jobs is below daily capacity limit', () => {
+    const tech = { id: 'tech-1', full_name: 'Vimal AC Master', daily_job_capacity: 4 };
+    const bookings = [
+      { id: 'b-1', scheduled_slot: '2026-11-18 • 10:00 AM', status: 'accepted' },
+      { id: 'b-2', scheduled_slot: '2026-11-18 • 02:00 PM', status: 'in_progress' }
+    ];
+    const res = evaluateTechnicianDailyJobCapacity(tech, bookings);
+    assert.equal(res.allowBooking, true);
+    assert.equal(res.isLimitReached, false);
+    assert.equal(res.bookedCount, 2);
+    assert.equal(res.capacity, 4);
+    assert.equal(res.code, 'OK');
+  });
+
+  it('should strictly prohibit customer booking when technician reaches 4/4 daily limit', () => {
+    const tech = { id: 'tech-1', full_name: 'Vimal AC Master', daily_job_capacity: 4 };
+    const bookings = [
+      { id: 'b-1', scheduled_slot: '2026-11-18 • 08:00 AM', status: 'completed' },
+      { id: 'b-2', scheduled_slot: '2026-11-18 • 10:00 AM', status: 'accepted' },
+      { id: 'b-3', scheduled_slot: '2026-11-18 • 02:00 PM', status: 'arrived' },
+      { id: 'b-4', scheduled_slot: '2026-11-18 • 04:00 PM', status: 'in_progress' }
+    ];
+    const res = evaluateTechnicianDailyJobCapacity(tech, bookings);
+    assert.equal(res.allowBooking, false);
+    assert.equal(res.isLimitReached, true);
+    assert.equal(res.bookedCount, 4);
+    assert.equal(res.code, 'TECHNICIAN_DAILY_LIMIT_REACHED');
+  });
+
+  it('should strictly prohibit booking when technician has custom capacity limit (e.g. 2 jobs/day)', () => {
+    const tech = { id: 'tech-2', full_name: 'Prakash Senior Electrician', daily_job_capacity: 2 };
+    const bookings = [
+      { id: 'b-1', scheduled_slot: '2026-11-18 • 10:00 AM', status: 'completed' },
+      { id: 'b-2', scheduled_slot: '2026-11-18 • 02:00 PM', status: 'accepted' }
+    ];
+    const res = evaluateTechnicianDailyJobCapacity(tech, bookings);
+    assert.equal(res.allowBooking, false);
+    assert.equal(res.isLimitReached, true);
+    assert.equal(res.bookedCount, 2);
+    assert.equal(res.capacity, 2);
+    assert.equal(res.code, 'TECHNICIAN_DAILY_LIMIT_REACHED');
+  });
+
+  it('should disregard cancelled and unconfirmed draft bookings from daily capacity count', () => {
+    const tech = { id: 'tech-3', full_name: 'Ganesh Plumber', daily_job_capacity: 2 };
+    const bookings = [
+      { id: 'b-1', scheduled_slot: '2026-11-18 • 10:00 AM', status: 'accepted' },
+      { id: 'b-2', scheduled_slot: '2026-11-18 • 12:00 PM', status: 'cancelled' },
+      { id: 'b-3', scheduled_slot: '2026-11-18 • 02:00 PM', status: 'created' }
+    ];
+    const res = evaluateTechnicianDailyJobCapacity(tech, bookings);
+    assert.equal(res.allowBooking, true);
+    assert.equal(res.isLimitReached, false);
+    assert.equal(res.bookedCount, 1);
+    assert.equal(res.capacity, 2);
+  });
+});
