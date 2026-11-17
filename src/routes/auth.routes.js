@@ -21,6 +21,11 @@ const {
   resolveTechnicianReferrer,
   resolveCustomerReferrer
 } = require('../services/referral.service');
+const {
+  generateMathChallenge,
+  verifyMathChallenge,
+  evaluateRiskAndCheckChallenge
+} = require('../utils/mathGuard');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -1050,10 +1055,16 @@ async function authRoutes(fastify, options) {
     }
   });
 
+  // Security: Generate Adaptive Math Challenge on demand (e.g. 4 + 4 = 8)
+  fastify.get('/auth/math-challenge', async (req, reply) => {
+    const challenge = generateMathChallenge();
+    return { success: true, challenge };
+  });
+
   // 6. Request 6-digit WhatsApp OTP (with 60-second cooldown & 5-minute expiry)
   fastify.post('/auth/otp/request', async (req, reply) => {
     try {
-      const { phone = '', purpose = 'register' } = req.body || {};
+      const { phone = '', purpose = 'register', mathChallengeToken, mathAnswer } = req.body || {};
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
 
       if (!cleanPhone || cleanPhone.length !== 10) {
@@ -1061,6 +1072,45 @@ async function authRoutes(fastify, options) {
           success: false,
           error: 'Please enter a valid 10-digit mobile number'
         });
+      }
+
+      // Adaptive Security Guard: Check honeypot & risk triggers
+      const risk = evaluateRiskAndCheckChallenge({
+        req,
+        phone: cleanPhone,
+        formType: 'otp',
+        body: req.body
+      });
+
+      if (risk.triggeredHoneypot) {
+        // Honeypot trapped: Return fake success to stop automated bot loop without dispatching SMS/WhatsApp
+        return reply.status(200).send({
+          success: true,
+          message: 'OTP verification dispatched successfully'
+        });
+      }
+
+      if (risk.challengeRequired) {
+        if (!mathChallengeToken || mathAnswer === undefined || mathAnswer === null || String(mathAnswer).trim() === '') {
+          const newChallenge = generateMathChallenge();
+          return reply.status(403).send({
+            success: false,
+            mathChallengeRequired: true,
+            challenge: newChallenge,
+            error: 'Security verification required. Please answer the simple question to continue.'
+          });
+        }
+
+        const verifyRes = verifyMathChallenge(mathChallengeToken, mathAnswer);
+        if (!verifyRes.valid) {
+          const newChallenge = generateMathChallenge();
+          return reply.status(403).send({
+            success: false,
+            mathChallengeRequired: true,
+            challenge: newChallenge,
+            error: verifyRes.error
+          });
+        }
       }
 
       // Check 60-second cooldown window

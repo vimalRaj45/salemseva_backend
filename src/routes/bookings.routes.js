@@ -17,6 +17,11 @@ const { checkCancellationWindow } = require('../services/cancellation_policy.ser
 const { getSalemOpsContact } = require('../services/support_agent.service');
 const { resolveLocalityCoords } = require('../utils/salemLocalities');
 const { processTechnicianReferralOnCompletion } = require('../services/referral.service');
+const {
+  generateMathChallenge,
+  verifyMathChallenge,
+  evaluateRiskAndCheckChallenge
+} = require('../utils/mathGuard');
 
 async function bookingsRoutes(fastify, options) {
   // Ensure reschedule columns and reschedule logs table exist
@@ -96,6 +101,50 @@ async function bookingsRoutes(fastify, options) {
           success: false,
           error: 'Customer service address is required to dispatch technician. Please provide address.'
         });
+      }
+
+      // Adaptive Security Guard: Check honeypot & risk triggers
+      const { mathChallengeToken, mathAnswer } = req.body || {};
+      const risk = evaluateRiskAndCheckChallenge({
+        req,
+        phone: customerPhone || phone,
+        formType: 'booking',
+        body: req.body
+      });
+
+      if (risk.triggeredHoneypot) {
+        // Honeypot trapped: Return simulated response to deceive bot without writing to DB
+        return reply.status(200).send({
+          success: true,
+          booking: {
+            id: 'SLM-' + Math.floor(10000 + Math.random() * 90000),
+            status: 'matching',
+            service_name: 'Doorstep Service'
+          }
+        });
+      }
+
+      if (risk.challengeRequired) {
+        if (!mathChallengeToken || mathAnswer === undefined || mathAnswer === null || String(mathAnswer).trim() === '') {
+          const newChallenge = generateMathChallenge();
+          return reply.status(403).send({
+            success: false,
+            mathChallengeRequired: true,
+            challenge: newChallenge,
+            error: 'Security verification required. Please answer the simple question to confirm your booking.'
+          });
+        }
+
+        const verifyRes = verifyMathChallenge(mathChallengeToken, mathAnswer);
+        if (!verifyRes.valid) {
+          const newChallenge = generateMathChallenge();
+          return reply.status(403).send({
+            success: false,
+            mathChallengeRequired: true,
+            challenge: newChallenge,
+            error: verifyRes.error
+          });
+        }
       }
 
       // Check if customer is blocked

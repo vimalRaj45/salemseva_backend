@@ -20,6 +20,19 @@ fastify.register(cors, {
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 });
 
+// Rate limiting to prevent automated form submission and brute-force flooding
+fastify.register(require('@fastify/rate-limit'), {
+  max: process.env.NODE_ENV === 'test' ? 2000 : 180,
+  timeWindow: '1 minute',
+  errorResponseBuilder: (req, context) => ({
+    statusCode: 429,
+    success: false,
+    error: 'Too Many Requests',
+    message: `Rate limit reached. You can make up to ${context.max} requests per ${context.after}. Please slow down.`,
+    code: 'RATE_LIMIT_EXCEEDED'
+  })
+});
+
 // Fastify 5 rejects an empty body that arrives with Content-Type: application/json. Most
 // HTTP helpers, including this project's own test client, set that header unconditionally on
 // DELETE requests, so the framework default turned three working delete endpoints into 400s.
