@@ -169,8 +169,8 @@ async function settingsRoutes(fastify, options) {
         customer_platform_fee_percent: parseFloat(row.customer_platform_fee_percent !== null && row.customer_platform_fee_percent !== undefined ? row.customer_platform_fee_percent : 2.0),
         payment_gateway_fee_percent: parseFloat(row.payment_gateway_fee_percent !== null && row.payment_gateway_fee_percent !== undefined ? row.payment_gateway_fee_percent : (row.gateway_fee_percent || 2.0)),
         inspection_visit_fee: parseFloat(row.inspection_visit_fee || 99),
-        business_upi_id: getEnvUpiId() || row.business_upi_id || '',
-        business_merchant_name: getEnvMerchantName() || row.business_merchant_name || '',
+        business_upi_id: row.business_upi_id || getEnvUpiId() || '',
+        business_merchant_name: row.business_merchant_name || getEnvMerchantName() || '',
         payment_gateway_mode: row.payment_gateway_mode || 'DYNAMIC_QR',
         quality_governance_enabled: row.quality_governance_enabled != null ? Boolean(row.quality_governance_enabled) : true,
         quality_throttle_rating: parseFloat(row.quality_throttle_rating != null ? row.quality_throttle_rating : 4.0),
@@ -244,8 +244,8 @@ async function settingsRoutes(fastify, options) {
       const newVisitFee = inspection_visit_fee !== undefined
         ? Math.max(0, parseFloat(inspection_visit_fee))
         : parseFloat(current.inspection_visit_fee || 99);
-      const defaultUpi = getEnvUpiId() || current.business_upi_id || '';
-      const defaultMerchant = getEnvMerchantName() || current.business_merchant_name || '';
+      const defaultUpi = current.business_upi_id || getEnvUpiId() || '';
+      const defaultMerchant = current.business_merchant_name || getEnvMerchantName() || '';
       const newBusinessUpi = business_upi_id !== undefined ? String(business_upi_id).trim() : defaultUpi;
       const newBusinessMerchant = business_merchant_name !== undefined ? String(business_merchant_name).trim() : defaultMerchant;
       const newPaymentMode = payment_gateway_mode !== undefined ? String(payment_gateway_mode).trim() : (current.payment_gateway_mode || 'DYNAMIC_QR');
@@ -341,20 +341,36 @@ async function settingsRoutes(fastify, options) {
         ]);
       } catch (auditErr) {}
 
+      const savedRow = result.rows[0];
+      const settingsObj = {
+        referee_discount_amount: parseFloat(savedRow.referee_discount_amount || 50),
+        partner_referral_incentive: parseFloat(savedRow.partner_referral_incentive || 100),
+        partner_welcome_bonus: parseFloat(savedRow.partner_welcome_bonus || 0),
+        partner_commission_percent: parseFloat(savedRow.partner_commission_percent !== null && savedRow.partner_commission_percent !== undefined ? savedRow.partner_commission_percent : (savedRow.platform_commission_percent || 2.0)),
+        platform_commission_percent: parseFloat(savedRow.platform_commission_percent !== null && savedRow.platform_commission_percent !== undefined ? savedRow.platform_commission_percent : (savedRow.partner_commission_percent || 2.0)),
+        customer_platform_fee_percent: parseFloat(savedRow.customer_platform_fee_percent !== null && savedRow.customer_platform_fee_percent !== undefined ? savedRow.customer_platform_fee_percent : 2.0),
+        payment_gateway_fee_percent: parseFloat(savedRow.payment_gateway_fee_percent !== null && savedRow.payment_gateway_fee_percent !== undefined ? savedRow.payment_gateway_fee_percent : (savedRow.gateway_fee_percent || 2.0)),
+        inspection_visit_fee: parseFloat(savedRow.inspection_visit_fee || 99),
+        business_upi_id: savedRow.business_upi_id || getEnvUpiId() || '',
+        business_merchant_name: savedRow.business_merchant_name || getEnvMerchantName() || '',
+        payment_gateway_mode: savedRow.payment_gateway_mode || 'DYNAMIC_QR',
+        quality_governance_enabled: savedRow.quality_governance_enabled != null ? Boolean(savedRow.quality_governance_enabled) : true,
+        quality_throttle_rating: parseFloat(savedRow.quality_throttle_rating != null ? savedRow.quality_throttle_rating : 4.0),
+        quality_throttle_daily_cap: parseInt(savedRow.quality_throttle_daily_cap != null ? savedRow.quality_throttle_daily_cap : 1, 10),
+        quality_throttle_min_reviews: parseInt(savedRow.quality_throttle_min_reviews != null ? savedRow.quality_throttle_min_reviews : 3, 10),
+        quality_priority_window_seconds: parseInt(savedRow.quality_priority_window_seconds != null ? savedRow.quality_priority_window_seconds : 90, 10),
+        quality_priority_min_rating: parseFloat(savedRow.quality_priority_min_rating != null ? savedRow.quality_priority_min_rating : 4.5),
+        quality_suspension_rating: parseFloat(savedRow.quality_suspension_rating != null ? savedRow.quality_suspension_rating : 3.5),
+        quality_suspension_min_reviews: parseInt(savedRow.quality_suspension_min_reviews != null ? savedRow.quality_suspension_min_reviews : 5, 10),
+        updated_by: savedRow.updated_by,
+        updated_at: savedRow.updated_at
+      };
+
       return {
         success: true,
         message: 'Reward and referral settings updated successfully in database',
-        settings: {
-          referee_discount_amount: parseFloat(result.rows[0].referee_discount_amount),
-          partner_referral_incentive: parseFloat(result.rows[0].partner_referral_incentive),
-          partner_welcome_bonus: parseFloat(result.rows[0].partner_welcome_bonus),
-          partner_commission_percent: parseFloat(result.rows[0].partner_commission_percent ?? result.rows[0].platform_commission_percent ?? 2.0),
-          platform_commission_percent: parseFloat(result.rows[0].platform_commission_percent ?? result.rows[0].partner_commission_percent ?? 2.0),
-          customer_platform_fee_percent: parseFloat(result.rows[0].customer_platform_fee_percent ?? 2.0),
-          payment_gateway_fee_percent: parseFloat(result.rows[0].payment_gateway_fee_percent ?? result.rows[0].gateway_fee_percent ?? 2.0),
-          inspection_visit_fee: parseFloat(result.rows[0].inspection_visit_fee ?? 99.0),
-          updated_at: result.rows[0].updated_at
-        }
+        settings: settingsObj,
+        config: settingsObj
       };
     } catch (err) {
       fastify.log.error(err);
