@@ -684,3 +684,50 @@ describe('Unit Test: Technician Daily Job Capacity Enforcement & Booking Prohibi
     assert.equal(res.capacity, 2);
   });
 });
+
+describe('Unit Test: Real-Time Dynamic Commission & Fee Matrix Calculations', () => {
+  it('should compute dual-commission invoice with dynamic partner commission percent (e.g. 5%)', () => {
+    const inv = calculateDualCommissionInvoice({
+      totalJobAmount: 1000,
+      customerFeePercent: 2.0,
+      partnerCommPercent: 5.0,
+      gatewayFeePercent: 2.0,
+      actualAdvancePaid: 99
+    });
+
+    // 5% partner commission on 1000 total job = 50.00
+    assert.equal(inv.partnerCommissionAmount, 50.00);
+    // Partner guaranteed net earnings = 1000 - 50 = 950.00
+    assert.equal(inv.partnerNetEarnings, 950.00);
+    // 2% customer fee on 901 remaining work = 18.02
+    assert.equal(inv.customerPlatformFee, 18.02);
+  });
+
+  it('should compute dual-commission invoice with customized 10% commission without code changes', () => {
+    const inv = calculateDualCommissionInvoice({
+      totalJobAmount: 2000,
+      customerFeePercent: 3.0,
+      partnerCommPercent: 10.0,
+      gatewayFeePercent: 2.0,
+      actualAdvancePaid: 99
+    });
+
+    // 10% partner commission on 2000 total job = 200.00
+    assert.equal(inv.partnerCommissionAmount, 200.00);
+    // Partner net earnings = 2000 - 200 = 1800.00
+    assert.equal(inv.partnerNetEarnings, 1800.00);
+  });
+
+  it('should accurately split inspection-only bookings with 0% partner commission retention', () => {
+    const inv = calculateDualCommissionInvoice({
+      totalJobAmount: 99,
+      customerFeePercent: 2.0,
+      partnerCommPercent: 2.0,
+      actualAdvancePaid: 99
+    });
+
+    // When remaining balance work is 0, customer fee is 0
+    assert.equal(inv.remainingWorkAmount, 0);
+    assert.equal(inv.customerPlatformFee, 0);
+  });
+});
