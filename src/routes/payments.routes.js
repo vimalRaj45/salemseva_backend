@@ -1223,7 +1223,7 @@ async function paymentsRoutes(fastify, options) {
         SELECT * FROM payments 
         WHERE booking_id = $1 
           AND (payment_type = 'FINAL_SETTLEMENT' OR payment_method = 'ADVANCE_COVERED' OR payment_method = 'DYNAMIC_UPI_QR')
-          AND status = 'success'
+          AND status IN ('escrow_held', 'captured', 'settled')
         LIMIT 1
       `, [bookingId]);
       if (existingSettlement.rows.length > 0) {
