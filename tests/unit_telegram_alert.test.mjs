@@ -4,11 +4,12 @@ import telegramAlert from '../src/services/telegramAlert.service.js';
 
 describe('Unit Test: Telegram Admin Alert Notification Service', () => {
   it('should gracefully skip notifications when credentials are not configured without throwing', async () => {
-    // With dummy empty config
-    const originalToken = process.env.TELEGRAM_BOT_TOKEN;
-    const originalChatId = process.env.TELEGRAM_ADMIN_CHAT_ID;
-    delete process.env.TELEGRAM_BOT_TOKEN;
-    delete process.env.TELEGRAM_ADMIN_CHAT_ID;
+    const originalGetConfig = telegramAlert.getConfig.bind(telegramAlert);
+    telegramAlert.getConfig = async () => ({
+      botToken: '',
+      chatId: '',
+      enabled: false
+    });
 
     try {
       const res = await telegramAlert.notifyNewBooking({
@@ -23,8 +24,7 @@ describe('Unit Test: Telegram Admin Alert Notification Service', () => {
       assert.strictEqual(res.success, false);
       assert.strictEqual(res.skipped, true);
     } finally {
-      if (originalToken) process.env.TELEGRAM_BOT_TOKEN = originalToken;
-      if (originalChatId) process.env.TELEGRAM_ADMIN_CHAT_ID = originalChatId;
+      telegramAlert.getConfig = originalGetConfig;
     }
   });
 

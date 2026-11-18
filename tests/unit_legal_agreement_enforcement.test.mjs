@@ -191,6 +191,38 @@ describe('Unit Test: Mandatory Legal Agreement Enforcement (Indian IT Act Sectio
 
     // Clean up
     await query('DELETE FROM legal_acceptances WHERE user_phone = $1', [dedupePhone]);
+  });
+
+  it('9. Sign-up flow records legal acceptance in database with valid audit trail', async () => {
+    const signupPhone = '9443299007';
+    await query('DELETE FROM legal_acceptances WHERE user_phone = $1', [signupPhone]);
+
+    const activeDoc = legalService.getActiveDocument('customer_terms');
+    const rec = await legalService.recordAcceptance({
+      userPhone: signupPhone,
+      userRole: 'customer',
+      documentType: 'customer_terms',
+      documentVersion: activeDoc.version,
+      ipAddress: '127.0.0.1',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Test Runner',
+      consentArtifacts: {
+        registeredAt: new Date().toISOString(),
+        flow: 'auth_registration_checkbox'
+      }
+    });
+
+    assert.strictEqual(rec.success, true);
+    assert.strictEqual(rec.version, activeDoc.version);
+    assert.strictEqual(rec.record.document_hash, activeDoc.contentHash);
+
+    const check = await legalService.hasAcceptedActiveDocument({
+      phone: signupPhone,
+      role: 'customer'
+    });
+    assert.strictEqual(check.accepted, true);
+
+    // Clean up
+    await query('DELETE FROM legal_acceptances WHERE user_phone = $1', [signupPhone]);
     await query('DELETE FROM legal_acceptances WHERE user_phone IN ($1, $2)', [testCustomerPhone, testTechPhone]);
   });
 

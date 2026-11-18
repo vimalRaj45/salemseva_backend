@@ -159,17 +159,20 @@ class LegalAgreementService {
   }
 
   // Idempotent acceptance recording in Neon PostgreSQL
-  async recordAcceptance({ phone, role = 'customer', documentType, version, documentHash, ip, userAgent }) {
-    const normalizedPhone = cleanPhone(phone);
+  async recordAcceptance({ phone, userPhone, role, userRole, documentType, version, documentVersion, documentHash, ip, ipAddress, userAgent }) {
+    const rawPhone = phone || userPhone;
+    const normalizedPhone = cleanPhone(rawPhone);
     if (!normalizedPhone) {
       return { success: false, error: 'Valid 10-digit phone number is required' };
     }
 
-    const docType = documentType || (role === 'technician' ? 'technician_partner_agreement' : 'customer_terms');
+    const resolvedRole = role || userRole || 'customer';
+    const docType = documentType || (resolvedRole === 'technician' ? 'technician_partner_agreement' : 'customer_terms');
     const activeDoc = this.getActiveDocument(docType);
 
-    const targetVersion = version || activeDoc.version;
+    const targetVersion = version || documentVersion || activeDoc.version;
     const targetHash = documentHash || activeDoc.contentHash;
+    const resolvedIp = ip || ipAddress || '127.0.0.1';
 
     if (targetVersion !== activeDoc.version) {
       return {
@@ -197,11 +200,11 @@ class LegalAgreementService {
 
       const res = await query(insertSql, [
         normalizedPhone,
-        role,
+        resolvedRole,
         docType,
         activeDoc.version,
         activeDoc.contentHash,
-        ip ? String(ip).slice(0, 64) : null,
+        resolvedIp ? String(resolvedIp).slice(0, 64) : null,
         userAgent ? String(userAgent).slice(0, 500) : null
       ]);
 

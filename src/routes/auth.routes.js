@@ -380,7 +380,9 @@ async function authRoutes(fastify, options) {
         experienceYears = 0,
         assignedLocalities,
         referralCode = '',
-        dailyJobCapacity = 4
+        dailyJobCapacity = 4,
+        acceptedLegalAgreement = false,
+        legalAgreementVersion = '1.0.0'
       } = req.body || {};
 
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
@@ -627,6 +629,42 @@ async function authRoutes(fastify, options) {
         } catch (dbErr) {
           fastify.log.warn('Could not insert user to DB: ' + dbErr.message);
         }
+      }
+
+      // Record mandatory legal acceptance under Indian IT Act 2000
+      let legalCompliance = { isCompliant: false, activeVersion: null };
+      if (acceptedLegalAgreement === true || acceptedLegalAgreement === 'true') {
+        const docType = isTechRole ? 'technician_partner_agreement' : 'customer_terms';
+        const docVersion = legalAgreementVersion || (isTechRole ? legalService.ACTIVE_VERSIONS.technician_partner_agreement : legalService.ACTIVE_VERSIONS.customer_terms);
+        const ipAddress = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1').split(',')[0].trim();
+        const userAgent = req.headers['user-agent'] || 'Registration Sign-Up Flow';
+
+        try {
+          const rec = await legalService.recordAcceptance({
+            userPhone: cleanPhone,
+            userRole: isTechRole ? 'technician' : 'customer',
+            documentType: docType,
+            documentVersion: docVersion,
+            ipAddress,
+            userAgent,
+            consentArtifacts: {
+              registeredAt: new Date().toISOString(),
+              flow: 'auth_registration_checkbox'
+            }
+          });
+          legalCompliance = {
+            isCompliant: true,
+            activeVersion: docVersion,
+            acceptedAt: rec.accepted_at,
+            documentHash: rec.document_hash
+          };
+        } catch (legalErr) {
+          fastify.log.warn('Could not record legal acceptance during registration: ' + legalErr.message);
+        }
+      }
+
+      if (createdUser) {
+        createdUser.legalCompliance = legalCompliance;
       }
 
       return {
