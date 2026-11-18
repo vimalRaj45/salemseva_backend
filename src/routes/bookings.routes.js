@@ -2278,10 +2278,11 @@ async function bookingsRoutes(fastify, options) {
   fastify.post('/bookings/:id/messages', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { sender, senderRole, senderName, text, message_text, attachmentUrl } = req.body || {};
-      const resolvedText = String(text || message_text || '').trim();
-      if (!resolvedText) {
-        return reply.status(400).send({ success: false, error: 'Message text is required' });
+      const { sender, senderRole, senderName, text, message_text, attachmentUrl, audioUrl } = req.body || {};
+      const resolvedAttachment = String(attachmentUrl || audioUrl || '').trim() || null;
+      const resolvedText = String(text || message_text || (resolvedAttachment ? 'Audio note' : '')).trim();
+      if (!resolvedText && !resolvedAttachment) {
+        return reply.status(400).send({ success: false, error: 'Message text or audio is required' });
       }
 
       const bRes = await query('SELECT id FROM bookings WHERE id = $1 LIMIT 1', [id]);
@@ -2309,7 +2310,7 @@ async function bookingsRoutes(fastify, options) {
           VALUES ($1, $2, $3, $4, $5)
           RETURNING id, booking_id, sender_role, sender_name, message_text, attachment_url, is_read, created_at
         `,
-        [id, normalizedRole, resolvedSenderName, resolvedText, attachmentUrl || null]
+        [id, normalizedRole, resolvedSenderName, resolvedText, resolvedAttachment || null]
       );
 
       return {
