@@ -6,6 +6,7 @@ const { getPartnerCommissionPercent, getLiveFeeSettings, getLiveQualitySettings,
 const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/privacy');
 const { resolveTechnicianReferrer } = require('../services/referral.service');
 const { resolveLocalityCoords } = require('../utils/salemLocalities');
+const legalService = require('../services/legalAgreement.service');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -570,6 +571,20 @@ async function partnerRoutes(fastify, options) {
         return reply.status(404).send({ success: false, error: 'Technician account not found' });
       }
 
+      // Mandatory Database-Backed Legal Agreement & KYC Enforcement
+      const legalGuard = await legalService.guardTechnicianOperation({
+        phone: tech.phone,
+        techRow: tech
+      });
+      if (!legalGuard.allowed) {
+        return reply.status(legalGuard.statusCode || 403).send({
+          success: false,
+          code: legalGuard.code,
+          error: legalGuard.error,
+          details: legalGuard.details
+        });
+      }
+
       // Check if already claimed by someone else
       const checkRes = await query(`SELECT technician_id, status, scheduled_slot, locality, created_at FROM bookings WHERE id = $1`, [bookingId]);
       if (checkRes.rows.length === 0) {
@@ -733,6 +748,21 @@ async function partnerRoutes(fastify, options) {
       const tech = techUpdate.rows[0];
       const targetTechId = tech ? tech.id : technicianId;
 
+      if (tech) {
+        const legalGuard = await legalService.guardTechnicianOperation({
+          phone: tech.phone,
+          techRow: tech
+        });
+        if (!legalGuard.allowed) {
+          return reply.status(legalGuard.statusCode || 403).send({
+            success: false,
+            code: legalGuard.code,
+            error: legalGuard.error,
+            details: legalGuard.details
+          });
+        }
+      }
+
       // Check daily job capacity limit (1 to 4)
       if (targetTechId) {
         const tRow = tech || (await query('SELECT daily_job_capacity FROM technicians WHERE id = $1', [targetTechId])).rows[0];
@@ -847,19 +877,16 @@ async function partnerRoutes(fastify, options) {
       }
 
       if (Boolean(isOnline) && techRow) {
-        if (techRow.is_blocked) {
-          return reply.status(403).send({
+        const legalGuard = await legalService.guardTechnicianOperation({
+          phone: cleanPhone || techRow?.phone,
+          techRow
+        });
+        if (!legalGuard.allowed) {
+          return reply.status(legalGuard.statusCode || 403).send({
             success: false,
-            code: 'ACCOUNT_SUSPENDED',
-            error: `Your partner account has been suspended by Shazu One Central Operations: ${techRow.block_reason || 'Administrative restriction'}. You cannot go online.`
-          });
-        }
-
-        if (!techRow.is_kyc_verified) {
-          return reply.status(403).send({
-            success: false,
-            code: 'KYC_PENDING',
-            error: 'KYC Verification Pending: You cannot go online until your Aadhaar and trade documents are verified by Shazu One Central Ops.'
+            code: legalGuard.code,
+            error: legalGuard.error,
+            details: legalGuard.details
           });
         }
       }

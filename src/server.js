@@ -120,6 +120,7 @@ fastify.register(require('./routes/settings.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/coupons.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/tickets.routes'), { prefix: '/api/v1' });
 fastify.register(require('./routes/notifications.routes'), { prefix: '/api/v1' });
+fastify.register(require('./routes/legal.routes'), { prefix: '/api/v1' });
 
 // ---------------------------------------------------------------------------
 // Authorization

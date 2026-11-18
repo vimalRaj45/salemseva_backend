@@ -6,6 +6,7 @@ const {
   getEnvUpiId,
   getEnvMerchantName
 } = require('../services/commission.service');
+const telegramAlert = require('../services/telegramAlert.service');
 
 const extractActor = (userVal, fallback = 'admin_salem_central') => {
   if (!userVal) return fallback;
@@ -57,6 +58,9 @@ async function settingsRoutes(fastify, options) {
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_priority_min_rating NUMERIC(3,2) DEFAULT 4.50;
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_suspension_rating NUMERIC(3,2) DEFAULT 3.50;
       ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS quality_suspension_min_reviews INT DEFAULT 5;
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS telegram_bot_token VARCHAR(255);
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS telegram_admin_chat_id VARCHAR(100);
+      ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS telegram_alerts_enabled BOOLEAN DEFAULT TRUE;
     `);
 
     // Seed initial row if table is empty
@@ -180,6 +184,9 @@ async function settingsRoutes(fastify, options) {
         quality_priority_min_rating: parseFloat(row.quality_priority_min_rating != null ? row.quality_priority_min_rating : 4.5),
         quality_suspension_rating: parseFloat(row.quality_suspension_rating != null ? row.quality_suspension_rating : 3.5),
         quality_suspension_min_reviews: parseInt(row.quality_suspension_min_reviews != null ? row.quality_suspension_min_reviews : 5, 10),
+        telegram_bot_token: row.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN || '',
+        telegram_admin_chat_id: row.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || '',
+        telegram_alerts_enabled: row.telegram_alerts_enabled !== null && row.telegram_alerts_enabled !== undefined ? Boolean(row.telegram_alerts_enabled) : (process.env.TELEGRAM_ALERTS_ENABLED !== 'false'),
         updated_by: row.updated_by,
         updated_at: row.updated_at
       };
@@ -221,6 +228,9 @@ async function settingsRoutes(fastify, options) {
         quality_priority_min_rating,
         quality_suspension_rating,
         quality_suspension_min_reviews,
+        telegram_bot_token,
+        telegram_admin_chat_id,
+        telegram_alerts_enabled,
         updated_by: rawUpdatedBy = 'admin_salem_central'
       } = req.body || {};
       const updated_by = extractActor(rawUpdatedBy, 'admin_salem_central');
@@ -325,6 +335,20 @@ async function settingsRoutes(fastify, options) {
 
       invalidateCommissionCache();
 
+      if (telegram_bot_token !== undefined || telegram_admin_chat_id !== undefined || telegram_alerts_enabled !== undefined) {
+        await query(`
+          UPDATE platform_settings
+          SET telegram_bot_token = COALESCE($1, telegram_bot_token),
+              telegram_admin_chat_id = COALESCE($2, telegram_admin_chat_id),
+              telegram_alerts_enabled = COALESCE($3, telegram_alerts_enabled)
+          WHERE id = 'reward_settings'
+        `, [
+          telegram_bot_token !== undefined ? String(telegram_bot_token).trim() : null,
+          telegram_admin_chat_id !== undefined ? String(telegram_admin_chat_id).trim() : null,
+          telegram_alerts_enabled !== undefined ? Boolean(telegram_alerts_enabled) : null
+        ]);
+      }
+
       // Record in audit log
       try {
         await query(`
@@ -362,6 +386,9 @@ async function settingsRoutes(fastify, options) {
         quality_priority_min_rating: parseFloat(savedRow.quality_priority_min_rating != null ? savedRow.quality_priority_min_rating : 4.5),
         quality_suspension_rating: parseFloat(savedRow.quality_suspension_rating != null ? savedRow.quality_suspension_rating : 3.5),
         quality_suspension_min_reviews: parseInt(savedRow.quality_suspension_min_reviews != null ? savedRow.quality_suspension_min_reviews : 5, 10),
+        telegram_bot_token: savedRow.telegram_bot_token || process.env.TELEGRAM_BOT_TOKEN || '',
+        telegram_admin_chat_id: savedRow.telegram_admin_chat_id || process.env.TELEGRAM_ADMIN_CHAT_ID || '',
+        telegram_alerts_enabled: savedRow.telegram_alerts_enabled !== null && savedRow.telegram_alerts_enabled !== undefined ? Boolean(savedRow.telegram_alerts_enabled) : (process.env.TELEGRAM_ALERTS_ENABLED !== 'false'),
         updated_by: savedRow.updated_by,
         updated_at: savedRow.updated_at
       };
@@ -381,6 +408,68 @@ async function settingsRoutes(fastify, options) {
   fastify.post('/admin/settings/rewards', handleUpdateRewards);
   fastify.post('/admin/reward-config', handleUpdateRewards);
   fastify.put('/admin/reward-config', handleUpdateRewards);
+
+  // Telegram Alert Status
+  fastify.get('/admin/telegram/status', async (req, reply) => {
+    try {
+      const config = await telegramAlert.getConfig();
+      return {
+        success: true,
+        configured: Boolean(config.botToken && config.chatId),
+        enabled: config.enabled,
+        maskedBotToken: config.botToken ? `${config.botToken.slice(0, 8)}...${config.botToken.slice(-4)}` : null,
+        chatId: config.chatId || null
+      };
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // Telegram Alert Test Trigger
+  fastify.post('/admin/telegram/test', async (req, reply) => {
+    try {
+      const { bot_token, chat_id } = req.body || {};
+      const result = await telegramAlert.testNotification(bot_token, chat_id);
+      if (!result.success) {
+        return reply.status(400).send({ success: false, error: result.error || result.reason || 'Failed to send test alert' });
+      }
+      return {
+        success: true,
+        message: 'Test notification sent successfully to Telegram. Check your mobile phone!'
+      };
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // Telegram Alert Settings Update
+  fastify.post('/admin/telegram/settings', async (req, reply) => {
+    try {
+      const { bot_token, chat_id, enabled } = req.body || {};
+      await query(`
+        UPDATE platform_settings
+        SET telegram_bot_token = COALESCE($1, telegram_bot_token),
+            telegram_admin_chat_id = COALESCE($2, telegram_admin_chat_id),
+            telegram_alerts_enabled = COALESCE($3, telegram_alerts_enabled),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 'reward_settings'
+      `, [
+        bot_token !== undefined ? String(bot_token).trim() : null,
+        chat_id !== undefined ? String(chat_id).trim() : null,
+        enabled !== undefined ? Boolean(enabled) : null
+      ]);
+
+      const updated = await telegramAlert.getConfig();
+      return {
+        success: true,
+        message: 'Telegram notification settings saved successfully',
+        configured: Boolean(updated.botToken && updated.chatId),
+        enabled: updated.enabled
+      };
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 }
 
 module.exports = settingsRoutes;

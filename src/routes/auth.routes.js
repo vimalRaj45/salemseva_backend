@@ -27,6 +27,7 @@ const {
   evaluateRiskAndCheckChallenge,
   clearRiskTracker
 } = require('../utils/mathGuard');
+const legalService = require('../services/legalAgreement.service');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -332,9 +333,25 @@ async function authRoutes(fastify, options) {
         });
       }
 
+      let legalCompliance = null;
+      if (userRecord.phone && userRole !== 'admin') {
+        const legalCheck = await legalService.hasAcceptedActiveDocument({
+          phone: userRecord.phone,
+          role: userRole
+        });
+        legalCompliance = {
+          accepted: legalCheck.accepted,
+          documentType: legalCheck.documentType,
+          version: legalCheck.version || legalCheck.activeVersion,
+          requiredVersion: legalCheck.requiredVersion || legalCheck.activeVersion,
+          redirectUrl: legalCheck.redirectUrl || null
+        };
+      }
+
       return {
         success: true,
         user: userRecord,
+        legalCompliance,
         message: 'Login successful'
       };
     } catch (e) {
@@ -1826,11 +1843,23 @@ async function authRoutes(fastify, options) {
   fastify.post('/auth/session', async (req, reply) => {
     try {
       const { phone, role = 'customer', name = '' } = req.body || {};
+      let legalCompliance = null;
+      if (phone && role !== 'admin') {
+        const legalCheck = await legalService.hasAcceptedActiveDocument({ phone, role });
+        legalCompliance = {
+          accepted: legalCheck.accepted,
+          documentType: legalCheck.documentType,
+          version: legalCheck.version || legalCheck.activeVersion,
+          requiredVersion: legalCheck.requiredVersion || legalCheck.activeVersion,
+          redirectUrl: legalCheck.redirectUrl || null
+        };
+      }
       return {
         success: true,
         recorded: Boolean(phone),
         role,
-        name
+        name,
+        legalCompliance
       };
     } catch (e) {
       fastify.log.error(e);

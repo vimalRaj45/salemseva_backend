@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { query } = require('../db/db');
+const telegramAlert = require('../services/telegramAlert.service');
 // The same length-safe comparison the password service uses, so there is one implementation.
 const { constantTimeEqual: secureEqual } = require('../services/password.service');
 const {
@@ -510,6 +511,15 @@ async function paymentsRoutes(fastify, options) {
               timestamp: new Date().toISOString()
             })
           ]);
+
+          // Trigger Telegram alert for online payment
+          telegramAlert.notifyBookingPayment({
+            bookingId,
+            amount: parsedAmount,
+            paymentMethod: 'Online / Razorpay',
+            utr: paymentTxId,
+            customerName: currentB?.customer_name
+          }).catch(e => fastify.log.warn('Payment Telegram alert note: ' + e.message));
         }
       } catch (statusErr) {
         fastify.log.warn('Booking status update on payment note:', statusErr.message);

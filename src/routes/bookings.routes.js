@@ -1,5 +1,7 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
+const telegramAlert = require('../services/telegramAlert.service');
+const legalService = require('../services/legalAgreement.service');
 const {
   calculateDualCommissionInvoice,
   getPartnerCommissionPercent,
@@ -161,6 +163,19 @@ async function bookingsRoutes(fastify, options) {
           return reply.status(403).send({
             success: false,
             error: `Booking prohibited: Your customer account is suspended by Shazu One Central Operations. Reason: ${uCheck.rows[0].block_reason || 'Administrative restriction'}. Please contact Shazu One Central Ops support.`
+          });
+        }
+      }
+
+      // Mandatory Database-Backed Legal Agreement Enforcement (Indian IT Act Section 10A)
+      if (cleanPhone) {
+        const legalGuard = await legalService.guardCustomerBooking({ phone: cleanPhone });
+        if (!legalGuard.allowed) {
+          return reply.status(legalGuard.statusCode || 403).send({
+            success: false,
+            code: legalGuard.code,
+            error: legalGuard.error,
+            details: legalGuard.details
           });
         }
       }
@@ -534,6 +549,11 @@ async function bookingsRoutes(fastify, options) {
         INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
         VALUES ($1, 'BOOKING_CREATED', $2, 'customer', $3)
       `, [bookingId, rawCustomerPhone.trim(), JSON.stringify({ serviceId, locality, finalAmount, customerOtp, hasOnlineTech: Boolean(onlineTech), scheduledSlot: scheduledSlot || 'priority_12h' })]);
+
+      // Instant trigger-based notification to Admin via Telegram
+      telegramAlert.notifyNewBooking(result.rows[0]).catch(e => {
+        fastify.log.warn('Admin Telegram notification note: ' + e.message);
+      });
 
       // Dispatch high-priority background push to assigned technician (only if payment is confirmed or zero-fee)
       if (assignedTechId && initialStatus !== 'created') {
