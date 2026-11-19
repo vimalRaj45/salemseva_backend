@@ -1,10 +1,4 @@
 const { query } = require('../db/db');
-const {
-  generateMathChallenge,
-  verifyMathChallenge,
-  evaluateRiskAndCheckChallenge,
-  clearRiskTracker
-} = require('../utils/mathGuard');
 
 async function feedbackRoutes(fastify, options) {
   // Ensure platform_feedback table exists
@@ -47,46 +41,6 @@ async function feedbackRoutes(fastify, options) {
 
       if (!message || !message.trim()) {
         return reply.status(400).send({ success: false, error: 'Feedback message is required' });
-      }
-
-      // Adaptive Security Guard: Check honeypot & risk triggers
-      const { mathChallengeToken, mathAnswer } = req.body || {};
-      const risk = evaluateRiskAndCheckChallenge({
-        req,
-        phone: userPhone,
-        formType: 'feedback',
-        body: req.body
-      });
-
-      if (risk.triggeredHoneypot) {
-        return reply.status(200).send({
-          success: true,
-          message: 'Feedback received successfully.'
-        });
-      }
-
-      if (risk.challengeRequired) {
-        if (!mathChallengeToken || mathAnswer === undefined || mathAnswer === null || String(mathAnswer).trim() === '') {
-          const newChallenge = generateMathChallenge();
-          return reply.status(403).send({
-            success: false,
-            mathChallengeRequired: true,
-            challenge: newChallenge,
-            error: 'Security verification required. Please answer the simple question to submit feedback.'
-          });
-        }
-
-        const verifyRes = verifyMathChallenge(mathChallengeToken, mathAnswer);
-        if (!verifyRes.valid) {
-          const newChallenge = generateMathChallenge();
-          return reply.status(403).send({
-            success: false,
-            mathChallengeRequired: true,
-            challenge: newChallenge,
-            error: verifyRes.error
-          });
-        }
-        clearRiskTracker({ req, phone: userPhone, formType: 'feedback' });
       }
 
       const insertSql = `

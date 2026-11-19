@@ -1,11 +1,5 @@
 const { query } = require('../db/db');
 const pushService = require('../services/pushNotification.service');
-const {
-  generateMathChallenge,
-  verifyMathChallenge,
-  evaluateRiskAndCheckChallenge,
-  clearRiskTracker
-} = require('../utils/mathGuard');
 
 const extractActor = (userVal, fallback = 'Salem Operations Admin') => {
   if (!userVal) return fallback;
@@ -60,50 +54,6 @@ async function ticketsRoutes(fastify, options) {
 
       if (!creatorPhone) {
         return reply.status(400).send({ success: false, error: 'Mobile phone number is required to file a support ticket' });
-      }
-
-      // Adaptive Security Guard: Check honeypot & risk triggers
-      const { mathChallengeToken, mathAnswer } = req.body || {};
-      const risk = evaluateRiskAndCheckChallenge({
-        req,
-        phone: creatorPhone,
-        formType: 'ticket',
-        body: req.body
-      });
-
-      if (risk.triggeredHoneypot) {
-        return reply.status(200).send({
-          success: true,
-          ticket: {
-            id: 'TCK-' + Math.floor(1000 + Math.random() * 9000),
-            status: 'open',
-            subject: subject || 'Support Enquiry'
-          }
-        });
-      }
-
-      if (risk.challengeRequired) {
-        if (!mathChallengeToken || mathAnswer === undefined || mathAnswer === null || String(mathAnswer).trim() === '') {
-          const newChallenge = generateMathChallenge();
-          return reply.status(403).send({
-            success: false,
-            mathChallengeRequired: true,
-            challenge: newChallenge,
-            error: 'Security verification required. Please answer the simple question to submit your ticket.'
-          });
-        }
-
-        const verifyRes = verifyMathChallenge(mathChallengeToken, mathAnswer);
-        if (!verifyRes.valid) {
-          const newChallenge = generateMathChallenge();
-          return reply.status(403).send({
-            success: false,
-            mathChallengeRequired: true,
-            challenge: newChallenge,
-            error: verifyRes.error
-          });
-        }
-        clearRiskTracker({ req, phone: creatorPhone, formType: 'ticket' });
       }
 
       if (!subject || !String(subject).trim()) {
