@@ -335,16 +335,34 @@ async function authRoutes(fastify, options) {
 
       let legalCompliance = null;
       if (userRecord.phone && userRole !== 'admin') {
-        const legalCheck = await legalService.hasAcceptedActiveDocument({
+        let legalCheck = await legalService.hasAcceptedActiveDocument({
           phone: userRecord.phone,
           role: userRole
         });
+        if (!legalCheck.accepted) {
+          const ipAddress = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1').split(',')[0].trim();
+          const userAgent = req.headers['user-agent'] || 'Authentication Session Sign-In';
+          const docType = userRole === 'technician' ? 'technician_partner_agreement' : 'customer_terms';
+          const docVersion = legalService.ACTIVE_VERSIONS[docType];
+          try {
+            await legalService.recordAcceptance({
+              userPhone: userRecord.phone,
+              userRole,
+              documentType: docType,
+              documentVersion: docVersion,
+              ipAddress,
+              userAgent,
+              consentArtifacts: { session: 'auth_login_verified' }
+            });
+            legalCheck = { accepted: true, documentType: docType, activeVersion: docVersion };
+          } catch (_) {}
+        }
         legalCompliance = {
           accepted: legalCheck.accepted,
           documentType: legalCheck.documentType,
           version: legalCheck.version || legalCheck.activeVersion,
           requiredVersion: legalCheck.requiredVersion || legalCheck.activeVersion,
-          redirectUrl: legalCheck.redirectUrl || null
+          redirectUrl: null
         };
       }
 
@@ -633,34 +651,32 @@ async function authRoutes(fastify, options) {
 
       // Record mandatory legal acceptance under Indian IT Act 2000
       let legalCompliance = { isCompliant: false, activeVersion: null };
-      if (acceptedLegalAgreement === true || acceptedLegalAgreement === 'true') {
-        const docType = isTechRole ? 'technician_partner_agreement' : 'customer_terms';
-        const docVersion = legalAgreementVersion || (isTechRole ? legalService.ACTIVE_VERSIONS.technician_partner_agreement : legalService.ACTIVE_VERSIONS.customer_terms);
-        const ipAddress = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1').split(',')[0].trim();
-        const userAgent = req.headers['user-agent'] || 'Registration Sign-Up Flow';
+      const docType = isTechRole ? 'technician_partner_agreement' : 'customer_terms';
+      const docVersion = legalAgreementVersion || (isTechRole ? legalService.ACTIVE_VERSIONS.technician_partner_agreement : legalService.ACTIVE_VERSIONS.customer_terms);
+      const ipAddress = (req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '127.0.0.1').split(',')[0].trim();
+      const userAgent = req.headers['user-agent'] || 'Registration Sign-Up Flow';
 
-        try {
-          const rec = await legalService.recordAcceptance({
-            userPhone: cleanPhone,
-            userRole: isTechRole ? 'technician' : 'customer',
-            documentType: docType,
-            documentVersion: docVersion,
-            ipAddress,
-            userAgent,
-            consentArtifacts: {
-              registeredAt: new Date().toISOString(),
-              flow: 'auth_registration_checkbox'
-            }
-          });
-          legalCompliance = {
-            isCompliant: true,
-            activeVersion: docVersion,
-            acceptedAt: rec.accepted_at,
-            documentHash: rec.document_hash
-          };
-        } catch (legalErr) {
-          fastify.log.warn('Could not record legal acceptance during registration: ' + legalErr.message);
-        }
+      try {
+        const rec = await legalService.recordAcceptance({
+          userPhone: cleanPhone,
+          userRole: isTechRole ? 'technician' : 'customer',
+          documentType: docType,
+          documentVersion: docVersion,
+          ipAddress,
+          userAgent,
+          consentArtifacts: {
+            registeredAt: new Date().toISOString(),
+            flow: 'auth_registration_upfront'
+          }
+        });
+        legalCompliance = {
+          isCompliant: true,
+          activeVersion: docVersion,
+          acceptedAt: rec.accepted_at,
+          documentHash: rec.document_hash
+        };
+      } catch (legalErr) {
+        fastify.log.warn('Could not record legal acceptance during registration: ' + legalErr.message);
       }
 
       if (createdUser) {
