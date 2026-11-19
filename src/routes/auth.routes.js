@@ -22,6 +22,7 @@ const {
   resolveCustomerReferrer
 } = require('../services/referral.service');
 const legalService = require('../services/legalAgreement.service');
+const jwtService = require('../services/jwt.service');
 
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
@@ -360,8 +361,17 @@ async function authRoutes(fastify, options) {
         };
       }
 
+      const token = jwtService.signToken({
+        id: userRecord.id,
+        role: userRole,
+        phone: userRecord.phone,
+        name: userRecord.name,
+        locality: userRecord.locality
+      });
+
       return {
         success: true,
+        token,
         user: userRecord,
         legalCompliance,
         message: 'Login successful'
@@ -677,8 +687,17 @@ async function authRoutes(fastify, options) {
         createdUser.legalCompliance = legalCompliance;
       }
 
+      const token = createdUser ? jwtService.signToken({
+        id: createdUser.id,
+        role: createdUser.role,
+        phone: createdUser.phone,
+        name: createdUser.name,
+        locality: createdUser.locality
+      }) : null;
+
       return {
         success: true,
+        token,
         user: createdUser,
         message: 'Account created successfully'
       };
@@ -882,7 +901,12 @@ async function authRoutes(fastify, options) {
 
       // Create Admin Session Token (valid for SESSION_TTL_HOURS or 168 hours)
       const ttlHours = parseInt(process.env.SESSION_TTL_HOURS, 10) || 168;
-      const adminToken = `adm_${crypto.randomBytes(32).toString('hex')}`;
+      const adminToken = jwtService.signToken({
+        id: adminUser.id,
+        role: 'admin',
+        email: cleanEmail,
+        name: adminUser.name
+      }, `${ttlHours}h`);
       adminSessionStore.set(adminToken, {
         email: cleanEmail,
         adminId: adminUser.id,
@@ -914,6 +938,18 @@ async function authRoutes(fastify, options) {
 
       if (!token) {
         return reply.status(401).send({ success: false, error: 'No admin session token provided.' });
+      }
+
+      // Check JWT first
+      const decoded = jwtService.verifyToken(token);
+      if (decoded && decoded.role === 'admin') {
+        return {
+          success: true,
+          authenticated: true,
+          email: decoded.email,
+          role: 'admin',
+          user: decoded
+        };
       }
 
       const session = adminSessionStore.get(token);
@@ -1040,7 +1076,12 @@ async function authRoutes(fastify, options) {
       };
 
       const ttlHours = parseInt(process.env.SESSION_TTL_HOURS, 10) || 168;
-      const adminToken = `adm_${crypto.randomBytes(32).toString('hex')}`;
+      const adminToken = jwtService.signToken({
+        id: adminUser.id,
+        role: 'admin',
+        email: cleanEmail,
+        name: adminUser.name
+      }, `${ttlHours}h`);
       adminSessionStore.set(adminToken, {
         email: cleanEmail,
         adminId: adminUser.id,
@@ -1283,12 +1324,24 @@ async function authRoutes(fastify, options) {
         existingUser = formatTechnicianUser(techRes.rows[0], cleanPhone);
       }
 
+      let authToken = null;
+      if (existingUser) {
+        authToken = jwtService.signToken({
+          id: existingUser.id,
+          role: existingUser.role,
+          phone: existingUser.phone,
+          name: existingUser.name,
+          locality: existingUser.locality
+        });
+      }
+
       return {
         success: true,
         verified: true,
         isExistingUser: Boolean(existingUser),
         hasCustomerAccount: custRes.rows.length > 0,
         hasTechnicianAccount: techRes.rows.length > 0,
+        token: authToken,
         user: existingUser,
         verificationToken,
         message: 'Mobile number verified successfully'
@@ -1634,8 +1687,17 @@ async function authRoutes(fastify, options) {
         });
       }
 
+      const token = jwtService.signToken({
+        id: userRecord.id,
+        role: userRole,
+        phone: userRecord.phone,
+        name: userRecord.name,
+        locality: userRecord.locality
+      });
+
       return {
         success: true,
+        token,
         user: userRecord,
         message: 'Passkey authentication successful'
       };
@@ -1841,10 +1903,64 @@ async function authRoutes(fastify, options) {
     }
   });
 
-  // 8. Client Session Sync (graceful session acknowledgement)
-  fastify.post('/auth/session', async (req, reply) => {
+  // 14. Identity introspection endpoint using JWT
+  fastify.get('/auth/me', { preHandler: [jwtService.authenticateUser] }, async (req, reply) => {
     try {
-      const { phone, role = 'customer', name = '' } = req.body || {};
+      const { id, phone, role } = req.user || {};
+      let userRecord = null;
+      const cleanPhone = (phone || '').replace(/[^0-9]/g, '').slice(-10);
+
+      if (cleanPhone) {
+        if (role === 'technician' || role === 'partner') {
+          const techRes = await query(`
+            SELECT * FROM technicians 
+            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+            LIMIT 1
+          `, [cleanPhone]);
+          if (techRes.rows.length > 0) {
+            userRecord = formatTechnicianUser(techRes.rows[0], cleanPhone);
+          }
+        } else if (role === 'customer') {
+          const custRes = await query(`
+            SELECT * FROM users 
+            WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+            LIMIT 1
+          `, [cleanPhone]);
+          let refCount = 0;
+          if (custRes.rows.length > 0) {
+            const u = custRes.rows[0];
+            try {
+              const refCountRes = await query(`
+                SELECT COUNT(*)::int as count FROM users 
+                WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
+              `, [u.referral_code || '', cleanPhone]);
+              refCount = refCountRes.rows[0]?.count || 0;
+            } catch (_) {}
+            userRecord = formatCustomerUser(u, cleanPhone, refCount);
+          }
+        }
+      }
+
+      return {
+        success: true,
+        authenticated: true,
+        claims: req.user,
+        user: userRecord || req.user
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message });
+    }
+  });
+
+  // 8. Client Session Sync (graceful session acknowledgement with optional JWT validation)
+  fastify.post('/auth/session', { preHandler: [jwtService.optionalAuthenticate] }, async (req, reply) => {
+    try {
+      const body = req.body || {};
+      const phone = body.phone || req.user?.phone || '';
+      const role = body.role || req.user?.role || 'customer';
+      const name = body.name || req.user?.name || '';
+
       let legalCompliance = null;
       if (phone && role !== 'admin') {
         const legalCheck = await legalService.hasAcceptedActiveDocument({ phone, role });
@@ -1861,6 +1977,7 @@ async function authRoutes(fastify, options) {
         recorded: Boolean(phone),
         role,
         name,
+        user: req.user || null,
         legalCompliance
       };
     } catch (e) {
