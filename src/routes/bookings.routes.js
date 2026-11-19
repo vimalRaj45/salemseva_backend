@@ -1928,7 +1928,13 @@ async function bookingsRoutes(fastify, options) {
   fastify.post('/bookings/:id/cancel', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { reason, reasonDetails, cancelledBy = 'customer' } = req.body || {};
+      const {
+        reason,
+        reasonDetails,
+        cancelledBy = 'customer',
+        refundMethod = 'wallet',
+        customerUpiId = ''
+      } = req.body || {};
       let safeCancelledBy = 'customer';
       if (typeof cancelledBy === 'object' && cancelledBy !== null) {
         safeCancelledBy = String(cancelledBy.email || cancelledBy.name || cancelledBy.id || 'customer').substring(0, 50);
@@ -1980,7 +1986,7 @@ async function bookingsRoutes(fastify, options) {
           return reply.status(400).send({
             success: false,
             code: 'CANCELLATION_WINDOW_EXPIRED',
-            error: 'Cancellations are only available at least 24 hours prior to the scheduled service appointment. Since your service is scheduled within the next 24 hours and a specialist technician is already assigned, please contact Salem Operations Desk.',
+            error: 'Cancellations are only available at least 24 hours prior to the scheduled service appointment. Since your service is scheduled within the next 24 hours and a specialist technician is already assigned, please contact Operations Desk.',
             policyReason,
             hoursRemaining: Math.max(0, hoursRemaining),
             opsContact: ops
@@ -1989,14 +1995,6 @@ async function bookingsRoutes(fastify, options) {
       }
 
       if (booking.status === 'cancelled') {
-        const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-        const liveFees = await getLiveFeeSettings();
-        const custFeeRate = liveFees.customerFeePercent;
-        const pgFeeRate = liveFees.gatewayFeePercent;
-        const platformFeeDeduction = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
-        const gatewayChargeDeduction = parseFloat((originalPaid * (pgFeeRate / 100.0)).toFixed(2));
-        const refundAmount = parseFloat(Math.max(0, originalPaid - (platformFeeDeduction + gatewayChargeDeduction)).toFixed(2));
-
         return {
           success: true,
           message: 'Booking was already cancelled',
@@ -2006,29 +2004,74 @@ async function bookingsRoutes(fastify, options) {
             cancelledBy,
             reason: reason || booking.cancellation_reason || 'Customer requested cancellation',
             previousStatus: booking.status,
-            originalPaid,
-            platformFeeRetained: platformFeeDeduction,
-            gatewayChargeRetained: gatewayChargeDeduction,
-            refundAmount,
-            policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% service charge (₹${gatewayChargeDeduction}) were deducted. ₹${refundAmount} has been refunded.`,
+            originalPaid: parseFloat(booking.advance_amount_paid || booking.final_amount || booking.visit_fee || 0),
+            platformFeeRetained: parseFloat(booking.refund_platform_fee || 0),
+            gatewayChargeRetained: parseFloat(booking.refund_gateway_fee || 0),
+            refundAmount: parseFloat(booking.refund_amount || 0),
+            refundMethod: booking.refund_method || 'bank_upi',
+            refundStatus: booking.refund_status || 'REFUNDED',
+            policyNotice: booking.refund_method === 'wallet'
+              ? '100% full amount was added instantly to your wallet.'
+              : `2% gateway charge (₹${parseFloat(booking.refund_gateway_fee || 0).toFixed(2)}) was deducted. ₹${parseFloat(booking.refund_amount || 0).toFixed(2)} refund queued.`,
             cancelledAt: booking.cancelled_at || new Date().toISOString()
           }
         };
       }
 
-      const isPreMatching = booking.status === 'matching' || booking.status === 'created';
-      const originalAmount = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
+      const originalAmount = parseFloat(
+        booking.advance_amount_paid !== null && booking.advance_amount_paid !== undefined
+          ? booking.advance_amount_paid
+          : (booking.final_amount || booking.visit_fee || 99.00)
+      );
       const cancelReasonText = reason || 'Customer requested cancellation';
       const cancelDetailsText = reasonDetails || '';
 
-      // Platform Cut & Gateway Processing Fee Retention (Configured via platform_settings table in real-time)
-      const liveSettings = await getLiveFeeSettings();
-      const custFeeRate = liveSettings.customerFeePercent;
-      const pgFeeRate = liveSettings.gatewayFeePercent;
-      const platformFeeDeduction = parseFloat((originalAmount * (custFeeRate / 100.0)).toFixed(2));
-      const gatewayChargeDeduction = parseFloat((originalAmount * (pgFeeRate / 100.0)).toFixed(2));
-      const totalDeductions = parseFloat((platformFeeDeduction + gatewayChargeDeduction).toFixed(2));
-      const refundAmount = parseFloat(Math.max(0, originalAmount - totalDeductions).toFixed(2));
+      const isWalletChoice = refundMethod === 'wallet';
+      let platformFeeDeduction = 0.00;
+      let gatewayChargeDeduction = 0.00;
+      let refundAmount = originalAmount;
+      let targetRefundStatus = 'REFUNDED_TO_WALLET';
+      let targetRefundedAt = new Date().toISOString();
+      const cleanCustomerUpi = String(customerUpiId || '').trim();
+
+      if (isWalletChoice) {
+        // Option 1: 100% full amount added to wallet, 0% fee deducted
+        gatewayChargeDeduction = 0.00;
+        platformFeeDeduction = 0.00;
+        refundAmount = originalAmount;
+        targetRefundStatus = 'REFUNDED_TO_WALLET';
+        targetRefundedAt = new Date().toISOString();
+
+        // Credit customer wallet directly
+        const custId = booking.customer_id;
+        const custPhone = booking.customer_phone ? String(booking.customer_phone).replace(/\D/g, '').slice(-10) : '';
+        const userCreditRes = await query(`
+          UPDATE users 
+          SET wallet_balance = COALESCE(wallet_balance, 0) + $1 
+          WHERE ($2::text <> '' AND id::text = $2)
+             OR ($3::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $3)
+          RETURNING id, wallet_balance
+        `, [refundAmount, custId || '', custPhone || '']);
+
+        const creditedUserId = userCreditRes.rows[0]?.id || custId || null;
+        if (creditedUserId) {
+          try {
+            await query(`
+              INSERT INTO wallet_transactions (user_id, amount, type, description, created_at)
+              VALUES ($1, $2, 'REFUND_CREDIT', $3, NOW())
+            `, [creditedUserId, refundAmount, `100% full refund added to wallet for cancelled booking #${booking.id}`]);
+          } catch (wErr) {
+            fastify.log.warn('Wallet transaction write note: ' + wErr.message);
+          }
+        }
+      } else {
+        // Option 2: Refund to Bank/UPI, 2% gateway charge deducted
+        gatewayChargeDeduction = parseFloat((originalAmount * 0.02).toFixed(2));
+        platformFeeDeduction = 0.00;
+        refundAmount = parseFloat(Math.max(0, originalAmount - gatewayChargeDeduction).toFixed(2));
+        targetRefundStatus = 'PENDING_DISBURSAL';
+        targetRefundedAt = null; // Stays null until admin enters transfer UTR!
+      }
 
       // Update status and store full customer cancellation & refund details in database
       const updateSql = `
@@ -2041,8 +2084,11 @@ async function bookingsRoutes(fastify, options) {
             refund_amount = $5,
             refund_platform_fee = $6,
             refund_gateway_fee = $7,
-            refund_status = 'REFUND_INITIATED',
-            refunded_at = NOW()
+            refund_status = $8,
+            refund_method = $9,
+            customer_refund_upi = $10,
+            refund_utr = NULL,
+            refunded_at = $11
         WHERE id = $1
         RETURNING *
       `;
@@ -2053,21 +2099,24 @@ async function bookingsRoutes(fastify, options) {
         safeCancelledBy,
         refundAmount,
         platformFeeDeduction,
-        gatewayChargeDeduction
+        gatewayChargeDeduction,
+        targetRefundStatus,
+        isWalletChoice ? 'wallet' : 'bank_upi',
+        cleanCustomerUpi || booking.customer_phone || null,
+        targetRefundedAt
       ]);
       const updatedBooking = updateRes.rows[0];
 
-      // Record refund in payments ledger
-      try {
-        await query(`
-          INSERT INTO payments (booking_id, amount_total, pg_fee, platform_commission, tech_payout_amount, status, payment_method, settled_at)
-          VALUES ($1, $2, $3, $4, 0.00, 'refunded', 'Razorpay Gateway Refund', NOW())
-        `, [booking.id, refundAmount, gatewayChargeDeduction, platformFeeDeduction]);
-      } catch (payErr) {
-        // An empty catch here meant a cancelled booking could be reported as refunded with no
-        // ledger row behind it. The booking update has already happened, so the only correct
-        // behaviour left is to surface it loudly for reconciliation.
-        fastify.log.error('Refund ledger write failed for booking ' + booking.id + ': ' + payErr.message);
+      // If wallet refund, log completed refund in payments ledger
+      if (isWalletChoice) {
+        try {
+          await query(`
+            INSERT INTO payments (booking_id, amount_total, pg_fee, platform_commission, tech_payout_amount, status, payment_method, payout_utr, settled_at)
+            VALUES ($1, $2, 0.00, 0.00, 0.00, 'refunded', 'WALLET_CREDIT', 'WALLET', NOW())
+          `, [booking.id, refundAmount]);
+        } catch (payErr) {
+          fastify.log.error('Refund ledger write note: ' + payErr.message);
+        }
       }
 
       // Audit Log
@@ -2077,35 +2126,41 @@ async function bookingsRoutes(fastify, options) {
       `, [
         booking.id,
         booking.customer_phone || 'customer',
-        cancelledBy,
+        safeCancelledBy,
         JSON.stringify({
           reason: cancelReasonText,
-          reasonDetails: cancelDetailsText,
-          previousStatus: booking.status,
+          refundMethod: isWalletChoice ? 'wallet' : 'bank_upi',
           originalAmount,
-          platformFeeRetained: platformFeeDeduction,
           gatewayChargeRetained: gatewayChargeDeduction,
           refundAmount,
+          refundStatus: targetRefundStatus,
+          customerUpi: cleanCustomerUpi,
           cancelledAt: new Date().toISOString()
         })
       ]);
 
       return {
         success: true,
-        message: `Booking cancelled successfully. Refund initiated after retaining ${custFeeRate}% platform fee and ${pgFeeRate}% Razorpay service charge.`,
+        message: isWalletChoice
+          ? `Booking cancelled. 100% full amount of ₹${refundAmount.toFixed(2)} credited to your wallet instantly!`
+          : `Booking cancelled. Refund of ₹${refundAmount.toFixed(2)} (after 2% gateway fee of ₹${gatewayChargeDeduction.toFixed(2)}) will be transferred to your UPI.`,
         booking: updatedBooking,
         cancellationSummary: {
           bookingId: booking.id,
-          cancelledBy,
+          cancelledBy: safeCancelledBy,
           reason: cancelReasonText,
           previousStatus: booking.status,
           originalPaid: originalAmount,
-          platformFeeRetained: platformFeeDeduction,
+          platformFeeRetained: 0.00,
           gatewayChargeRetained: gatewayChargeDeduction,
           technicianTravelDisbursal: 0.00,
           refundAmount,
-          refundStatus: 'REFUND_INITIATED',
-          policyNotice: `As per Shazu One policy, ${custFeeRate}% platform fee (₹${platformFeeDeduction}) and ${pgFeeRate}% Razorpay service charge (₹${gatewayChargeDeduction}) were retained. ₹${refundAmount} has been initiated for refund to your payment method (3-5 business days).`,
+          refundMethod: isWalletChoice ? 'wallet' : 'bank_upi',
+          refundStatus: targetRefundStatus,
+          customerRefundUpi: cleanCustomerUpi,
+          policyNotice: isWalletChoice
+            ? '100% full amount has been added to your wallet with zero fee deduction. You can use this balance immediately for your next booking.'
+            : `2% gateway charge (₹${gatewayChargeDeduction.toFixed(2)}) was deducted. Net refund of ₹${refundAmount.toFixed(2)} will be transferred to your UPI ID ${cleanCustomerUpi || ''} within 1-2 business days.`,
           cancelledAt: new Date().toISOString()
         }
       };

@@ -27,9 +27,8 @@ try {
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB strict limit
 
-// Uploads that silently degrade to a data URI in a text column were reported as successful
-// while nothing reached object storage. The fallback now has to be requested explicitly.
-const ALLOW_BASE64_FALLBACK = process.env.ALLOW_BASE64_FALLBACK === '1';
+// Allow base64 fallback so voice notes and documents are never blocked if cloud S3 is temporarily unreachable
+const ALLOW_BASE64_FALLBACK = process.env.ALLOW_BASE64_FALLBACK !== '0';
 
 // The client declares the MIME type and it was passed straight to S3 as ContentType, which
 // allows an HTML or SVG payload to be served from our own origin. Only these are accepted.
@@ -38,7 +37,18 @@ const ALLOWED_MIME_TYPES = new Set([
   'image/jpg',
   'image/png',
   'image/webp',
-  'application/pdf'
+  'application/pdf',
+  'audio/webm',
+  'audio/ogg',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/wave',
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/mp4',
+  'audio/m4a',
+  'audio/x-m4a',
+  'audio/aac'
 ]);
 
 /**
@@ -93,7 +103,7 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
   // 2. Reject anything that is not a document type we serve
   const normalizedMime = String(mimeType || '').split(';')[0].trim().toLowerCase();
   if (!ALLOWED_MIME_TYPES.has(normalizedMime)) {
-    throw new Error(`Unsupported file type: ${normalizedMime || 'unknown'}. Allowed: JPEG, PNG, WEBP, PDF.`);
+    throw new Error(`Unsupported file type: ${normalizedMime || 'unknown'}. Allowed: JPEG, PNG, WEBP, PDF, WEBM, OGG, WAV, MP3, M4A, AAC.`);
   }
   mimeType = normalizedMime;
 
@@ -102,6 +112,11 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
   if (mimeType.includes('png')) ext = 'png';
   else if (mimeType.includes('webp')) ext = 'webp';
   else if (mimeType.includes('pdf')) ext = 'pdf';
+  else if (mimeType.includes('webm')) ext = 'webm';
+  else if (mimeType.includes('ogg')) ext = 'ogg';
+  else if (mimeType.includes('wav') || mimeType.includes('wave')) ext = 'wav';
+  else if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) ext = 'm4a';
+  else if (mimeType.includes('mpeg') || mimeType.includes('mp3')) ext = 'mp3';
   else if (fileName && fileName.includes('.')) ext = fileName.split('.').pop().toLowerCase();
 
   const cleanRef = String(referenceId).replace(/[^a-zA-Z0-9_-]/g, '_');

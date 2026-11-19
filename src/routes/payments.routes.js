@@ -1232,21 +1232,40 @@ async function paymentsRoutes(fastify, options) {
       const existingSettlement = await query(`
         SELECT * FROM payments 
         WHERE booking_id = $1 
-          AND (payment_type = 'FINAL_SETTLEMENT' OR payment_method = 'ADVANCE_COVERED' OR payment_method = 'DYNAMIC_UPI_QR')
+          AND (payment_type = 'FINAL_SETTLEMENT' OR payment_method = 'ADVANCE_COVERED' OR verified_by = 'PARTNER_PHYSICAL_CHECK')
           AND status IN ('escrow_held', 'captured', 'settled')
         LIMIT 1
       `, [bookingId]);
       if (existingSettlement.rows.length > 0) {
+        // Ensure booking status is permanently marked completed
+        await query(`
+          UPDATE bookings
+          SET status = 'completed',
+              completed_at = COALESCE(completed_at, NOW())
+          WHERE id = $1 AND status != 'completed'
+        `, [bookingId]);
+
         return reply.send({
           success: true,
           alreadySettled: true,
-          message: 'Doorstep final payment was already processed and confirmed.',
+          message: 'Doorstep final payment was already processed and completed for this booking.',
           verificationStatus: existingSettlement.rows[0].verification_status || 'verified'
         });
       }
 
-      if (technicianId && booking.technician_id && String(booking.technician_id) !== String(technicianId)) {
-        return reply.status(403).send({ success: false, error: 'Only the assigned technician can confirm doorstep collection for this booking.' });
+      if (technicianId && booking.technician_id) {
+        const isDirectMatch = String(booking.technician_id) === String(technicianId);
+        if (!isDirectMatch) {
+          const techUserRes = await query(`
+            SELECT id FROM technicians 
+            WHERE (id::text = $1 OR phone = (SELECT phone FROM users WHERE id::text = $1 LIMIT 1))
+              AND id::text = $2
+            LIMIT 1
+          `, [String(technicianId), String(booking.technician_id)]);
+          if (techUserRes.rows.length === 0) {
+            return reply.status(403).send({ success: false, error: 'Only the assigned technician can confirm doorstep collection for this booking.' });
+          }
+        }
       }
 
       const cleanOptionalUtr = String(customerUtr || '').trim().replace(/\s+/g, '');
@@ -1309,11 +1328,13 @@ async function paymentsRoutes(fastify, options) {
           booking_id, razorpay_order_id, razorpay_payment_id, amount_total,
           tech_payout_amount, platform_commission, status, payment_method,
           customer_utr, ocr_detected_utr, screenshot_url, verification_status, verified_by,
+          payment_type,
           created_at
         ) VALUES (
           $1, $2, $3, $4,
           $5, $6, 'escrow_held', $9,
           $7, $8, NULL, $10, 'PARTNER_PHYSICAL_CHECK',
+          'FINAL_SETTLEMENT',
           NOW()
         )
         RETURNING *;

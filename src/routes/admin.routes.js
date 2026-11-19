@@ -1057,6 +1057,10 @@ async function adminRoutes(fastify, options) {
           b.id as booking_id,
           b.customer_name,
           b.customer_phone,
+          b.customer_refund_upi,
+          b.refund_method,
+          b.refund_utr as direct_refund_utr,
+          b.advance_amount_paid,
           b.locality,
           b.service_id,
           b.final_amount,
@@ -1075,7 +1079,7 @@ async function adminRoutes(fastify, options) {
           p_in.amount_total as paid_amount,
           p_in.customer_utr,
           p_in.verification_status,
-          COALESCE(p_out.payout_utr, b.refunded_at::text) as refund_utr
+          COALESCE(b.refund_utr, p_out.payout_utr, '') as refund_utr
         FROM bookings b
         LEFT JOIN LATERAL (
           SELECT * FROM payments 
@@ -1094,29 +1098,33 @@ async function adminRoutes(fastify, options) {
 
       const result = await query(sql);
       const refunds = (result.rows || []).map(r => {
-        const hasVerifiedPayment = r.paid_amount && (r.verification_status === 'verified' || (r.verification_status == null && r.payment_method !== 'DYNAMIC_UPI_QR'));
-        const originalPaid = hasVerifiedPayment ? parseFloat(r.paid_amount) : 0.00;
-        const platformRetention = parseFloat((originalPaid * (custFeeRate / 100.0)).toFixed(2));
-        const gatewayRetention = 0.00;
-        const calculatedRefund = parseFloat(Math.max(0, originalPaid - (platformRetention + gatewayRetention)).toFixed(2));
-        const finalRefund = r.refund_amount != null ? parseFloat(r.refund_amount) : calculatedRefund;
-        const isRefunded = r.refund_status === 'REFUNDED' || Boolean(r.refund_utr && r.refund_utr.length > 3) || Boolean(r.refunded_at);
+        const originalPaid = parseFloat(r.paid_amount || r.advance_amount_paid || r.final_amount || r.visit_fee || 0);
+        const gatewayRetention = parseFloat(r.refund_gateway_fee != null ? r.refund_gateway_fee : (originalPaid * 0.02).toFixed(2));
+        const platformRetention = parseFloat(r.refund_platform_fee != null ? r.refund_platform_fee : 0.00);
+        const finalRefund = r.refund_amount != null ? parseFloat(r.refund_amount) : parseFloat(Math.max(0, originalPaid - gatewayRetention).toFixed(2));
+        
+        const isWalletRefund = r.refund_status === 'REFUNDED_TO_WALLET' || r.refund_method === 'wallet';
+        const isRefunded = r.refund_status === 'REFUNDED' && Boolean(r.direct_refund_utr || (r.refund_utr && !r.refund_utr.includes('T') && r.refund_utr !== 'WALLET'));
 
-        let derivedRefundStatus = 'REFUND_PENDING';
-        if (!hasVerifiedPayment && (!r.paid_amount || r.verification_status === 'pending')) {
-          derivedRefundStatus = 'UNVERIFIED_PAYMENT';
-        } else if (isRefunded) {
+        let derivedRefundStatus = 'PENDING_DISBURSAL';
+        if (isWalletRefund) {
+          derivedRefundStatus = 'REFUNDED_TO_WALLET';
+        } else if (r.refund_status === 'REFUNDED') {
           derivedRefundStatus = 'REFUNDED';
+        } else {
+          derivedRefundStatus = 'PENDING_DISBURSAL';
         }
 
         return {
           bookingId: r.booking_id,
           customerName: r.customer_name || 'Customer',
           customerPhone: r.customer_phone || '',
+          customerRefundUpi: r.customer_refund_upi || r.customer_phone || '',
+          refundMethod: r.refund_method || 'bank_upi',
           locality: r.locality || 'Fairlands',
           serviceId: r.service_id || 'home_service',
           originalPaid,
-          hasVerifiedPayment,
+          hasVerifiedPayment: true,
           platformRetention,
           gatewayRetention,
           refundAmount: finalRefund,
@@ -1125,7 +1133,7 @@ async function adminRoutes(fastify, options) {
           cancellationReason: r.cancellation_reason || 'Customer requested cancellation',
           cancellationDetails: r.cancellation_details || '',
           refundStatus: derivedRefundStatus,
-          refundUtr: isRefunded ? (r.refund_utr || '') : '',
+          refundUtr: isWalletRefund ? 'WALLET' : (r.direct_refund_utr || (r.refund_utr && !r.refund_utr.includes('T') ? r.refund_utr : '')),
           refundedAt: r.refunded_at || null,
           customerUtr: r.customer_utr || '',
           paymentMethod: r.payment_method || 'UPI QR'
@@ -1149,12 +1157,11 @@ async function adminRoutes(fastify, options) {
       const { bookingId } = req.params;
       const { refundUtr, refundNotes, refundAmount } = req.body || {};
 
-      if (!refundUtr || !String(refundUtr).trim()) {
-        return reply.status(400).send({ success: false, error: 'Valid Refund Transaction ID / UTR is required' });
+      if (!refundUtr || !String(refundUtr).trim() || String(refundUtr).trim().length < 6) {
+        return reply.status(400).send({ success: false, error: 'Please enter a valid bank/UPI transaction UTR (at least 6 characters)' });
       }
 
       const cleanUtr = String(refundUtr).trim().toUpperCase();
-      const liveSettings = await getLiveFeeSettings();
 
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [bookingId]);
       if (bRes.rows.length === 0) {
@@ -1162,19 +1169,20 @@ async function adminRoutes(fastify, options) {
       }
       const booking = bRes.rows[0];
 
-      const originalPaid = parseFloat(booking.final_amount || booking.visit_fee || 99.00);
-      const platformFee = parseFloat((originalPaid * (liveSettings.customerFeePercent / 100.0)).toFixed(2));
-      const finalRefundAmt = refundAmount != null ? parseFloat(refundAmount) : parseFloat(Math.max(0, originalPaid - platformFee).toFixed(2));
+      const originalPaid = parseFloat(booking.advance_amount_paid || booking.final_amount || booking.visit_fee || 99.00);
+      const gatewayFee = parseFloat(booking.refund_gateway_fee != null ? booking.refund_gateway_fee : (originalPaid * 0.02).toFixed(2));
+      const finalRefundAmt = refundAmount != null ? parseFloat(refundAmount) : parseFloat(Math.max(0, originalPaid - gatewayFee).toFixed(2));
 
       await query(`
         UPDATE bookings
         SET refund_status = 'REFUNDED',
-            refund_amount = $1,
-            refund_platform_fee = $2,
-            refund_gateway_fee = 0.00,
+            refund_utr = $1,
+            refund_amount = $2,
+            refund_gateway_fee = $3,
+            refund_platform_fee = 0.00,
             refunded_at = NOW()
-        WHERE id = $3
-      `, [finalRefundAmt, platformFee, bookingId]);
+        WHERE id = $4
+      `, [cleanUtr, finalRefundAmt, gatewayFee, bookingId]);
 
       const pRes = await query(`
         UPDATE payments
@@ -1189,8 +1197,8 @@ async function adminRoutes(fastify, options) {
         await query(`
           INSERT INTO payments (
             booking_id, amount_total, pg_fee, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at
-          ) VALUES ($1, $2, 0.00, 0.00, $3, 'refunded', 'upi', $4, NOW())
-        `, [bookingId, originalPaid, platformFee, cleanUtr]);
+          ) VALUES ($1, $2, $3, 0.00, 0.00, 'refunded', 'upi', $4, NOW())
+        `, [bookingId, originalPaid, gatewayFee, cleanUtr]);
       }
 
       await query(`
