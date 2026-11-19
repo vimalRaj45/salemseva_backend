@@ -1119,6 +1119,26 @@ async function bookingsRoutes(fastify, options) {
   // 4. Get Full Booking History for Customer with Comprehensive Payment & Timeline Breakdown
   fastify.get('/bookings/history', async (req, reply) => {
     try {
+      const { phone, status } = req.query || {};
+      let whereSql = "WHERE b.status != 'created'";
+      const params = [];
+
+      if (phone) {
+        const digits = String(phone).replace(/\D/g, '').slice(-10);
+        if (digits.length >= 7) {
+          params.push(`%${digits}%`);
+          whereSql += ` AND (REPLACE(REPLACE(REPLACE(b.customer_phone, ' ', ''), '-', ''), '+', '') LIKE $${params.length} OR b.customer_phone LIKE $${params.length})`;
+        }
+      }
+
+      if (status === 'active') {
+        whereSql += " AND b.status NOT IN ('completed', 'cancelled', 'inspection_only')";
+      } else if (status === 'completed') {
+        whereSql += " AND b.status IN ('completed', 'inspection_only')";
+      } else if (status === 'cancelled') {
+        whereSql += " AND b.status = 'cancelled'";
+      }
+
       const res = await query(`
         SELECT 
           b.*, 
@@ -1136,10 +1156,10 @@ async function bookingsRoutes(fastify, options) {
         FROM bookings b
         LEFT JOIN services s ON b.service_id = s.id
         LEFT JOIN technicians t ON b.technician_id = t.id
-        WHERE b.status != 'created'
+        ${whereSql}
         ORDER BY b.created_at DESC
-        LIMIT 30
-      `);
+        LIMIT 50
+      `, params);
 
       if (res.rows.length === 0) {
         return { success: true, count: 0, bookings: [] };
