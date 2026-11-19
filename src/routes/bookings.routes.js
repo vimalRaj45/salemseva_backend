@@ -402,11 +402,17 @@ async function bookingsRoutes(fastify, options) {
       const requestedTechId = req.body?.requestedTechnicianId || req.body?.requested_technician_id || null;
       let assignedTechId = null;
 
+      const walletDeduction = Math.max(0, parseFloat(req.body?.walletDeduction || req.body?.advance_wallet_deduction || 0));
+      const visitFeePaidReq = Math.max(0, parseFloat(req.body?.visitFeePaid !== undefined ? req.body.visitFeePaid : (finalAmount - walletDeduction)));
+
       const isPaidUpfront = Boolean(
         finalAmount <= 0 ||
+        walletDeduction >= visitFee ||
         req.body?.paymentMethod === 'coupon_free' ||
+        req.body?.paymentMethod === 'wallet_full' ||
         req.body?.paymentStatus === 'paid' ||
-        (parseFloat(req.body?.visitFeePaid || 0) >= finalAmount && finalAmount > 0)
+        ((visitFeePaidReq + walletDeduction + couponDiscount) >= visitFee) ||
+        (visitFeePaidReq >= finalAmount && finalAmount > 0)
       );
 
       let initialStatus = 'created';
@@ -512,8 +518,8 @@ async function bookingsRoutes(fastify, options) {
           is_urgent_dispatch, urgent_surge_fee, visit_fee,
           coupon_discount, coupon_code, final_amount, status, technician_id, scheduled_slot,
           customer_otp, booking_type, voice_note_url,
-          advance_amount_paid, advance_coupon_discount
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+          advance_amount_paid, advance_coupon_discount, advance_wallet_deduction
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
         RETURNING *;
       `;
 
@@ -540,8 +546,9 @@ async function bookingsRoutes(fastify, options) {
         customerOtp,
         'scheduled',
         finalVoiceNote,
-        isPaidUpfront ? (finalAmount <= 0 ? 0.00 : finalAmount) : 0.00, // advance_amount_paid (strictly 0.00 until payment confirmed)
-        couponDiscount // advance_coupon_discount (actual discount applied at booking)
+        isPaidUpfront ? visitFeePaidReq : 0.00, // advance_amount_paid
+        couponDiscount, // advance_coupon_discount
+        walletDeduction // advance_wallet_deduction
       ]);
 
       // Audit Log

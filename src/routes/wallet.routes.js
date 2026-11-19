@@ -173,10 +173,10 @@ async function walletRoutes(fastify, options) {
     }
   });
 
-  // POST /wallet/customer/debit - Debit wallet at checkout with 20% burn cap
+  // POST /wallet/customer/debit - Debit wallet at checkout or advance booking
   fastify.post('/wallet/customer/debit', async (req, reply) => {
     try {
-      const { phone = '', amount = 0, bookingId = '' } = req.body || {};
+      const { phone = '', amount = 0, bookingId = '', category = 'CHECKOUT_BURN', description = '' } = req.body || {};
       if (!phone || !phone.trim()) {
         return reply.status(400).send({ success: false, error: 'Customer phone is required' });
       }
@@ -218,6 +218,16 @@ async function walletRoutes(fastify, options) {
         RETURNING wallet_balance
       `, [actualDebit, user.id]);
 
+      // Record in persistent wallet_transactions ledger
+      try {
+        await query(`
+          INSERT INTO wallet_transactions (user_id, amount, type, description, created_at)
+          VALUES ($1, $2, 'DEBIT', $3, NOW())
+        `, [user.id, actualDebit, description || `Redeemed on Booking #${bookingId}`]);
+      } catch (txErr) {
+        fastify.log.warn('Wallet transaction write note: ' + txErr.message);
+      }
+
       return {
         success: true,
         newBalance: parseFloat(updatedUserRes.rows[0].wallet_balance),
@@ -227,8 +237,8 @@ async function walletRoutes(fastify, options) {
           title: `Redeemed on Booking #${bookingId}`,
           amount: actualDebit,
           type: 'DEBIT',
-          category: 'CHECKOUT_BURN',
-          description: `20% Burn Cap Applied for Service #${bookingId}`,
+          category,
+          description: description || `Applied for Booking #${bookingId}`,
           timestamp: new Date().toISOString()
         }
       };
