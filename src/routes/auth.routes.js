@@ -702,7 +702,7 @@ async function authRoutes(fastify, options) {
         referralCode: refLookup.referralCode,
         message: isTech
           ? `Valid partner referral from ${refLookup.referrerName}! Linked to your onboarding.`
-          : `Valid referral from ${refLookup.referrerName}! Flat ₹50 waiver unlocked.`
+          : `Valid referral from ${refLookup.referrerName}! Referral linked to your account.`
       };
     } catch (err) {
       fastify.log.error(err);

@@ -62,6 +62,28 @@ async function walletRoutes(fastify, options) {
       const isReferralEligible = Boolean(user.referred_by || friendsCompleted > 0);
       const currentBalance = parseFloat(user.wallet_balance || 0);
 
+      // Fetch persistent transaction ledger for customer
+      let transactions = [];
+      let creditsEarnedFromReferrals = 0;
+      try {
+        const txRes = await query(`
+          SELECT id, title, amount, type, category, description, created_at as timestamp
+          FROM wallet_transactions
+          WHERE user_id = $1 
+             OR (user_phone IS NOT NULL AND RIGHT(REGEXP_REPLACE(user_phone, '\\D', '', 'g'), 10) = $2)
+          ORDER BY created_at DESC
+          LIMIT 25
+        `, [user.id, cleanPhone]);
+        transactions = txRes.rows || [];
+
+        const refCredits = transactions
+          .filter(t => t.type === 'CREDIT' && (t.category === 'REFERRAL_REWARD' || t.category === 'REFERRAL_DISCOUNT'))
+          .reduce((sum, t) => sum + parseFloat(t.amount || 0), 0);
+        creditsEarnedFromReferrals = refCredits > 0 ? refCredits : (friendsCompleted * 50);
+      } catch (tErr) {
+        creditsEarnedFromReferrals = friendsCompleted * 50;
+      }
+
       return {
         success: true,
         customerPhone: user.phone,
@@ -75,8 +97,8 @@ async function walletRoutes(fastify, options) {
         referredBy: user.referred_by || null,
         friendsInvited: friendsCompleted,
         friendsCompleted,
-        creditsEarnedFromReferrals: 0,
-        transactions: []
+        creditsEarnedFromReferrals,
+        transactions
       };
     } catch (err) {
       fastify.log.error(err);
@@ -235,16 +257,44 @@ async function walletRoutes(fastify, options) {
       // Dynamic referral waiver coupon (REFERWAIVER50)
       let rewardAmt = 50.00;
       try {
-        const sRes = await query(`SELECT referee_discount_amount FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+        const sRes = await query(`SELECT referee_discount_amount, customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
         if (sRes.rows.length > 0) {
-          rewardAmt = parseFloat(sRes.rows[0].referee_discount_amount || 50);
+          rewardAmt = parseFloat(sRes.rows[0].customer_referral_credits || sRes.rows[0].referee_discount_amount || 50);
         }
       } catch (sErr) {}
 
+      // Credit wallet balance in users table directly
+      const updateRes = await query(`
+        UPDATE users 
+        SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($2, '\\D', '', 'g'), 10)
+        RETURNING id, phone, wallet_balance
+      `, [rewardAmt, cleanPhone]);
+
+      let newBal = rewardAmt;
+      if (updateRes.rows.length > 0) {
+        newBal = parseFloat(updateRes.rows[0].wallet_balance || rewardAmt);
+        try {
+          await query(`
+            INSERT INTO wallet_transactions (id, user_id, user_phone, title, amount, type, category, description, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'CREDIT', 'REFERRAL_REWARD', $6, CURRENT_TIMESTAMP)
+          `, [
+            `tx_sim_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+            updateRes.rows[0].id,
+            updateRes.rows[0].phone,
+            `Referral: ${friendName} (1st Service Done)`,
+            rewardAmt,
+            `Friend ${friendName} completed service in ${locality} (+₹${rewardAmt.toFixed(0)} cash discount for next booking)`
+          ]);
+        } catch (_) {}
+      }
+
       return {
         success: true,
-        message: `Friend ${friendName} completed service! Coupon REFERWAIVER50 unlocked for your next booking.`,
+        message: `Friend ${friendName} completed service! ₹${rewardAmt.toFixed(0)} cash discount added to your wallet for your next booking.`,
         rewardAmount: rewardAmt,
+        newBalance: newBal,
         couponCode: 'REFERWAIVER50',
         discountValue: rewardAmt
       };
@@ -257,7 +307,7 @@ async function walletRoutes(fastify, options) {
   fastify.post('/wallet/customer/simulate-referral', simulateReferralHandler);
   fastify.post('/wallet/simulate-referral', simulateReferralHandler);
 
-  // POST /wallet/customer/apply-referral - Link friend referral code to customer account to unlock REFERWAIVER50
+  // POST /wallet/customer/apply-referral - Link friend referral code to customer account to unlock cash discount and REFERWAIVER50
   fastify.post('/wallet/customer/apply-referral', async (req, reply) => {
     try {
       const { phone = '', referralCode = '', customerId = null } = req.body || {};
@@ -271,7 +321,7 @@ async function walletRoutes(fastify, options) {
       }
 
       const userRes = await query(`
-        SELECT id, phone, referral_code, referred_by FROM users 
+        SELECT id, full_name, phone, referral_code, referred_by FROM users 
         WHERE ($1::text IS NOT NULL AND id::text = $1)
            OR ($2::text <> '' AND RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $2)
         LIMIT 1
@@ -310,12 +360,77 @@ async function walletRoutes(fastify, options) {
 
       const effectiveReferredBy = referrerRes.rows[0].referral_code || referrerRes.rows[0].phone;
 
-      await query(`UPDATE users SET referred_by = $1 WHERE id = $2`, [effectiveReferredBy, u.id]);
+      // Fetch reward settings from platform_settings
+      let refereeDiscount = 50.00;
+      let referrerReward = 50.00;
+      try {
+        const sRes = await query(`SELECT referee_discount_amount, customer_referral_credits FROM platform_settings WHERE id = 'reward_settings' LIMIT 1`);
+        if (sRes.rows.length > 0) {
+          refereeDiscount = parseFloat(sRes.rows[0].referee_discount_amount || 50);
+          referrerReward = parseFloat(sRes.rows[0].customer_referral_credits || 50);
+        }
+      } catch (_) {}
+
+      // 1. Update referee: link referred_by AND credit referral cash discount to wallet_balance
+      const updateRefereeRes = await query(`
+        UPDATE users 
+        SET referred_by = $1,
+            wallet_balance = COALESCE(wallet_balance, 0) + $2,
+            updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $3
+        RETURNING id, phone, wallet_balance
+      `, [effectiveReferredBy, refereeDiscount, u.id]);
+
+      const newRefereeBalance = parseFloat(updateRefereeRes.rows[0]?.wallet_balance || refereeDiscount);
+
+      // 2. Record referee welcome transaction in wallet_transactions
+      try {
+        await query(`
+          INSERT INTO wallet_transactions (id, user_id, user_phone, title, amount, type, category, description, created_at)
+          VALUES ($1, $2, $3, $4, $5, 'CREDIT', 'REFERRAL_DISCOUNT', $6, CURRENT_TIMESTAMP)
+        `, [
+          `tx_referee_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+          u.id,
+          u.phone,
+          'Referral Welcome Cash Discount',
+          refereeDiscount,
+          'Referral cash discount credited for your next booking'
+        ]);
+      } catch (txErr) {
+        console.warn('Wallet referee transaction log note:', txErr);
+      }
+
+      // 3. Update referrer: credit referrer reward to wallet_balance
+      const referrerUser = referrerRes.rows[0];
+      try {
+        await query(`
+          UPDATE users 
+          SET wallet_balance = COALESCE(wallet_balance, 0) + $1,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = $2
+        `, [referrerReward, referrerUser.id]);
+
+        await query(`
+          INSERT INTO wallet_transactions (id, user_id, user_phone, title, amount, type, category, description, created_at)
+          VALUES ($1, $2, $3, $4, $5, 'CREDIT', 'REFERRAL_REWARD', $6, CURRENT_TIMESTAMP)
+        `, [
+          `tx_referrer_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+          referrerUser.id,
+          referrerUser.phone,
+          'Friend Referral Cash Reward',
+          referrerReward,
+          `Cash reward earned for referring ${u.full_name || 'a friend'}`
+        ]);
+      } catch (refErr) {
+        console.warn('Referrer reward credit note:', refErr);
+      }
 
       return {
         success: true,
-        message: 'Referral applied successfully! REFERWAIVER50 flat ₹50 waiver unlocked for your booking.',
+        message: `Referral applied! ₹${refereeDiscount.toFixed(0)} cash discount credited to your wallet for your next booking.`,
         referredBy: effectiveReferredBy,
+        newBalance: newRefereeBalance,
+        discountAmount: refereeDiscount,
         couponUnlocked: 'REFERWAIVER50'
       };
     } catch (err) {
