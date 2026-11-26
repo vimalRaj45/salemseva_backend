@@ -1806,11 +1806,59 @@ async function adminRoutes(fastify, options) {
   fastify.post('/admin/bookings/cancel-order', handleCancelBooking);
   fastify.post('/admin/bookings/:id/cancel', handleCancelBooking);
 
-  // 10a-2. Admin: Approve Customer or Technician Reschedule Request
+  // 10a-1. Admin: List Pending Reschedule Requests with Live Technician Capacity & Availability Metrics
+  fastify.get('/admin/reschedule-requests', async (req, reply) => {
+    try {
+      const reqRes = await query(
+        `SELECT b.*, t.full_name AS technician_name, t.phone AS technician_phone,
+                t.trade_type AS technician_trade, COALESCE(t.daily_job_capacity, 4) AS technician_capacity
+         FROM bookings b
+         LEFT JOIN technicians t ON b.technician_id = t.id
+         WHERE b.reschedule_status IN ('pending_admin_approval', 'pending_tech_approval', 'pending_tech_accept')
+           AND b.status NOT IN ('completed', 'cancelled', 'refunded')
+         ORDER BY b.last_rescheduled_at DESC NULLS LAST, b.created_at DESC`
+      );
+
+      const techRes = await query(
+        `SELECT t.id, t.full_name, t.phone, t.trade_type, t.is_online, t.is_verified,
+                COALESCE(t.rating, 4.8) AS rating,
+                COALESCE(t.daily_job_capacity, 4) AS daily_job_capacity,
+                (SELECT COUNT(*)::int FROM bookings b
+                 WHERE b.technician_id = t.id
+                   AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+                   AND b.status NOT IN ('cancelled', 'refunded', 'completed')) AS active_jobs_today
+         FROM technicians t
+         WHERE t.is_verified = true
+         ORDER BY t.is_online DESC, active_jobs_today ASC, t.full_name ASC`
+      );
+
+      const technicians = techRes.rows.map((t) => ({
+        ...t,
+        remaining_slots: Math.max(0, Number(t.daily_job_capacity || 4) - Number(t.active_jobs_today || 0))
+      }));
+
+      return {
+        success: true,
+        requests: reqRes.rows,
+        technicians
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 10a-2. Admin: Approve Customer or Technician Reschedule Request (with Capacity Check & Optional Tech Reassignment)
   fastify.post('/admin/bookings/:id/approve-reschedule', async (req, reply) => {
     try {
       const { id } = req.params;
-      const { adminUser = 'Salem Central Operations Desk', notes } = req.body || {};
+      const {
+        adminUser = 'Salem Central Operations Desk',
+        notes,
+        technicianId = null,
+        requireTechAccept = true,
+        force = false
+      } = req.body || {};
       const actualAdmin = extractAdminActor(adminUser, 'Salem Central Operations Desk');
 
       const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
@@ -1820,20 +1868,48 @@ async function adminRoutes(fastify, options) {
 
       const b = bRes.rows[0];
       const targetSlot = b.proposed_rescheduled_slot || b.scheduled_slot;
+      const targetTechId = technicianId ? Number(technicianId) : b.technician_id;
+
+      // Enforce technician daily job capacity limit before approving/assigning
+      if (targetTechId && !force) {
+        const tCheck = await query(
+          `SELECT t.id, t.full_name, COALESCE(t.daily_job_capacity, 4) AS capacity,
+                  (SELECT COUNT(*)::int FROM bookings bk
+                   WHERE bk.technician_id = t.id
+                     AND bk.id <> $2
+                     AND (bk.created_at >= CURRENT_DATE OR bk.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
+                     AND bk.status NOT IN ('cancelled', 'refunded', 'completed')) AS today_count
+           FROM technicians t WHERE t.id = $1`,
+          [targetTechId, id]
+        );
+        if (tCheck.rows.length > 0) {
+          const { full_name, capacity, today_count } = tCheck.rows[0];
+          if (today_count >= capacity) {
+            return reply.status(409).send({
+              success: false,
+              code: 'DAILY_CAPACITY_REACHED',
+              error: `${full_name} has reached their daily job limit (${today_count}/${capacity} active jobs). Choose another available technician or override.`
+            });
+          }
+        }
+      }
+
+      const nextRescheduleStatus = (targetTechId && requireTechAccept) ? 'pending_tech_accept' : 'approved';
 
       const updateRes = await query(
         `UPDATE bookings
          SET scheduled_slot = $1,
+             technician_id = COALESCE($2, technician_id),
              proposed_rescheduled_slot = NULL,
              proposed_rescheduled_by = NULL,
-             reschedule_status = 'approved',
+             reschedule_status = $3,
              reschedule_count = COALESCE(reschedule_count, 0) + 1,
-             last_rescheduled_by = $2,
+             last_rescheduled_by = $4,
              last_rescheduled_at = CURRENT_TIMESTAMP,
-             reschedule_reason = $3
-         WHERE id = $4
+             reschedule_reason = $5
+         WHERE id = $6
          RETURNING *`,
-        [targetSlot, actualAdmin, notes || 'Approved by Central Operations Admin', id]
+        [targetSlot, targetTechId, nextRescheduleStatus, actualAdmin, notes || 'Approved by Central Operations Admin', id]
       );
 
       try {
@@ -1845,13 +1921,40 @@ async function adminRoutes(fastify, options) {
         await query(
           `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
            VALUES ($1, 'RESCHEDULE_APPROVED_BY_ADMIN', $2, 'admin', $3)`,
-          [id, actualAdmin, JSON.stringify({ oldSlot: b.scheduled_slot, newSlot: targetSlot, notes })]
+          [id, actualAdmin, JSON.stringify({ oldSlot: b.scheduled_slot, newSlot: targetSlot, targetTechId, nextRescheduleStatus, notes })]
         );
       } catch (_) { }
 
+      try {
+        pushService.sendPushToBookingParty({
+          bookingId: id,
+          targetRole: 'customer',
+          payload: {
+            title: 'Reschedule Approved',
+            body: `Your appointment is updated to ${targetSlot}.`,
+            type: 'order_status',
+            url: `/track?bookingId=${id}`
+          }
+        });
+        if (targetTechId) {
+          pushService.sendPushToBookingParty({
+            bookingId: id,
+            targetRole: 'technician',
+            payload: {
+              title: nextRescheduleStatus === 'pending_tech_accept' ? 'Rescheduled Slot — Confirm Now' : 'Job Rescheduled by Admin',
+              body: `Booking #${id} moved to ${targetSlot}. Open Partner Duty to confirm.`,
+              type: 'new_job',
+              url: '/partner'
+            }
+          });
+        }
+      } catch (_) {}
+
       return {
         success: true,
-        message: 'Reschedule request approved by Central Operations.',
+        message: nextRescheduleStatus === 'pending_tech_accept'
+          ? 'Reschedule approved and sent to technician for acceptance.'
+          : 'Reschedule request approved by Central Operations.',
         booking: updateRes.rows[0]
       };
     } catch (err) {
@@ -1893,6 +1996,20 @@ async function adminRoutes(fastify, options) {
           [id, actualAdmin, JSON.stringify({ retainedSlot: b.scheduled_slot, reason })]
         );
       } catch (_) { }
+
+      try {
+        const targetRole = b.proposed_rescheduled_by === 'technician' ? 'technician' : 'customer';
+        pushService.sendPushToBookingParty({
+          bookingId: id,
+          targetRole,
+          payload: {
+            title: 'Reschedule Request Declined',
+            body: reason || `Original slot (${b.scheduled_slot || 'current'}) has been retained.`,
+            type: 'order_status',
+            url: targetRole === 'technician' ? '/partner' : `/track?bookingId=${id}`
+          }
+        });
+      } catch (_) {}
 
       return {
         success: true,

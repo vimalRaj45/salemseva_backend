@@ -906,7 +906,7 @@ async function bookingsRoutes(fastify, options) {
           `UPDATE bookings 
            SET proposed_rescheduled_slot = $1,
                proposed_rescheduled_by = 'customer',
-               reschedule_status = 'pending_tech_approval',
+               reschedule_status = 'pending_admin_approval',
                reschedule_reason = $2,
                last_rescheduled_at = CURRENT_TIMESTAMP
            WHERE id = $3 
@@ -918,7 +918,7 @@ async function bookingsRoutes(fastify, options) {
           await query(
             `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
              VALUES ($1, $2, $3, $4, $5)`,
-            [id, b.scheduled_slot || 'Unassigned', scheduledSlot, 'customer_pending_approval', reason || 'Customer requested revised slot awaiting tech/admin approval']
+            [id, b.scheduled_slot || 'Unassigned', scheduledSlot, 'customer_pending_approval', reason || 'Customer requested revised slot awaiting admin approval']
           );
           await query(
             `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
@@ -929,10 +929,23 @@ async function bookingsRoutes(fastify, options) {
           fastify.log.warn('Failed to insert reschedule log: ' + logErr.message);
         }
 
+        try {
+          pushService.sendPushToBookingParty({
+            bookingId: id,
+            targetRole: 'technician',
+            payload: {
+              title: 'Customer Requested Reschedule',
+              body: `New requested slot: ${scheduledSlot}. Pending Admin approval.`,
+              type: 'order_status',
+              url: '/partner'
+            }
+          });
+        } catch (_) {}
+
         return {
           success: true,
           requiresApproval: true,
-          message: 'Reschedule request submitted for approval by your assigned technician or central operations desk.',
+          message: 'Reschedule request sent to Admin Operations for approval and technician availability check.',
           booking: updateRes.rows[0]
         };
       }
@@ -968,6 +981,77 @@ async function bookingsRoutes(fastify, options) {
         success: true,
         requiresApproval: false,
         message: 'Appointment slot rescheduled successfully without additional fee',
+        booking: updateRes.rows[0]
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 3a. Technician Propose Reschedule Slot (Routed to Admin Operations for Approval & Capacity Check)
+  fastify.post('/bookings/:id/propose-slot', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const proposedSlot = (req.body?.proposedSlot || req.body?.scheduledSlot || req.body?.newSlot || '').trim();
+      const reason = req.body?.reason || 'Technician requested schedule adjustment';
+
+      if (!proposedSlot) {
+        return reply.status(400).send({ success: false, error: 'proposedSlot is required' });
+      }
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const b = bRes.rows[0];
+
+      if (['completed', 'cancelled', 'refunded'].includes(b.status)) {
+        return reply.status(400).send({ success: false, error: 'Cannot reschedule a closed booking' });
+      }
+
+      const updateRes = await query(
+        `UPDATE bookings
+         SET proposed_rescheduled_slot = $1,
+             proposed_rescheduled_by = 'technician',
+             reschedule_status = 'pending_admin_approval',
+             reschedule_reason = $2,
+             last_rescheduled_at = CURRENT_TIMESTAMP
+         WHERE id = $3
+         RETURNING *`,
+        [proposedSlot, reason, id]
+      );
+
+      try {
+        await query(
+          `INSERT INTO booking_reschedule_logs (booking_id, old_slot, new_slot, rescheduled_by, reason)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [id, b.scheduled_slot || 'Unassigned', proposedSlot, 'technician_pending_approval', reason]
+        );
+        await query(
+          `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+           VALUES ($1, 'RESCHEDULE_REQUESTED_BY_TECH', $2, 'technician', $3)`,
+          [id, String(b.technician_id || 'technician'), JSON.stringify({ oldSlot: b.scheduled_slot, proposedSlot, reason })]
+        );
+      } catch (_) {}
+
+      try {
+        pushService.sendPushToBookingParty({
+          bookingId: id,
+          targetRole: 'customer',
+          payload: {
+            title: 'Reschedule Request Sent to Ops',
+            body: `Your specialist proposed ${proposedSlot}. Operations is reviewing availability.`,
+            type: 'order_status',
+            url: `/track?bookingId=${id}`
+          }
+        });
+      } catch (_) {}
+
+      return {
+        success: true,
+        requiresApproval: true,
+        message: 'Proposed slot sent to Central Operations Admin for approval.',
         booking: updateRes.rows[0]
       };
     } catch (err) {

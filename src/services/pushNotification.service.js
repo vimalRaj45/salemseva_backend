@@ -11,6 +11,106 @@ class PushNotificationService {
   constructor() {
     this.publicKey = vapidPublicKey;
     this.sseClients = new Set();
+    this.tableReady = false;
+  }
+
+  async ensureNotificationsTable() {
+    if (this.tableReady) return;
+    try {
+      await query(`
+        CREATE TABLE IF NOT EXISTS user_notifications (
+          id SERIAL PRIMARY KEY,
+          user_phone VARCHAR(30) DEFAULT '',
+          user_role VARCHAR(20) DEFAULT 'customer',
+          booking_id VARCHAR(50),
+          title TEXT NOT NULL,
+          body TEXT DEFAULT '',
+          notif_type VARCHAR(40) DEFAULT 'info',
+          target_url TEXT DEFAULT '/',
+          is_read BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_notifications_phone_created
+          ON user_notifications (user_phone, created_at DESC);
+      `);
+      this.tableReady = true;
+    } catch (_) {}
+  }
+
+  async saveNotificationRecord({ phone = '', role = 'customer', bookingId = null, payload = {} }) {
+    try {
+      await this.ensureNotificationsTable();
+      const normalizedPhone = cleanPhone(phone);
+      const title = payload.title || 'Shazu One Update';
+      const body = payload.body || '';
+      const notifType = payload.type || 'info';
+      const targetUrl = payload.url || (bookingId ? `/track?bookingId=${bookingId}` : '/');
+
+      await query(
+        `INSERT INTO user_notifications (user_phone, user_role, booking_id, title, body, notif_type, target_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [normalizedPhone, role || 'customer', bookingId ? String(bookingId) : null, title, body, notifType, targetUrl]
+      );
+    } catch (_) {}
+  }
+
+  async getNotificationHistory({ phone = '', role = '', limit = 50 }) {
+    await this.ensureNotificationsTable();
+    const normalizedPhone = cleanPhone(phone);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+
+    const conditions = [];
+    const params = [];
+    if (normalizedPhone) {
+      params.push(normalizedPhone);
+      conditions.push(`(user_phone = $${params.length} OR user_phone LIKE '%' || $${params.length})`);
+    }
+    if (role) {
+      params.push(String(role).toLowerCase());
+      conditions.push(`(user_role = $${params.length} OR user_role IS NULL)`);
+    }
+
+    if (conditions.length === 0) {
+      return { notifications: [], unreadCount: 0 };
+    }
+
+    const whereClause = conditions.join(' AND ');
+    const listRes = await query(
+      `SELECT id, user_phone, user_role, booking_id, title, body, notif_type, target_url, is_read, created_at
+       FROM user_notifications
+       WHERE ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT ${safeLimit}`,
+      params
+    );
+
+    const unreadRes = await query(
+      `SELECT COUNT(*)::int AS cnt FROM user_notifications WHERE ${whereClause} AND is_read = FALSE`,
+      params
+    );
+
+    return {
+      notifications: listRes.rows || [],
+      unreadCount: unreadRes.rows?.[0]?.cnt || 0
+    };
+  }
+
+  async markNotificationsRead({ id = null, phone = '', role = '', markAll = false }) {
+    await this.ensureNotificationsTable();
+    if (id) {
+      await query('UPDATE user_notifications SET is_read = TRUE WHERE id = $1', [id]);
+      return;
+    }
+    const normalizedPhone = cleanPhone(phone);
+    if (markAll && normalizedPhone) {
+      const params = [normalizedPhone];
+      let sql = `UPDATE user_notifications SET is_read = TRUE WHERE (user_phone = $1 OR user_phone LIKE '%' || $1)`;
+      if (role) {
+        params.push(String(role).toLowerCase());
+        sql += ` AND user_role = $2`;
+      }
+      await query(sql, params);
+    }
   }
 
   /**
@@ -138,6 +238,7 @@ class PushNotificationService {
     const normalizedPhone = cleanPhone(phone);
     if (!normalizedPhone) return [];
 
+    this.saveNotificationRecord({ phone: normalizedPhone, role: role || 'customer', bookingId: payload?.bookingId, payload });
     this.emitRealtime({ phone: normalizedPhone, role, bookingId: payload?.bookingId, payload });
 
     let sql = `

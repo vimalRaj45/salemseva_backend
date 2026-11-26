@@ -45,6 +45,28 @@ async function notificationsRoutes(fastify, options) {
     });
   });
 
+  // 0b. Get Notification History & Unread Count for Customer or Technician
+  fastify.get('/notifications/history', async (req, reply) => {
+    try {
+      const { phone = '', role = '', limit = 50 } = req.query || {};
+      const data = await pushService.getNotificationHistory({ phone, role, limit });
+      return { success: true, ...data };
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 0c. Mark Notification(s) as Read
+  fastify.post('/notifications/mark-read', async (req, reply) => {
+    try {
+      const { id = null, phone = '', role = '', markAll = false } = req.body || {};
+      await pushService.markNotificationsRead({ id, phone, role, markAll });
+      return { success: true };
+    } catch (err) {
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
   // 1. Get VAPID Public Key for Web Push Manager subscription
   fastify.get('/notifications/vapid-public-key', async (req, reply) => {
     return {

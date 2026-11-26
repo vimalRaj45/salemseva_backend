@@ -7,6 +7,7 @@ const { maskPhoneNumber, canDirectCall, HELPDESK_PHONE } = require('../utils/pri
 const { resolveTechnicianReferrer } = require('../services/referral.service');
 const { resolveLocalityCoords } = require('../utils/salemLocalities');
 const legalService = require('../services/legalAgreement.service');
+const pushService = require('../services/pushNotification.service');
 
 async function partnerRoutes(fastify, options) {
   // Ensure technician referral columns exist
@@ -2082,6 +2083,59 @@ async function partnerRoutes(fastify, options) {
           booking: updateRes.rows[0]
         };
       }
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // 14. Technician Accepts Admin-Approved Rescheduled Slot
+  fastify.post('/partner/bookings/:id/accept-reschedule', async (req, reply) => {
+    try {
+      const { id } = req.params;
+      const { technicianId } = req.body || {};
+
+      const bRes = await query('SELECT * FROM bookings WHERE id = $1', [id]);
+      if (bRes.rows.length === 0) {
+        return reply.status(404).send({ success: false, error: 'Booking not found' });
+      }
+      const b = bRes.rows[0];
+
+      const updateRes = await query(
+        `UPDATE bookings
+         SET reschedule_status = 'approved',
+             last_rescheduled_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [id]
+      );
+
+      try {
+        await query(
+          `INSERT INTO audit_logs (booking_id, event_type, actor_id, actor_type, metadata)
+           VALUES ($1, 'RESCHEDULE_CONFIRMED_BY_TECH', $2, 'technician', $3)`,
+          [id, String(technicianId || b.technician_id || 'technician'), JSON.stringify({ scheduledSlot: b.scheduled_slot })]
+        );
+      } catch (_) {}
+
+      try {
+        pushService.sendPushToBookingParty({
+          bookingId: id,
+          targetRole: 'customer',
+          payload: {
+            title: 'Specialist Confirmed New Time',
+            body: `Your specialist confirmed the rescheduled slot: ${b.scheduled_slot}.`,
+            type: 'order_status',
+            url: `/track?bookingId=${id}`
+          }
+        });
+      } catch (_) {}
+
+      return {
+        success: true,
+        message: 'Rescheduled slot confirmed.',
+        booking: updateRes.rows[0]
+      };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ success: false, error: err.message });
