@@ -1,6 +1,50 @@
 const pushService = require('../services/pushNotification.service');
 
 async function notificationsRoutes(fastify, options) {
+  // 0. Real-Time Server-Sent Events (SSE) stream for instant in-app push notifications
+  fastify.get('/notifications/stream', async (req, reply) => {
+    const { phone = '', role = '', bookingId = '' } = req.query || {};
+
+    reply.hijack();
+    const res = reply.raw;
+    const origin = req.headers.origin;
+    const headers = {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    };
+    if (origin) {
+      headers['Access-Control-Allow-Origin'] = origin;
+      headers['Vary'] = 'Origin';
+    } else {
+      headers['Access-Control-Allow-Origin'] = '*';
+    }
+
+    res.writeHead(200, headers);
+    res.write(': connected\n\n');
+
+    const unregister = pushService.registerSseClient({
+      res,
+      phone,
+      role,
+      bookingId: bookingId || null
+    });
+
+    const heartbeat = setInterval(() => {
+      try {
+        if (!res.writableEnded) {
+          res.write(': ping\n\n');
+        }
+      } catch (_) {}
+    }, 25000);
+
+    req.raw.on('close', () => {
+      clearInterval(heartbeat);
+      unregister();
+    });
+  });
+
   // 1. Get VAPID Public Key for Web Push Manager subscription
   fastify.get('/notifications/vapid-public-key', async (req, reply) => {
     return {

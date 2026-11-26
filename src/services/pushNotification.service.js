@@ -10,6 +10,62 @@ function cleanPhone(raw) {
 class PushNotificationService {
   constructor() {
     this.publicKey = vapidPublicKey;
+    this.sseClients = new Set();
+  }
+
+  /**
+   * Register an active SSE connection for real-time in-app notifications.
+   * Returns a cleanup function to invoke when the connection closes.
+   */
+  registerSseClient({ res, phone = '', role = '', bookingId = null }) {
+    const client = {
+      res,
+      phone: cleanPhone(phone),
+      role: role ? String(role).toLowerCase() : '',
+      bookingId: bookingId ? String(bookingId) : null
+    };
+    this.sseClients.add(client);
+    return () => {
+      this.sseClients.delete(client);
+    };
+  }
+
+  /**
+   * Deliver a notification payload immediately to matching connected SSE clients.
+   */
+  emitRealtime({ phone = '', role = '', bookingId = null, payload }) {
+    if (!this.sseClients.size || !payload) return 0;
+
+    const targetPhone = cleanPhone(phone);
+    const targetRole = role ? String(role).toLowerCase() : '';
+    const targetBookingId = bookingId ? String(bookingId) : null;
+    const message = `event: notification\ndata: ${JSON.stringify({
+      ...payload,
+      bookingId: payload.bookingId || targetBookingId || undefined,
+      timestamp: Date.now()
+    })}\n\n`;
+
+    let delivered = 0;
+    for (const client of this.sseClients) {
+      const phoneMatch = targetPhone && client.phone && client.phone === targetPhone;
+      const bookingMatch = targetBookingId && client.bookingId && client.bookingId === targetBookingId;
+      const roleMatch = !targetRole || !client.role || client.role === targetRole;
+
+      const shouldDeliver = phoneMatch || (bookingMatch && roleMatch) || (!targetPhone && !targetBookingId && targetRole && client.role === targetRole);
+      if (!shouldDeliver) continue;
+
+      try {
+        if (!client.res.writableEnded) {
+          client.res.write(message);
+          delivered += 1;
+        } else {
+          this.sseClients.delete(client);
+        }
+      } catch (_) {
+        this.sseClients.delete(client);
+      }
+    }
+    return delivered;
   }
 
   // 1. Save or update a client push subscription
@@ -82,6 +138,8 @@ class PushNotificationService {
     const normalizedPhone = cleanPhone(phone);
     if (!normalizedPhone) return [];
 
+    this.emitRealtime({ phone: normalizedPhone, role, bookingId: payload?.bookingId, payload });
+
     let sql = `
       SELECT * FROM push_subscriptions 
       WHERE (user_phone = $1 OR user_phone LIKE '%' || $1)
@@ -132,6 +190,8 @@ class PushNotificationService {
           },
           options
         });
+      } else {
+        this.emitRealtime({ role: targetRole, bookingId, payload: { bookingId, ...payload } });
       }
 
       // If no phone match was found, fallback to match by bookingId & targetRole
@@ -156,6 +216,7 @@ class PushNotificationService {
   // 6. Broadcast push to all active technicians
   async sendPushToRole({ role, payload, options = {} }) {
     try {
+      this.emitRealtime({ role, payload });
       const res = await query('SELECT * FROM push_subscriptions WHERE user_role = $1', [role]);
       if (!res.rows || res.rows.length === 0) return [];
       const promises = res.rows.map(sub => this.sendToSubscription(sub, payload, options));
