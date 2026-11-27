@@ -1105,7 +1105,7 @@ async function authRoutes(fastify, options) {
   // 5. WhatsApp Gateway Live Connection Status & QR Code (Admin / Diagnostics)
   fastify.get('/auth/whatsapp/status', async (req, reply) => {
     try {
-      const status = whatsAppGateway.getStatus();
+      const status = await whatsAppGateway.getStatus();
       return { success: true, ...status };
     } catch (e) {
       return reply.status(500).send({ success: false, error: e.message });

@@ -20,9 +20,34 @@ class WhatsAppGatewayService {
     this.authFolder = path.join(__dirname, '..', '..', 'baileys_auth_info');
     this.isInitializing = false;
     this.reconnectTimer = null;
+    this.remoteUrl = (process.env.WHATSAPP_GATEWAY_URL || '').replace(/\/$/, '');
+    this.remoteKey = process.env.WHATSAPP_GATEWAY_KEY || process.env.INTERNAL_API_KEY || '';
+  }
+
+  isRemoteMode() {
+    return Boolean(this.remoteUrl);
+  }
+
+  async _callRemote(endpoint, method = 'GET', body = null) {
+    const headers = { 'Accept': 'application/json' };
+    if (this.remoteKey) headers['x-gateway-key'] = this.remoteKey;
+    const opts = { method, headers };
+    if (body !== null) {
+      headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(`${this.remoteUrl}${endpoint}`, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Remote WhatsApp Gateway error (${res.status})`);
+    }
+    return data;
   }
 
   async initialize() {
+    if (this.isRemoteMode()) {
+      return;
+    }
     if (this.isInitializing || this.connectionStatus === 'connected') {
       return;
     }
@@ -126,6 +151,9 @@ class WhatsAppGatewayService {
   }
 
   getStatus() {
+    if (this.isRemoteMode()) {
+      return this._callRemote('/status', 'GET');
+    }
     return {
       status: this.connectionStatus,
       isConnected: this.connectionStatus === 'connected',
@@ -137,6 +165,9 @@ class WhatsAppGatewayService {
   }
 
   async requestPairingCode(rawPhone) {
+    if (this.isRemoteMode()) {
+      return this._callRemote('/pairing-code', 'POST', { phone: rawPhone });
+    }
     if (!this.sock) {
       await this.initialize();
     }
@@ -160,6 +191,9 @@ class WhatsAppGatewayService {
   }
 
   async logoutAndReset() {
+    if (this.isRemoteMode()) {
+      return this._callRemote('/disconnect', 'POST', {});
+    }
     try {
       if (this.sock) {
         await this.sock.logout().catch(() => {});
@@ -191,6 +225,9 @@ class WhatsAppGatewayService {
   }
 
   async sendOtpMessage(rawPhone, otpCode, purpose = 'verification') {
+    if (this.isRemoteMode()) {
+      return this._callRemote('/send-otp', 'POST', { phone: rawPhone, otpCode, purpose });
+    }
     const cleanDigits = (rawPhone || '').replace(/\D/g, '');
     const clean10 = cleanDigits.slice(-10);
 
@@ -241,9 +278,11 @@ class WhatsAppGatewayService {
 
 const whatsAppGateway = new WhatsAppGatewayService();
 
-// Auto-initialize WhatsApp gateway on service load
-whatsAppGateway.initialize().catch((err) => {
-  console.warn('[WhatsApp Gateway] Auto-init deferred:', err.message);
-});
+// Auto-initialize WhatsApp gateway on service load (skipped when proxying to remote EC2 gateway)
+if (!whatsAppGateway.isRemoteMode()) {
+  whatsAppGateway.initialize().catch((err) => {
+    console.warn('[WhatsApp Gateway] Auto-init deferred:', err.message);
+  });
+}
 
 module.exports = whatsAppGateway;

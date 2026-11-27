@@ -263,7 +263,7 @@ async function servicesRoutes(fastify, options) {
         onlineTechnicians,
         isTemporarilyClosed: false,
         totalDailyCapacity,
-        dailyCapacityPerTech,
+        dailyCapacityPerTech: requestedTech ? totalDailyCapacity : Math.round(totalDailyCapacity / Math.max(1, totalTechnicians)),
         coveredLocalities: uniqueCoveredLocalities,
         isLocalityCovered,
         localityNotice: !isLocalityCovered ? {
@@ -512,7 +512,10 @@ async function servicesRoutes(fastify, options) {
         return reply.status(400).send({ success: false, error: 'Valid visitFee is required' });
       }
 
-      const numericFee = Math.max(0, parseFloat(rawFee));
+      const numericFee = parseFloat(rawFee);
+      if (numericFee < 0) {
+        return reply.status(400).send({ success: false, error: 'visitFee cannot be negative' });
+      }
 
       const updateRes = await query(`
         UPDATE services 

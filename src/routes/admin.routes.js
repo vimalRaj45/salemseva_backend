@@ -279,21 +279,21 @@ async function adminRoutes(fastify, options) {
 
       let res = await query(`
         UPDATE users 
-        SET is_blocked = $1,
-            block_reason = CASE WHEN $1 = TRUE THEN $2 ELSE NULL END,
-            blocked_at = CASE WHEN $1 = TRUE THEN NOW() ELSE NULL END
-        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($3, '\\D', '', 'g'), 10)
+        SET is_blocked = $1::boolean,
+            block_reason = CASE WHEN $1::boolean = TRUE THEN $2::text ELSE NULL END,
+            blocked_at = CASE WHEN $1::boolean = TRUE THEN NOW() ELSE NULL END
+        WHERE RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = RIGHT(REGEXP_REPLACE($3::text, '\\D', '', 'g'), 10)
         RETURNING *
-      `, [isBlocked, reason || 'Administrative block by Shazu One Central Operations', cleanPhone]);
+      `, [Boolean(isBlocked), reason || 'Administrative block by Shazu One Central Operations', cleanPhone]);
 
       if (res.rows.length === 0) {
         res = await query(`
           INSERT INTO users (phone, full_name, role, is_blocked, block_reason, blocked_at)
-          VALUES ($1, 'Customer ' || RIGHT($1, 4), 'customer', $2, $3, NOW())
+          VALUES ($1::text, 'Customer ' || RIGHT($1::text, 4), 'customer', $2::boolean, $3::text, NOW())
           ON CONFLICT (phone) DO UPDATE 
           SET is_blocked = EXCLUDED.is_blocked, block_reason = EXCLUDED.block_reason, blocked_at = EXCLUDED.blocked_at
           RETURNING *
-        `, [cleanPhone, isBlocked, reason]);
+        `, [cleanPhone, Boolean(isBlocked), reason]);
       }
 
       const user = res.rows[0];
@@ -1193,7 +1193,7 @@ async function adminRoutes(fastify, options) {
         RETURNING id
       `, [cleanUtr, bookingId]);
 
-      if (pRes.rowCount === 0) {
+      if (pRes.rowCount === 0 && originalPaid > 0) {
         await query(`
           INSERT INTO payments (
             booking_id, amount_total, pg_fee, tech_payout_amount, platform_commission, status, payment_method, payout_utr, settled_at
@@ -1207,7 +1207,7 @@ async function adminRoutes(fastify, options) {
       `, [bookingId, JSON.stringify({
         refundUtr: cleanUtr,
         refundAmount: finalRefundAmt,
-        platformFeeRetained: platformFee,
+        platformFeeRetained: 0,
         notes: refundNotes || 'Customer refund processed via UPI/Netbanking'
       })]);
 
@@ -1811,24 +1811,26 @@ async function adminRoutes(fastify, options) {
     try {
       const reqRes = await query(
         `SELECT b.*, t.full_name AS technician_name, t.phone AS technician_phone,
-                t.trade_type AS technician_trade, COALESCE(t.daily_job_capacity, 4) AS technician_capacity
+                t.primary_trade AS technician_trade, COALESCE(t.daily_job_capacity, 4) AS technician_capacity
          FROM bookings b
          LEFT JOIN technicians t ON b.technician_id = t.id
          WHERE b.reschedule_status IN ('pending_admin_approval', 'pending_tech_approval', 'pending_tech_accept')
-           AND b.status NOT IN ('completed', 'cancelled', 'refunded')
+           AND b.status NOT IN ('completed', 'cancelled')
+           AND COALESCE(b.refund_status, '') <> 'REFUNDED'
          ORDER BY b.last_rescheduled_at DESC NULLS LAST, b.created_at DESC`
       );
 
       const techRes = await query(
-        `SELECT t.id, t.full_name, t.phone, t.trade_type, t.is_online, t.is_verified,
-                COALESCE(t.rating, 4.8) AS rating,
+        `SELECT t.id, t.full_name, t.phone, t.primary_trade AS trade_type, t.is_online, t.is_kyc_verified AS is_verified,
+                COALESCE(t.rating_avg, 4.8) AS rating,
                 COALESCE(t.daily_job_capacity, 4) AS daily_job_capacity,
                 (SELECT COUNT(*)::int FROM bookings b
                  WHERE b.technician_id = t.id
                    AND (b.created_at >= CURRENT_DATE OR b.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
-                   AND b.status NOT IN ('cancelled', 'refunded', 'completed')) AS active_jobs_today
+                   AND b.status NOT IN ('cancelled', 'completed')
+                   AND COALESCE(b.refund_status, '') <> 'REFUNDED') AS active_jobs_today
          FROM technicians t
-         WHERE t.is_verified = true
+         WHERE t.is_kyc_verified = true
          ORDER BY t.is_online DESC, active_jobs_today ASC, t.full_name ASC`
       );
 
@@ -1878,7 +1880,8 @@ async function adminRoutes(fastify, options) {
                    WHERE bk.technician_id = t.id
                      AND bk.id <> $2
                      AND (bk.created_at >= CURRENT_DATE OR bk.scheduled_slot LIKE '%' || TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') || '%')
-                     AND bk.status NOT IN ('cancelled', 'refunded', 'completed')) AS today_count
+                     AND bk.status NOT IN ('cancelled', 'completed')
+                     AND COALESCE(bk.refund_status, '') <> 'REFUNDED') AS today_count
            FROM technicians t WHERE t.id = $1`,
           [targetTechId, id]
         );
@@ -2364,6 +2367,12 @@ async function adminRoutes(fastify, options) {
   // Truncate full system data on demand (Preserving settings and admin data)
   fastify.post('/admin/database/truncate-test-data', async (req, reply) => {
     try {
+      if (process.env.NODE_ENV === 'production') {
+        return reply.status(403).send({ success: false, error: 'Database truncation is disabled in production.' });
+      }
+      if (!req.body || req.body.confirm !== true) {
+        return reply.status(400).send({ success: false, error: 'Explicit confirmation (confirm: true) is required to truncate test data.' });
+      }
       console.log('Admin request: Executing full system truncate (preserving settings and admin)...');
 
       const tablesRes = await query(`

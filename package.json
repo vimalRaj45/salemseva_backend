@@ -5,6 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:whatsapp": "node src/whatsapp-gateway-server.js",
     "dev": "nodemon src/server.js",
     "test": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_merchant_alert_verification.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs tests/unit_math_guard.test.mjs tests/unit_telegram_alert.test.mjs tests/unit_legal_agreement_enforcement.test.mjs",
     "test:unit": "node --test tests/unit_financial_and_rules.test.mjs tests/unit_dom_shield.test.mjs tests/unit_referral_validation.test.mjs tests/unit_merchant_alert_verification.test.mjs tests/unit_rag_search.test.mjs tests/unit_admin_otp.test.mjs tests/unit_profile_records.test.mjs tests/unit_support_agent.test.mjs tests/unit_math_guard.test.mjs tests/unit_telegram_alert.test.mjs tests/unit_legal_agreement_enforcement.test.mjs",

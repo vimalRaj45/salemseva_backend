@@ -13,6 +13,12 @@ async function reviewsRoutes(fastify, options) {
     } = req.body || {};
 
     const userComment = comment || feedback || '';
+    if (rating !== undefined && rating !== null) {
+      const numRating = Number(rating);
+      if (!Number.isFinite(numRating) || numRating < 1 || numRating > 5) {
+        return reply.status(400).send({ success: false, error: 'Rating must be between 1 and 5' });
+      }
+    }
     const stars = parseFloat(rating) || 5.0;
     const isBelow3Star = stars <= 3.0;
 
