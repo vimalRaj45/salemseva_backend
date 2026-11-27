@@ -22,7 +22,6 @@ async function truncateTransactionalData() {
       'quote_items',
       'bookings',
       'chat_messages',
-      'call_logs',
       'technician_payouts',
       'technician_referrals',
       'technician_rejected_leads',

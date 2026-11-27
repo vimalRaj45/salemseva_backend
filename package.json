@@ -20,6 +20,7 @@
     "truncate": "node src/db/truncate.js",
     "truncate:clean": "node src/db/truncate_except_admin_settings.js --confirm",
     "truncate:full": "node src/db/truncate_except_admin_settings.js",
+    "truncate:keep-users": "node src/db/truncate_except_settings_and_users.js",
     "migrate:10": "node src/db/migrate_schema_to_10_out_of_10.js"
   },
   "dependencies": {
