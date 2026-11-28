@@ -69,9 +69,22 @@ class PushNotificationService {
 
     const dataPayload = {};
     if (payload.type) dataPayload.type = String(payload.type);
-    if (payload.url) dataPayload.url = String(payload.url);
     if (payload.bookingId) dataPayload.bookingId = String(payload.bookingId);
+    if (payload.ticketId) dataPayload.ticketId = String(payload.ticketId);
     if (payload.role) dataPayload.role = String(payload.role);
+
+    const resolvedUrl = payload.url || (
+      payload.type === 'ticket_update' || payload.ticketId
+        ? '/support'
+        : payload.type === 'chat' || payload.type === 'chat_message'
+          ? (payload.bookingId ? `/chat/${payload.bookingId}` : '/notifications')
+          : payload.type === 'new_job' || payload.type === 'payout_settled' || payload.role === 'technician'
+            ? (payload.bookingId ? `/partner?bookingId=${payload.bookingId}` : '/partner')
+            : payload.bookingId
+              ? `/track?bookingId=${payload.bookingId}`
+              : '/notifications'
+    );
+    dataPayload.url = String(resolvedUrl);
 
     const results = [];
     // FCM sendEachForMulticast accepts up to 500 tokens per batch
@@ -87,6 +100,9 @@ class PushNotificationService {
         webpush: {
           notification: {
             icon: '/icons/icon-192x192.png'
+          },
+          fcmOptions: {
+            link: resolvedUrl
           }
         }
       });

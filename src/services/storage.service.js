@@ -83,8 +83,8 @@ async function uploadToS3({ fileData, mimeType = 'image/jpeg', folder = 'uploads
   if (Buffer.isBuffer(fileData)) {
     buffer = fileData;
   } else if (typeof fileData === 'string') {
-    // If it's a data URL like data:image/jpeg;base64,...
-    const matches = fileData.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+    // Support data URLs with optional parameters such as data:audio/webm;codecs=opus;base64,...
+    const matches = fileData.match(/^data:([A-Za-z0-9.+\/-]+)(?:;[^,;]+)*;base64,(.+)$/);
     if (matches && matches.length === 3) {
       mimeType = matches[1];
       buffer = Buffer.from(matches[2], 'base64');

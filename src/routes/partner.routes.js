@@ -1404,9 +1404,18 @@ async function partnerRoutes(fastify, options) {
       const {
         bookingId,
         items = [],
-        partsMode = 'tech_buys',
+        partsMode: rawPartsMode = 'tech_buys',
         notes
       } = req.body || {};
+
+      const PARTS_MODE_MAP = {
+        tech_buys: 'tech_buys',
+        customer_buys: 'customer_buys',
+        no_parts_needed: 'no_parts_needed',
+        none: 'no_parts_needed',
+        no_parts: 'no_parts_needed'
+      };
+      const partsMode = PARTS_MODE_MAP[String(rawPartsMode || '').toLowerCase().trim()] || 'no_parts_needed';
 
       if (!bookingId) {
         return reply.status(400).send({ success: false, error: 'Booking ID is required to create quote' });

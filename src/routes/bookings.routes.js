@@ -1558,6 +1558,17 @@ async function bookingsRoutes(fastify, options) {
 
       const targetId = booking ? booking.id : id;
 
+      const PARTS_MODE_MAP = {
+        tech_buys: 'tech_buys',
+        customer_buys: 'customer_buys',
+        no_parts_needed: 'no_parts_needed',
+        none: 'no_parts_needed',
+        no_parts: 'no_parts_needed'
+      };
+      const normalizedPartsMode = partsMode
+        ? (PARTS_MODE_MAP[String(partsMode).toLowerCase().trim()] || 'no_parts_needed')
+        : null;
+
       let res = await query(`
         UPDATE bookings 
         SET status = $1::booking_status,
@@ -1570,7 +1581,7 @@ async function bookingsRoutes(fastify, options) {
           $1::text <> 'accepted' OR technician_id IS NULL OR ($3::uuid IS NOT NULL AND technician_id = $3::uuid)
         )
         RETURNING *
-      `, [status, targetId, validTechId, partsMode || null]);
+      `, [status, targetId, validTechId, normalizedPartsMode]);
 
       if (res.rows.length === 0 && status === 'accepted') {
         return reply.status(409).send({
