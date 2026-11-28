@@ -1,4 +1,15 @@
-const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const zlib = require('zlib');
+const { PassThrough } = require('stream');
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
+  CreateBucketCommand,
+  HeadBucketCommand
+} = require('@aws-sdk/client-s3');
 
 // Clean environment variables (remove any extraneous quotes)
 const clean = (val) => (val ? val.replace(/^["']|["']$/g, '').trim() : '');
@@ -246,10 +257,163 @@ async function deleteFromS3(keyOrUrl) {
   }
 }
 
+/**
+ * List all objects in the configured S3 bucket (paginated).
+ */
+async function listS3Objects({ prefix = '' } = {}) {
+  if (!s3Client) {
+    throw new Error('S3 Client is not initialized');
+  }
+
+  const cleanPrefix = String(prefix || '').replace(/^\/+/, '');
+  const items = [];
+  let continuationToken;
+
+  do {
+    const command = new ListObjectsV2Command({
+      Bucket: bucketName,
+      Prefix: cleanPrefix || undefined,
+      MaxKeys: 1000,
+      ContinuationToken: continuationToken
+    });
+    const res = await s3Client.send(command);
+    for (const obj of res.Contents || []) {
+      const key = obj.Key || '';
+      const folder = key.includes('/') ? key.split('/')[0] : 'root';
+      items.push({
+        key,
+        folder,
+        fileName: key.split('/').pop() || key,
+        size: Number(obj.Size || 0),
+        lastModified: obj.LastModified ? new Date(obj.LastModified).toISOString() : null,
+        viewUrl: `/api/v1/storage/view?key=${encodeURIComponent(key)}`
+      });
+    }
+    continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (continuationToken);
+
+  items.sort((a, b) => new Date(b.lastModified || 0) - new Date(a.lastModified || 0));
+  return items;
+}
+
+/**
+ * Delete multiple S3 objects by keys (in batches of 1000).
+ */
+async function deleteS3Objects(keys = []) {
+  if (!s3Client) {
+    throw new Error('S3 Client is not initialized');
+  }
+  const cleanKeys = [...new Set((keys || []).map(extractS3Key).filter(Boolean))];
+  if (cleanKeys.length === 0) return { deletedCount: 0, keys: [] };
+
+  let deletedCount = 0;
+  for (let i = 0; i < cleanKeys.length; i += 1000) {
+    const batch = cleanKeys.slice(i, i + 1000);
+    const res = await s3Client.send(
+      new DeleteObjectsCommand({
+        Bucket: bucketName,
+        Delete: {
+          Objects: batch.map(Key => ({ Key })),
+          Quiet: false
+        }
+      })
+    );
+    deletedCount += (res.Deleted || []).length;
+  }
+  return { deletedCount, keys: cleanKeys };
+}
+
+function createTarHeader(filePath, size, mtimeMs = Date.now()) {
+  const header = Buffer.alloc(512, 0);
+  let name = String(filePath || 'file').replace(/^\/+/, '');
+  let prefix = '';
+
+  if (Buffer.byteLength(name) > 100) {
+    const parts = name.split('/');
+    const file = parts.pop();
+    prefix = parts.join('/').slice(0, 155);
+    name = file.slice(0, 100);
+  }
+
+  header.write(name.slice(0, 100), 0, 100, 'utf8');
+  header.write('0000644\0', 100, 8, 'ascii');
+  header.write('0000000\0', 108, 8, 'ascii');
+  header.write('0000000\0', 116, 8, 'ascii');
+  header.write(size.toString(8).padStart(11, '0') + '\0', 124, 12, 'ascii');
+  header.write(Math.floor(mtimeMs / 1000).toString(8).padStart(11, '0') + '\0', 136, 12, 'ascii');
+  header.write('        ', 148, 8, 'ascii'); // checksum placeholder
+  header.write('0', 156, 1, 'ascii');
+  header.write('ustar\0', 257, 6, 'ascii');
+  header.write('00', 263, 2, 'ascii');
+  if (prefix) {
+    header.write(prefix, 345, 155, 'utf8');
+  }
+
+  let chksum = 0;
+  for (let i = 0; i < 512; i++) chksum += header[i];
+  header.write(chksum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'ascii');
+  return header;
+}
+
+async function streamToBuffer(body) {
+  const chunks = [];
+  for await (const chunk of body) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Streams a compressed .tar.gz archive of S3 objects.
+ */
+function createS3TarGzStream({ prefix = '', keys = null } = {}) {
+  const tarStream = new PassThrough();
+  const gzipStream = zlib.createGzip({ level: 6 });
+  tarStream.pipe(gzipStream);
+
+  (async () => {
+    try {
+      let targetKeys = Array.isArray(keys) && keys.length > 0
+        ? [...new Set(keys.map(extractS3Key).filter(Boolean))]
+        : (await listS3Objects({ prefix })).map(o => o.key);
+
+      for (const key of targetKeys) {
+        try {
+          const obj = await getObjectFromS3(key);
+          const buf = await streamToBuffer(obj.stream);
+          const mtime = obj.lastModified ? new Date(obj.lastModified).getTime() : Date.now();
+          tarStream.write(createTarHeader(key, buf.length, mtime));
+          if (buf.length > 0) {
+            tarStream.write(buf);
+            const remainder = buf.length % 512;
+            if (remainder !== 0) {
+              tarStream.write(Buffer.alloc(512 - remainder, 0));
+            }
+          }
+        } catch (itemErr) {
+          console.warn(`[Storage Archive] Skipping ${key}:`, itemErr.message);
+        }
+      }
+
+      // End-of-archive: two 512-byte zero blocks
+      tarStream.write(Buffer.alloc(1024, 0));
+      tarStream.end();
+    } catch (err) {
+      tarStream.destroy(err);
+    }
+  })();
+
+  return gzipStream;
+}
+
 module.exports = {
   uploadToS3,
   getObjectFromS3,
   deleteFromS3,
+  deleteS3Objects,
+  listS3Objects,
+  createS3TarGzStream,
+  createTarHeader,
   extractS3Key,
   bucketName,
   endpoint,

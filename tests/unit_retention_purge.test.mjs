@@ -1,10 +1,15 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { extractS3Key } = require('../src/services/storage.service');
+const { pool } = require('../src/db/db');
+const { extractS3Key, createTarHeader } = require('../src/services/storage.service');
 const { runPurgeCycle, CLOSED_BOOKING_STATUSES } = require('../src/services/retentionPurge.service');
+
+after(async () => {
+  await pool.end().catch(() => {});
+});
 
 test('extractS3Key extracts key from proxy URLs, raw keys, and ignores data URIs', () => {
   assert.equal(
@@ -31,4 +36,11 @@ test('runPurgeCycle dryRun executes cleanly and returns structured retention cou
   assert.equal(typeof res.deleted.otps, 'number');
   assert.equal(typeof res.deleted.notifications, 'number');
   assert.equal(typeof res.deleted.fcmTokens, 'number');
+});
+
+test('createTarHeader builds valid 512-byte POSIX ustar header with checksum', () => {
+  const hdr = createTarHeader('chat_audio/sample.webm', 1234, 1700000000000);
+  assert.equal(hdr.length, 512);
+  assert.equal(hdr.subarray(257, 262).toString('ascii'), 'ustar');
+  assert.equal(hdr.subarray(0, 22).toString('utf8'), 'chat_audio/sample.webm');
 });

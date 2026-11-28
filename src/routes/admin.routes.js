@@ -2436,6 +2436,74 @@ async function adminRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
+
+  // S3 Storage Management: List all uploaded documents/media
+  fastify.get('/admin/storage/objects', async (req, reply) => {
+    try {
+      const { listS3Objects, bucketName } = require('../services/storage.service');
+      const { prefix = '' } = req.query || {};
+      const objects = await listS3Objects({ prefix });
+      const totalBytes = objects.reduce((acc, o) => acc + (o.size || 0), 0);
+      const folders = {};
+      for (const obj of objects) {
+        if (!folders[obj.folder]) folders[obj.folder] = { count: 0, bytes: 0 };
+        folders[obj.folder].count += 1;
+        folders[obj.folder].bytes += obj.size || 0;
+      }
+      return {
+        success: true,
+        bucket: bucketName,
+        totalCount: objects.length,
+        totalBytes,
+        folders,
+        objects
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // S3 Storage Management: Download all (or filtered/selected) files as compressed .tar.gz
+  fastify.get('/admin/storage/archive', async (req, reply) => {
+    try {
+      const { createS3TarGzStream } = require('../services/storage.service');
+      const { prefix = '', keys = '' } = req.query || {};
+      const keyList = keys ? String(keys).split(',').map(k => k.trim()).filter(Boolean) : null;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const fileName = prefix
+        ? `shazuone-s3-${String(prefix).replace(/[^a-zA-Z0-9_-]/g, '_')}-${dateStr}.tar.gz`
+        : `shazuone-s3-backup-${dateStr}.tar.gz`;
+
+      reply.header('Content-Type', 'application/gzip');
+      reply.header('Content-Disposition', `attachment; filename="${fileName}"`);
+      reply.header('Cache-Control', 'no-store');
+      return reply.send(createS3TarGzStream({ prefix, keys: keyList }));
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
+
+  // S3 Storage Management: Delete single or multiple objects
+  const handleDeleteStorageObjects = async (req, reply) => {
+    try {
+      const { deleteS3Objects } = require('../services/storage.service');
+      const { keys = [], key } = req.body || {};
+      const targetKeys = Array.isArray(keys) && keys.length > 0 ? keys : (key ? [key] : []);
+      if (targetKeys.length === 0) {
+        return reply.status(400).send({ success: false, error: 'At least one object key is required.' });
+      }
+      const result = await deleteS3Objects(targetKeys);
+      return { success: true, ...result };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  };
+
+  fastify.delete('/admin/storage/objects', handleDeleteStorageObjects);
+  fastify.post('/admin/storage/delete', handleDeleteStorageObjects);
 }
 
 module.exports = adminRoutes;
