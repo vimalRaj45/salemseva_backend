@@ -97,7 +97,16 @@ class PushNotificationService {
           body: payload.body || ''
         },
         data: dataPayload,
+        android: {
+          priority: 'high',
+          notification: {
+            sound: 'default'
+          }
+        },
         webpush: {
+          headers: {
+            Urgency: 'high'
+          },
           notification: {
             icon: '/icons/icon-192x192.png'
           },
