@@ -25,6 +25,75 @@ const {
 const legalService = require('../services/legalAgreement.service');
 const jwtService = require('../services/jwt.service');
 
+const TURNSTILE_VERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+const DEFAULT_TURNSTILE_HOSTNAMES = new Set([
+  'shazuone.com',
+  'www.shazuone.com',
+  'shazuone.in',
+  'www.shazuone.in',
+  'localhost',
+  '127.0.0.1'
+]);
+
+function getAllowedTurnstileHostnames() {
+  const custom = (process.env.TURNSTILE_ALLOWED_HOSTNAMES || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return custom.length > 0 ? new Set(custom) : DEFAULT_TURNSTILE_HOSTNAMES;
+}
+
+async function verifyTurnstileToken(req, { expectedAction } = {}) {
+  const secret = (process.env.TURNSTILE_SECRET || process.env.CLOUDFLARE_TURNSTILE_SECRET || '').trim();
+  if (!secret) {
+    return { ok: false, status: 503, error: 'Turnstile verification secret is not configured on server.' };
+  }
+
+  const token = String(req.body?.['cf-turnstile-response'] || req.body?.turnstileToken || '').trim();
+  if (!token) {
+    return { ok: false, status: 400, error: 'Please complete the security verification check.' };
+  }
+
+  try {
+    const body = new URLSearchParams({
+      secret,
+      response: token
+    });
+    if (req.ip) {
+      body.set('remoteip', req.ip);
+    }
+
+    const res = await fetch(TURNSTILE_VERIFY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    const data = await res.json();
+
+    if (!data?.success) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'Security verification failed or expired. Please retry.',
+        codes: data?.['error-codes'] || []
+      };
+    }
+
+    if (expectedAction && data.action && data.action !== expectedAction) {
+      return { ok: false, status: 403, error: 'Security verification action mismatch.' };
+    }
+
+    const allowedHosts = getAllowedTurnstileHostnames();
+    if (data.hostname && !allowedHosts.has(String(data.hostname).toLowerCase())) {
+      return { ok: false, status: 403, error: 'Security verification hostname not allowed.' };
+    }
+
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, status: 502, error: 'Unable to reach security verification service. Please retry.' };
+  }
+}
+
 // In-memory challenge store for WebAuthn/Passkey registration and authentication
 // Key: 'reg_<phone>' or 'auth_<phone>' -> { challenge: string, createdAt: number }
 const passkeyChallenges = new Map();
@@ -147,6 +216,11 @@ async function authRoutes(fastify, options) {
   // 1. Production Credentials-Based Login Endpoint (Username / Phone / Email + Password)
   fastify.post('/auth/login', async (req, reply) => {
     try {
+      const turnstile = await verifyTurnstileToken(req, { expectedAction: 'login' });
+      if (!turnstile.ok) {
+        return reply.status(turnstile.status).send({ success: false, error: turnstile.error });
+      }
+
       const { 
         identifier = '', 
         phone = '', 
@@ -386,6 +460,11 @@ async function authRoutes(fastify, options) {
   // 2. Production Account Registration Endpoint
   fastify.post('/auth/register', async (req, reply) => {
     try {
+      const turnstile = await verifyTurnstileToken(req, { expectedAction: 'register' });
+      if (!turnstile.ok) {
+        return reply.status(turnstile.status).send({ success: false, error: turnstile.error });
+      }
+
       const {
         name = '',
         phone = '',
@@ -1166,6 +1245,11 @@ async function authRoutes(fastify, options) {
   // 6. Request 6-digit WhatsApp OTP (with 60-second cooldown & 5-minute expiry)
   fastify.post('/auth/otp/request', async (req, reply) => {
     try {
+      const turnstile = await verifyTurnstileToken(req, { expectedAction: 'otp_request' });
+      if (!turnstile.ok) {
+        return reply.status(turnstile.status).send({ success: false, error: turnstile.error });
+      }
+
       const { phone = '', purpose = 'register' } = req.body || {};
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
 
