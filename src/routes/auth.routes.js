@@ -1317,6 +1317,63 @@ async function authRoutes(fastify, options) {
     }
   });
 
+  // 7b. Verify Phone.Email user_json_url & mark phone verified
+  fastify.post('/auth/otp/verify-phone-email', async (req, reply) => {
+    try {
+      const { userJsonUrl = '', purpose = 'register' } = req.body || {};
+      if (!userJsonUrl || typeof userJsonUrl !== 'string') {
+        return reply.status(400).send({ success: false, error: 'userJsonUrl is required' });
+      }
+
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(userJsonUrl);
+      } catch (_) {
+        return reply.status(400).send({ success: false, error: 'Invalid userJsonUrl format' });
+      }
+
+      if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'user.phone.email') {
+        return reply.status(400).send({
+          success: false,
+          error: 'Untrusted Phone.Email verification URL'
+        });
+      }
+
+      const peRes = await fetch(parsedUrl.toString(), {
+        headers: { Accept: 'application/json' }
+      });
+      if (!peRes.ok) {
+        return reply.status(401).send({
+          success: false,
+          error: `Phone.Email verification failed (${peRes.status})`
+        });
+      }
+
+      const peData = await peRes.json();
+      const rawPhone = String(peData?.user_phone_number || '').replace(/\D/g, '');
+      const cleanPhone = rawPhone.slice(-10);
+      if (cleanPhone.length !== 10) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Phone.Email response did not contain a valid 10-digit mobile number'
+        });
+      }
+
+      const result = await completePhoneVerification(cleanPhone, purpose);
+      const firstName = String(peData?.user_first_name || '').trim();
+      const lastName = String(peData?.user_last_name || '').trim();
+      return {
+        ...result,
+        phone: cleanPhone,
+        countryCode: peData?.user_country_code || '+91',
+        fullName: [firstName, lastName].filter(Boolean).join(' ')
+      };
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(500).send({ success: false, error: e.message || 'Phone.Email verification failed' });
+    }
+  });
+
   // 7. Verify 6-digit OTP & mark phone verified (supports Firebase ID token or DB OTP fallback)
   fastify.post('/auth/otp/verify', async (req, reply) => {
     try {
