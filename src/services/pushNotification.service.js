@@ -122,7 +122,13 @@ class PushNotificationService {
           results.push({ success: true, channel: 'fcm', token: batch[i] });
         } else {
           const code = r.error?.code || '';
-          if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+          const msg = r.error?.message || '';
+          if (
+            code === 'messaging/registration-token-not-registered' ||
+            code === 'messaging/invalid-registration-token' ||
+            code === 'messaging/mismatched-credential' ||
+            msg.includes('THIRD_PARTY_PERMISSION_DENIED')
+          ) {
             await this.removeFcmToken(batch[i]).catch(() => {});
           }
           results.push({ success: false, channel: 'fcm', error: r.error?.message });
