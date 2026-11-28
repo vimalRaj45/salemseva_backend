@@ -1317,40 +1317,106 @@ async function authRoutes(fastify, options) {
     }
   });
 
-  // 7b. Verify Phone.Email user_json_url & mark phone verified
+  // 7b-0. Browser-to-App Deep Link Callback for Phone.Email in Capacitor Android
+  fastify.get('/auth/phone-email/callback', async (req, reply) => {
+    const qs = new URLSearchParams(req.query || {}).toString();
+    const deepLink = `shazuone://auth/phone-email${qs ? `?${qs}` : ''}`;
+    const safeHref = deepLink.replace(/"/g, '&quot;');
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Returning to Shazu One...</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; background:#F8FAFC; color:#0F172A; }
+    .card { background:#fff; border:1px solid #E2E8F0; border-radius:12px; padding:24px; max-width:340px; text-align:center; }
+    .btn { display:inline-block; margin-top:16px; background:#0284C7; color:#fff; text-decoration:none; padding:12px 20px; border-radius:8px; font-weight:700; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2 style="margin:0 0 8px;font-size:18px;">Mobile Verified</h2>
+    <p style="margin:0;font-size:13px;color:#475569;">Returning you to the Shazu One app...</p>
+    <a class="btn" href="${safeHref}">Open Shazu One</a>
+  </div>
+  <script>window.location.replace(${JSON.stringify(deepLink)});</script>
+</body>
+</html>`;
+  });
+
+  // 7b. Verify Phone.Email user_json_url OR access_token/phtoken & mark phone verified
   fastify.post('/auth/otp/verify-phone-email', async (req, reply) => {
     try {
-      const { userJsonUrl = '', purpose = 'register' } = req.body || {};
-      if (!userJsonUrl || typeof userJsonUrl !== 'string') {
-        return reply.status(400).send({ success: false, error: 'userJsonUrl is required' });
-      }
+      const { userJsonUrl = '', accessToken = '', phtoken = '', clientId = '', purpose = 'register' } = req.body || {};
+      const token = String(accessToken || phtoken || '').trim();
 
-      let parsedUrl;
-      try {
-        parsedUrl = new URL(userJsonUrl);
-      } catch (_) {
-        return reply.status(400).send({ success: false, error: 'Invalid userJsonUrl format' });
-      }
+      let rawPhone = '';
+      let countryCode = '+91';
+      let firstName = '';
+      let lastName = '';
 
-      if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'user.phone.email') {
-        return reply.status(400).send({
-          success: false,
-          error: 'Untrusted Phone.Email verification URL'
+      if (userJsonUrl && typeof userJsonUrl === 'string') {
+        let parsedUrl;
+        try {
+          parsedUrl = new URL(userJsonUrl);
+        } catch (_) {
+          return reply.status(400).send({ success: false, error: 'Invalid userJsonUrl format' });
+        }
+
+        if (parsedUrl.protocol !== 'https:' || parsedUrl.hostname !== 'user.phone.email') {
+          return reply.status(400).send({
+            success: false,
+            error: 'Untrusted Phone.Email verification URL'
+          });
+        }
+
+        const peRes = await fetch(parsedUrl.toString(), {
+          headers: { Accept: 'application/json' }
         });
-      }
+        if (!peRes.ok) {
+          return reply.status(401).send({
+            success: false,
+            error: `Phone.Email verification failed (${peRes.status})`
+          });
+        }
 
-      const peRes = await fetch(parsedUrl.toString(), {
-        headers: { Accept: 'application/json' }
-      });
-      if (!peRes.ok) {
-        return reply.status(401).send({
-          success: false,
-          error: `Phone.Email verification failed (${peRes.status})`
+        const peData = await peRes.json();
+        rawPhone = String(peData?.user_phone_number || '').replace(/\D/g, '');
+        countryCode = peData?.user_country_code || '+91';
+        firstName = String(peData?.user_first_name || '').trim();
+        lastName = String(peData?.user_last_name || '').trim();
+      } else if (token) {
+        const resolvedClientId = String(clientId || process.env.PHONE_EMAIL_CLIENT_ID || '').trim();
+        if (!resolvedClientId) {
+          return reply.status(400).send({ success: false, error: 'clientId is required for token verification' });
+        }
+
+        const formBody = new URLSearchParams({
+          access_token: token,
+          client_id: resolvedClientId
         });
+        const peRes = await fetch('https://eapi.phone.email/getuser', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+          body: formBody.toString()
+        });
+        const peData = await peRes.json().catch(() => ({}));
+        if (!peRes.ok || Number(peData?.status) !== 200) {
+          return reply.status(401).send({
+            success: false,
+            error: peData?.message || `Phone.Email token verification failed (${peRes.status})`
+          });
+        }
+        rawPhone = String(peData?.phone_no || peData?.user_phone_number || '').replace(/\D/g, '');
+        countryCode = peData?.country_code || '+91';
+        firstName = String(peData?.first_name || '').trim();
+        lastName = String(peData?.last_name || '').trim();
+      } else {
+        return reply.status(400).send({ success: false, error: 'userJsonUrl or accessToken is required' });
       }
 
-      const peData = await peRes.json();
-      const rawPhone = String(peData?.user_phone_number || '').replace(/\D/g, '');
       const cleanPhone = rawPhone.slice(-10);
       if (cleanPhone.length !== 10) {
         return reply.status(400).send({
@@ -1360,12 +1426,10 @@ async function authRoutes(fastify, options) {
       }
 
       const result = await completePhoneVerification(cleanPhone, purpose);
-      const firstName = String(peData?.user_first_name || '').trim();
-      const lastName = String(peData?.user_last_name || '').trim();
       return {
         ...result,
         phone: cleanPhone,
-        countryCode: peData?.user_country_code || '+91',
+        countryCode,
         fullName: [firstName, lastName].filter(Boolean).join(' ')
       };
     } catch (e) {
