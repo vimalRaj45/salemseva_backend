@@ -225,11 +225,13 @@ if (!process.env.INTERNAL_API_KEY) {
 }
 
 const PORT = process.env.PORT || 8080;
+const { startAutoPurgeScheduler } = require('./services/retentionPurge.service');
 
 const start = async () => {
   try {
     await fastify.listen({ port: PORT, host: '0.0.0.0' });
     console.log(` Shazu One Fastify Server running at http://localhost:${PORT}`);
+    startAutoPurgeScheduler();
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

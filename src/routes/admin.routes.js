@@ -2423,6 +2423,19 @@ async function adminRoutes(fastify, options) {
       return reply.status(500).send({ success: false, error: err.message });
     }
   });
+
+  // Manual or scheduled retention purge for old chats, expired OTPs, stale tokens & notifications
+  fastify.post('/admin/maintenance/purge', async (req, reply) => {
+    try {
+      const { runPurgeCycle } = require('../services/retentionPurge.service');
+      const { dryRun = false, chatDays, notifDays, tokenDays } = req.body || {};
+      const summary = await runPurgeCycle({ dryRun, chatDays, notifDays, tokenDays });
+      return { success: true, ...summary };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ success: false, error: err.message });
+    }
+  });
 }
 
 module.exports = adminRoutes;

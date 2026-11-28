@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, CreateBucketCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 
 // Clean environment variables (remove any extraneous quotes)
 const clean = (val) => (val ? val.replace(/^["']|["']$/g, '').trim() : '');
@@ -201,9 +201,56 @@ async function getObjectFromS3(key) {
   };
 }
 
+/**
+ * Extract S3 object key from a proxy URL (/api/v1/storage/view?key=...), S3 URL, or raw key.
+ * Returns null for data: URIs or empty values.
+ */
+function extractS3Key(keyOrUrl) {
+  if (!keyOrUrl || typeof keyOrUrl !== 'string') return null;
+  const trimmed = keyOrUrl.trim();
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return null;
+
+  if (trimmed.includes('/storage/view')) {
+    try {
+      const parsed = new URL(trimmed, 'http://localhost');
+      const k = parsed.searchParams.get('key');
+      if (k) return k.replace(/^\/+/, '');
+    } catch (_) {}
+  }
+
+  if (trimmed.includes(`${bucketName}/`)) {
+    const parts = trimmed.split(`${bucketName}/`);
+    if (parts.length > 1 && parts[1]) {
+      return decodeURIComponent(parts.slice(1).join(`${bucketName}/`)).replace(/^\/+/, '');
+    }
+  }
+
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+    return trimmed.replace(/^\/+/, '');
+  }
+  return null;
+}
+
+/**
+ * Delete an object from S3-compatible storage by key or storage URL.
+ */
+async function deleteFromS3(keyOrUrl) {
+  const cleanKey = extractS3Key(keyOrUrl);
+  if (!cleanKey || !s3Client) return { deleted: false, key: cleanKey };
+  try {
+    await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: cleanKey }));
+    return { deleted: true, key: cleanKey };
+  } catch (err) {
+    console.warn(`[Storage] Failed to delete S3 object ${cleanKey}:`, err.message);
+    return { deleted: false, key: cleanKey, error: err.message };
+  }
+}
+
 module.exports = {
   uploadToS3,
   getObjectFromS3,
+  deleteFromS3,
+  extractS3Key,
   bucketName,
   endpoint,
   MAX_FILE_SIZE
