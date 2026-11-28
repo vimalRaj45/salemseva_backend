@@ -2459,6 +2459,25 @@ async function bookingsRoutes(fastify, options) {
         [id, normalizedRole, resolvedSenderName, resolvedText, resolvedAttachment || null]
       );
 
+      // Dispatch background FCM / Push notification to the other party in the booking
+      const targetRole = normalizedRole === 'customer' ? 'technician' : 'customer';
+      const previewBody = resolvedAttachment && resolvedText.startsWith('Voice Note')
+        ? `Sent a voice note (${resolvedText})`
+        : resolvedText.slice(0, 120);
+      pushService.sendPushToBookingParty({
+        bookingId: id,
+        targetRole,
+        payload: {
+          title: `New Message from ${resolvedSenderName}`,
+          body: previewBody || 'Tap to view chat message',
+          type: 'chat',
+          bookingId: id,
+          role: targetRole,
+          tag: `chat-${id}`,
+          url: `/chat/${id}`
+        }
+      }).catch(() => {});
+
       return {
         success: true,
         message: formatChatMessageRow(insRes.rows[0])
