@@ -1,6 +1,7 @@
 const { query } = require('../db/db');
 const crypto = require('crypto');
 const whatsAppGateway = require('../services/whatsapp.service');
+const firebaseAuthService = require('../services/firebase-auth.service');
 const {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -1226,10 +1227,106 @@ async function authRoutes(fastify, options) {
     }
   });
 
-  // 7. Verify 6-digit WhatsApp OTP & mark phone verified
+  // Shared phone verification completion (used by both Firebase Phone Auth and DB OTP fallback)
+  async function completePhoneVerification(cleanPhone, purpose = 'register') {
+    await query(`
+      UPDATE users SET is_phone_verified = TRUE 
+      WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+    `, [cleanPhone]);
+    await query(`
+      UPDATE technicians SET is_phone_verified = TRUE 
+      WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+    `, [cleanPhone]);
+
+    const verificationToken = 'vtok_' + Date.now() + '_' + crypto.randomBytes(16).toString('hex');
+    verificationTokens.set(verificationToken, {
+      phone: cleanPhone,
+      purpose,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 15 * 60 * 1000
+    });
+
+    const custRes = await query(`
+      SELECT * FROM users 
+      WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+      LIMIT 1
+    `, [cleanPhone]);
+
+    const techRes = await query(`
+      SELECT * FROM technicians 
+      WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
+      LIMIT 1
+    `, [cleanPhone]);
+
+    let existingUser = null;
+    if (custRes.rows.length > 0) {
+      const u = custRes.rows[0];
+      let refCount = 0;
+      try {
+        const refCountRes = await query(`
+          SELECT COUNT(*)::int as count FROM users 
+          WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
+        `, [u.referral_code || '', cleanPhone]);
+        refCount = refCountRes.rows[0]?.count || 0;
+      } catch (_) {}
+      existingUser = formatCustomerUser(u, cleanPhone, refCount);
+    } else if (techRes.rows.length > 0) {
+      existingUser = formatTechnicianUser(techRes.rows[0], cleanPhone);
+    }
+
+    let authToken = null;
+    if (existingUser) {
+      authToken = jwtService.signToken({
+        id: existingUser.id,
+        role: existingUser.role,
+        phone: existingUser.phone,
+        name: existingUser.name,
+        locality: existingUser.locality
+      });
+    }
+
+    return {
+      success: true,
+      verified: true,
+      isExistingUser: Boolean(existingUser),
+      hasCustomerAccount: custRes.rows.length > 0,
+      hasTechnicianAccount: techRes.rows.length > 0,
+      token: authToken,
+      user: existingUser,
+      verificationToken,
+      message: 'Mobile number verified successfully'
+    };
+  }
+
+  // 7a. Verify Firebase Phone Auth ID Token & mark phone verified
+  fastify.post('/auth/otp/verify-firebase', async (req, reply) => {
+    try {
+      const { idToken = '', phone = '', purpose = 'register' } = req.body || {};
+      const verified = await firebaseAuthService.verifyPhoneIdToken(idToken);
+      const requestedPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
+      if (requestedPhone && requestedPhone.length === 10 && requestedPhone !== verified.cleanPhone) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Verified Firebase phone number does not match the entered mobile number.'
+        });
+      }
+      return await completePhoneVerification(verified.cleanPhone, purpose);
+    } catch (e) {
+      fastify.log.error(e);
+      return reply.status(401).send({ success: false, error: e.message || 'Firebase phone verification failed' });
+    }
+  });
+
+  // 7. Verify 6-digit OTP & mark phone verified (supports Firebase ID token or DB OTP fallback)
   fastify.post('/auth/otp/verify', async (req, reply) => {
     try {
-      const { phone = '', otp = '', purpose = 'register' } = req.body || {};
+      const { phone = '', otp = '', purpose = 'register', firebaseIdToken = '' } = req.body || {};
+
+      if (firebaseIdToken) {
+        const verified = await firebaseAuthService.verifyPhoneIdToken(firebaseIdToken);
+        return await completePhoneVerification(verified.cleanPhone, purpose);
+      }
+
       const cleanPhone = (phone || '').replace(/[\s\-\(\)\+]/g, '').slice(-10);
       const cleanOtp = (otp || '').toString().trim();
 
@@ -1269,83 +1366,14 @@ async function authRoutes(fastify, options) {
         await query(`UPDATE otp_verifications SET attempts = attempts + 1 WHERE id = $1`, [record.id]);
         return reply.status(400).send({
           success: false,
-          error: 'Incorrect OTP code. Please check your WhatsApp and retry.'
+          error: 'Incorrect OTP code. Please check your message and retry.'
         });
       }
 
       // Mark OTP as verified
       await query(`UPDATE otp_verifications SET verified = TRUE WHERE id = $1`, [record.id]);
 
-      // Mark user/technician as phone verified in DB
-      await query(`
-        UPDATE users SET is_phone_verified = TRUE 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-      `, [cleanPhone]);
-      await query(`
-        UPDATE technicians SET is_phone_verified = TRUE 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-      `, [cleanPhone]);
-
-      // Create secure verification token valid for 15 minutes
-      const verificationToken = 'vtok_' + Date.now() + '_' + crypto.randomBytes(16).toString('hex');
-      verificationTokens.set(verificationToken, {
-        phone: cleanPhone,
-        purpose,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 15 * 60 * 1000
-      });
-
-      // Check if user already exists
-      const custRes = await query(`
-        SELECT * FROM users 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-        LIMIT 1
-      `, [cleanPhone]);
-
-      const techRes = await query(`
-        SELECT * FROM technicians 
-        WHERE RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = $1
-        LIMIT 1
-      `, [cleanPhone]);
-
-      let existingUser = null;
-      if (custRes.rows.length > 0) {
-        const u = custRes.rows[0];
-        let refCount = 0;
-        try {
-          const refCountRes = await query(`
-            SELECT COUNT(*)::int as count FROM users 
-            WHERE referred_by = $1 OR (referred_by IS NOT NULL AND RIGHT(REGEXP_REPLACE(referred_by, '[^0-9]', '', 'g'), 10) = $2)
-          `, [u.referral_code || '', cleanPhone]);
-          refCount = refCountRes.rows[0]?.count || 0;
-        } catch (_) {}
-        existingUser = formatCustomerUser(u, cleanPhone, refCount);
-      } else if (techRes.rows.length > 0) {
-        existingUser = formatTechnicianUser(techRes.rows[0], cleanPhone);
-      }
-
-      let authToken = null;
-      if (existingUser) {
-        authToken = jwtService.signToken({
-          id: existingUser.id,
-          role: existingUser.role,
-          phone: existingUser.phone,
-          name: existingUser.name,
-          locality: existingUser.locality
-        });
-      }
-
-      return {
-        success: true,
-        verified: true,
-        isExistingUser: Boolean(existingUser),
-        hasCustomerAccount: custRes.rows.length > 0,
-        hasTechnicianAccount: techRes.rows.length > 0,
-        token: authToken,
-        user: existingUser,
-        verificationToken,
-        message: 'Mobile number verified successfully'
-      };
+      return await completePhoneVerification(cleanPhone, purpose);
     } catch (e) {
       fastify.log.error(e);
       return reply.status(500).send({ success: false, error: e.message });

@@ -75,31 +75,45 @@ async function notificationsRoutes(fastify, options) {
     };
   });
 
-  // 2. Save Client Push Subscription
+  // 2. Save Client Push Subscription (Web Push VAPID and/or Firebase FCM token)
   fastify.post('/notifications/subscribe', async (req, reply) => {
     try {
-      const { subscription, phone, role = 'customer', bookingId = null } = req.body || {};
+      const { subscription, fcmToken = null, phone, role = 'customer', bookingId = null } = req.body || {};
 
-      if (!subscription || !subscription.endpoint || !subscription.keys) {
+      if ((!subscription || !subscription.endpoint || !subscription.keys) && !fcmToken) {
         return reply.status(400).send({
           success: false,
-          error: 'Valid push subscription object with endpoint and keys is required'
+          error: 'Valid push subscription object or fcmToken is required'
         });
       }
 
-      const record = await pushService.saveSubscription({
-        phone,
-        role,
-        bookingId,
-        endpoint: subscription.endpoint,
-        p256dh: subscription.keys.p256dh,
-        auth: subscription.keys.auth
-      });
+      let record = null;
+      if (subscription && subscription.endpoint && subscription.keys) {
+        record = await pushService.saveSubscription({
+          phone,
+          role,
+          bookingId,
+          endpoint: subscription.endpoint,
+          p256dh: subscription.keys.p256dh,
+          auth: subscription.keys.auth
+        });
+      }
+
+      let fcmRecord = null;
+      if (fcmToken) {
+        fcmRecord = await pushService.saveFcmToken({
+          phone,
+          role,
+          bookingId,
+          token: fcmToken
+        });
+      }
 
       return {
         success: true,
         message: 'Push subscription registered successfully',
-        subscriptionId: record.id
+        subscriptionId: record?.id || null,
+        fcmTokenId: fcmRecord?.id || null
       };
     } catch (err) {
       req.log.error('Subscription error:', err);

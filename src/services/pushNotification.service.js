@@ -1,5 +1,6 @@
 const { query } = require('../db/db');
 const { webpush, vapidPublicKey } = require('../config/vapid');
+const firebaseAuthService = require('./firebase-auth.service');
 
 function cleanPhone(raw) {
   if (!raw) return '';
@@ -12,6 +13,115 @@ class PushNotificationService {
     this.publicKey = vapidPublicKey;
     this.sseClients = new Set();
     this.tableReady = false;
+    this.fcmTableReady = false;
+  }
+
+  async ensureFcmTable() {
+    if (this.fcmTableReady) return;
+    try {
+      await query(`
+        CREATE TABLE IF NOT EXISTS fcm_tokens (
+          id SERIAL PRIMARY KEY,
+          user_phone VARCHAR(30) DEFAULT '',
+          user_role VARCHAR(20) DEFAULT 'customer',
+          booking_id VARCHAR(50),
+          token TEXT UNIQUE NOT NULL,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_fcm_tokens_phone ON fcm_tokens (user_phone);
+      `);
+      this.fcmTableReady = true;
+    } catch (_) {}
+  }
+
+  async saveFcmToken({ phone = '', role = 'customer', bookingId = null, token }) {
+    if (!token) return null;
+    await this.ensureFcmTable();
+    const normalizedPhone = cleanPhone(phone);
+    const res = await query(
+      `INSERT INTO fcm_tokens (user_phone, user_role, booking_id, token, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (token)
+       DO UPDATE SET
+         user_phone = CASE
+           WHEN EXCLUDED.user_phone IS NOT NULL AND EXCLUDED.user_phone != '' THEN EXCLUDED.user_phone
+           ELSE fcm_tokens.user_phone
+         END,
+         user_role = COALESCE(EXCLUDED.user_role, fcm_tokens.user_role),
+         booking_id = COALESCE(EXCLUDED.booking_id, fcm_tokens.booking_id),
+         updated_at = NOW()
+       RETURNING id, user_phone, user_role, token`,
+      [normalizedPhone, role, bookingId ? String(bookingId) : null, token]
+    );
+    return res.rows[0];
+  }
+
+  async removeFcmToken(token) {
+    if (!token) return;
+    await this.ensureFcmTable();
+    await query('DELETE FROM fcm_tokens WHERE token = $1', [token]);
+  }
+
+  async _sendFcmToTokens(tokens, payload = {}) {
+    const messaging = firebaseAuthService.getMessaging();
+    const uniqueTokens = [...new Set((tokens || []).filter(Boolean))];
+    if (!messaging || uniqueTokens.length === 0) return [];
+
+    const dataPayload = {};
+    if (payload.type) dataPayload.type = String(payload.type);
+    if (payload.url) dataPayload.url = String(payload.url);
+    if (payload.bookingId) dataPayload.bookingId = String(payload.bookingId);
+    if (payload.role) dataPayload.role = String(payload.role);
+
+    const results = [];
+    // FCM sendEachForMulticast accepts up to 500 tokens per batch
+    for (let offset = 0; offset < uniqueTokens.length; offset += 500) {
+      const batch = uniqueTokens.slice(offset, offset + 500);
+      const response = await messaging.sendEachForMulticast({
+        tokens: batch,
+        notification: {
+          title: payload.title || 'Shazu One Update',
+          body: payload.body || ''
+        },
+        data: dataPayload,
+        webpush: {
+          notification: {
+            icon: '/icons/icon-192x192.png'
+          }
+        }
+      });
+
+      for (let i = 0; i < response.responses.length; i++) {
+        const r = response.responses[i];
+        if (r.success) {
+          results.push({ success: true, channel: 'fcm', token: batch[i] });
+        } else {
+          const code = r.error?.code || '';
+          if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+            await this.removeFcmToken(batch[i]).catch(() => {});
+          }
+          results.push({ success: false, channel: 'fcm', error: r.error?.message });
+        }
+      }
+    }
+    return results;
+  }
+
+  async sendFcmToPhone({ phone, role, payload = {} }) {
+    const normalizedPhone = cleanPhone(phone);
+    if (!normalizedPhone) return [];
+
+    await this.ensureFcmTable();
+    let sql = `SELECT token FROM fcm_tokens WHERE (user_phone = $1 OR user_phone LIKE '%' || $1)`;
+    const params = [normalizedPhone];
+    if (role) {
+      sql += ' AND (user_role = $2 OR user_role IS NULL)';
+      params.push(role);
+    }
+
+    const res = await query(sql, params);
+    const tokens = (res.rows || []).map(r => r.token).filter(Boolean);
+    return this._sendFcmToTokens(tokens, payload);
   }
 
   async ensureNotificationsTable() {
@@ -241,6 +351,8 @@ class PushNotificationService {
     this.saveNotificationRecord({ phone: normalizedPhone, role: role || 'customer', bookingId: payload?.bookingId, payload });
     this.emitRealtime({ phone: normalizedPhone, role, bookingId: payload?.bookingId, payload });
 
+    const fcmResults = await this.sendFcmToPhone({ phone: normalizedPhone, role, payload }).catch(() => []);
+
     let sql = `
       SELECT * FROM push_subscriptions 
       WHERE (user_phone = $1 OR user_phone LIKE '%' || $1)
@@ -254,11 +366,12 @@ class PushNotificationService {
 
     const res = await query(sql, params);
     if (!res.rows || res.rows.length === 0) {
-      return [];
+      return fcmResults;
     }
 
     const promises = res.rows.map(sub => this.sendToSubscription(sub, payload, options));
-    return Promise.all(promises);
+    const webPushResults = await Promise.all(promises);
+    return [...fcmResults, ...webPushResults];
   }
 
   // 5. Send push to booking parties (Customer or Technician) with automatic booking_id fallback
@@ -297,14 +410,26 @@ class PushNotificationService {
 
       // If no phone match was found, fallback to match by bookingId & targetRole
       if (!results || results.length === 0) {
+        await this.ensureFcmTable();
+        const fcmFallback = await query(
+          'SELECT token FROM fcm_tokens WHERE booking_id = $1 AND (user_role = $2 OR user_role IS NULL)',
+          [String(bookingId), targetRole]
+        );
+        const fcmRes = await this._sendFcmToTokens(
+          (fcmFallback.rows || []).map(r => r.token),
+          { bookingId, role: targetRole, ...payload }
+        ).catch(() => []);
+
         const fallbackRes = await query(
           'SELECT * FROM push_subscriptions WHERE booking_id = $1 AND (user_role = $2 OR user_role IS NULL)',
           [bookingId, targetRole]
         );
+        let webRes = [];
         if (fallbackRes.rows && fallbackRes.rows.length > 0) {
           const promises = fallbackRes.rows.map(sub => this.sendToSubscription(sub, { bookingId, ...payload }, options));
-          results = await Promise.all(promises);
+          webRes = await Promise.all(promises);
         }
+        results = [...fcmRes, ...webRes];
       }
 
       return results;
@@ -314,14 +439,23 @@ class PushNotificationService {
     return [];
   }
 
-  // 6. Broadcast push to all active technicians
+  // 6. Broadcast push to all active users/technicians of a role
   async sendPushToRole({ role, payload, options = {} }) {
     try {
       this.emitRealtime({ role, payload });
+
+      await this.ensureFcmTable();
+      const fcmResRows = await query('SELECT token FROM fcm_tokens WHERE user_role = $1', [role]);
+      const fcmResults = await this._sendFcmToTokens(
+        (fcmResRows.rows || []).map(r => r.token),
+        { role, ...payload }
+      ).catch(() => []);
+
       const res = await query('SELECT * FROM push_subscriptions WHERE user_role = $1', [role]);
-      if (!res.rows || res.rows.length === 0) return [];
+      if (!res.rows || res.rows.length === 0) return fcmResults;
       const promises = res.rows.map(sub => this.sendToSubscription(sub, payload, options));
-      return Promise.all(promises);
+      const webResults = await Promise.all(promises);
+      return [...fcmResults, ...webResults];
     } catch (e) {
       console.warn('Error broadcasting push to role:', e.message);
       return [];
